@@ -277,13 +277,19 @@ string S3FileSystem::InitializeMultipartUpload(S3FileHandle &file_handle) {
 	string query_param = "uploads=";
 	auto res = s3fs.PostRequest(file_handle, file_handle.path, {}, response_buffer, response_buffer_len, nullptr, 0,
 	                            query_param);
+
+	if (res->code != 200) {
+		throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %s)", res->http_url, res->error,
+							to_string(res->code));
+	}
+
 	string result(response_buffer.get(), response_buffer_len);
 
 	auto open_tag_pos = result.find("<UploadId>", 0);
 	auto close_tag_pos = result.find("</UploadId>", open_tag_pos);
 
 	if (open_tag_pos == string::npos || close_tag_pos == string::npos) {
-		throw std::runtime_error("Unexpected response while initializing S3 multipart upload");
+		throw IOException("Unexpected response while initializing S3 multipart upload");
 	}
 
 	open_tag_pos += 10; // Skip open tag
@@ -315,7 +321,7 @@ void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuf
 		                      query_param);
 
 		if (res->code != 200) {
-			throw HTTPException(*res, "Unable to connect to URL %s %s (HTTP code %s)", res->http_url, res->error,
+			throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %s)", res->http_url, res->error,
 			                    to_string(res->code));
 		}
 
