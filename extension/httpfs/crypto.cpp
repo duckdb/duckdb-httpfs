@@ -112,6 +112,7 @@ size_t AESGCMStateSSL::Finalize(data_ptr_t out, idx_t out_len, data_ptr_t tag, i
 
 	switch (mode) {
 	case ENCRYPT:
+	{
 		if (1 != EVP_EncryptFinal_ex(gcm_context, data_ptr_cast(out) + out_len, reinterpret_cast<int *>(&out_len))) {
 			throw InternalException("EncryptFinal failed");
 		}
@@ -121,7 +122,9 @@ size_t AESGCMStateSSL::Finalize(data_ptr_t out, idx_t out_len, data_ptr_t tag, i
 			throw InternalException("Calculating the tag failed");
 		}
 		return text_len;
+	}
 	case DECRYPT:
+	{
 		// Set expected tag value
 		if (!EVP_CIPHER_CTX_ctrl(gcm_context, EVP_CTRL_GCM_SET_TAG, tag_len, tag)) {
 			throw InternalException("Finalizing tag failed");
@@ -135,6 +138,9 @@ size_t AESGCMStateSSL::Finalize(data_ptr_t out, idx_t out_len, data_ptr_t tag, i
 			return text_len;
 		}
 		throw InvalidInputException("Computed AES tag differs from read AES tag, are you using the right key?");
+	}
+	default:
+		throw InternalException("Unhandled encryption mode %d", static_cast<int>(mode));
 	}
 }
 
