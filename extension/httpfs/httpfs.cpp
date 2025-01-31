@@ -181,7 +181,7 @@ HTTPFileSystem::RunRequestWithRetry(const std::function<duckdb_httplib_openssl::
 			} else if (err == duckdb_httplib_openssl::Error::Success) {
 				throw HTTPException(response, "Request returned HTTP %d for HTTP %s to '%s'", status, method, url);
 			} else {
-				throw IOException("%s error for HTTP %s to '%s'", to_string(err), method, url);
+				throw IOException("%s error for HTTP %s to '%s' with status %d", to_string(err), method, url, status);
 			}
 		}
 	}
