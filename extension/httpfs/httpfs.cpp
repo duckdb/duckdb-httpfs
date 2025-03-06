@@ -504,7 +504,6 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 			throw InternalException("Cached file not initialized properly");
 		}
 		memcpy(buffer, hfh.cached_file_handle->GetData() + location, nr_bytes);
-		hfh.file_offset = location + nr_bytes;
 		return;
 	}
 
@@ -515,22 +514,23 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	bool skip_buffer = hfh.flags.DirectIO() || hfh.flags.RequireParallelAccess();
 	if (skip_buffer && to_read > 0) {
 		GetRangeRequest(hfh, hfh.path, {}, location, (char *)buffer, to_read);
+
+		std::lock_guard<std::mutex> lck(hfh.mu);
 		hfh.buffer_available = 0;
 		hfh.buffer_idx = 0;
-		hfh.file_offset = location + nr_bytes;
 		return;
 	}
 
 	if (location >= hfh.buffer_start && location < hfh.buffer_end) {
-		hfh.file_offset = location;
 		hfh.buffer_idx = location - hfh.buffer_start;
 		hfh.buffer_available = (hfh.buffer_end - hfh.buffer_start) - hfh.buffer_idx;
 	} else {
 		// reset buffer
 		hfh.buffer_available = 0;
 		hfh.buffer_idx = 0;
-		hfh.file_offset = location;
 	}
+
+	idx_t start_offset = location;  // Start file offset to read from.
 	while (to_read > 0) {
 		auto buffer_read_len = MinValue<idx_t>(hfh.buffer_available, to_read);
 		if (buffer_read_len > 0) {
@@ -542,25 +542,25 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 
 			hfh.buffer_idx += buffer_read_len;
 			hfh.buffer_available -= buffer_read_len;
-			hfh.file_offset += buffer_read_len;
+			start_offset += buffer_read_len;
 		}
 
 		if (to_read > 0 && hfh.buffer_available == 0) {
-			auto new_buffer_available = MinValue<idx_t>(hfh.READ_BUFFER_LEN, hfh.length - hfh.file_offset);
+			auto new_buffer_available = MinValue<idx_t>(hfh.READ_BUFFER_LEN, hfh.length - start_offset);
 
 			// Bypass buffer if we read more than buffer size
 			if (to_read > new_buffer_available) {
 				GetRangeRequest(hfh, hfh.path, {}, location + buffer_offset, (char *)buffer + buffer_offset, to_read);
 				hfh.buffer_available = 0;
 				hfh.buffer_idx = 0;
-				hfh.file_offset += to_read;
+				start_offset += to_read;
 				break;
 			} else {
-				GetRangeRequest(hfh, hfh.path, {}, hfh.file_offset, (char *)hfh.read_buffer.get(),
+				GetRangeRequest(hfh, hfh.path, {}, start_offset, (char *)hfh.read_buffer.get(),
 				                new_buffer_available);
 				hfh.buffer_available = new_buffer_available;
 				hfh.buffer_idx = 0;
-				hfh.buffer_start = hfh.file_offset;
+				hfh.buffer_start = start_offset;
 				hfh.buffer_end = hfh.buffer_start + new_buffer_available;
 			}
 		}
@@ -568,10 +568,11 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 }
 
 int64_t HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
-	auto &hfh = (HTTPFileHandle &)handle;
+	auto &hfh = handle.Cast<HTTPFileHandle>();
 	idx_t max_read = hfh.length - hfh.file_offset;
 	nr_bytes = MinValue<idx_t>(max_read, nr_bytes);
 	Read(handle, buffer, nr_bytes, hfh.file_offset);
+	hfh.file_offset += nr_bytes;
 	return nr_bytes;
 }
 
@@ -580,7 +581,7 @@ void HTTPFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, i
 }
 
 int64_t HTTPFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
-	auto &hfh = (HTTPFileHandle &)handle;
+	auto &hfh = handle.Cast<HTTPFileHandle>();
 	Write(handle, buffer, nr_bytes, hfh.file_offset);
 	return nr_bytes;
 }
