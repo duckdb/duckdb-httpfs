@@ -168,6 +168,8 @@ public:
 	virtual duckdb::unique_ptr<ResponseWrapper> PutRequest(FileHandle &handle, string url, HeaderMap header_map,
 	                                                       char *buffer_in, idx_t buffer_in_len, string params = "");
 
+	virtual duckdb::unique_ptr<ResponseWrapper> DeleteRequest(FileHandle &handle, string url, HeaderMap header_map);
+
 	// FS methods
 	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
 	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;

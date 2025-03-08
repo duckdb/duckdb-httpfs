@@ -79,14 +79,15 @@ public:
 	static shared_ptr<HTTPState> TryGetState(optional_ptr<FileOpener> opener);
 
 	bool IsEmpty() {
-		return head_count == 0 && get_count == 0 && put_count == 0 && post_count == 0 && total_bytes_received == 0 &&
-		       total_bytes_sent == 0;
+		return head_count == 0 && get_count == 0 && put_count == 0 && post_count == 0 && delete_count == 0 &&
+		       total_bytes_received == 0 && total_bytes_sent == 0;
 	}
 
 	atomic<idx_t> head_count {0};
 	atomic<idx_t> get_count {0};
 	atomic<idx_t> put_count {0};
 	atomic<idx_t> post_count {0};
+	atomic<idx_t> delete_count {0};
 	atomic<idx_t> total_bytes_received {0};
 	atomic<idx_t> total_bytes_sent {0};
 
