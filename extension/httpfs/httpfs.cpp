@@ -308,6 +308,28 @@ unique_ptr<ResponseWrapper> HTTPFileSystem::HeadRequest(FileHandle &handle, stri
 	hfh.StoreClient(std::move(http_client));
 	return response;
 }
+unique_ptr<ResponseWrapper> HTTPFileSystem::DeleteRequest(FileHandle &handle, string url, HeaderMap header_map) {
+	auto &hfh = handle.Cast<HTTPFileHandle>();
+	string path, proto_host_port;
+	ParseUrl(url, path, proto_host_port);
+	auto headers = InitializeHeaders(header_map, hfh.http_params);
+	auto http_client = hfh.GetClient(nullptr);
+
+	std::function<duckdb_httplib_openssl::Result(void)> request([&]() {
+		if (hfh.state) {
+			hfh.state->delete_count++;
+		}
+		return http_client->Delete(path.c_str(), *headers);
+	});
+
+	// Refresh the client on retries
+	std::function<void(void)> on_retry(
+		[&]() { http_client = GetClient(hfh.http_params, proto_host_port.c_str(), &hfh); });
+
+	auto response = RunRequestWithRetry(request, url, "DELETE", hfh.http_params, on_retry);
+	hfh.StoreClient(std::move(http_client));
+	return response;
+}
 
 unique_ptr<ResponseWrapper> HTTPFileSystem::GetRequest(FileHandle &handle, string url, HeaderMap header_map) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();

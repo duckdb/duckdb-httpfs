@@ -686,6 +686,15 @@ unique_ptr<ResponseWrapper> S3FileSystem::GetRangeRequest(FileHandle &handle, st
 	return HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);
 }
 
+unique_ptr<ResponseWrapper> S3FileSystem::DeleteRequest(FileHandle &handle, string s3_url, HeaderMap header_map) {
+	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
+	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
+	string http_url = parsed_s3_url.GetHTTPUrl(auth_params);
+	auto headers =
+	    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "DELETE", auth_params, "", "", "", "");
+	return HTTPFileSystem::DeleteRequest(handle, http_url, headers);
+}
+
 unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const string &path, FileOpenFlags flags,
                                                       optional_ptr<FileOpener> opener) {
 	FileOpenerInfo info = {path};
@@ -844,6 +853,36 @@ bool S3FileSystem::CanHandleFile(const string &fpath) {
 	return fpath.rfind("s3://", 0) * fpath.rfind("s3a://", 0) * fpath.rfind("s3n://", 0) * fpath.rfind("gcs://", 0) *
 	           fpath.rfind("gs://", 0) * fpath.rfind("r2://", 0) ==
 	       0;
+}
+
+void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener) {
+	auto handle = OpenFile(path, FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS, opener);
+	if (!handle) {
+		throw IOException("Could not remove file \"%s\": %s", {{"errno", "404"}}, path, "No such file or directory");
+	}
+
+	auto &s3fh = handle->Cast<S3FileHandle>();
+	auto res = DeleteRequest(*handle, s3fh.path, {});
+	if (res->code != 200 && res->code != 204) {
+		throw IOException("Could not remove file \"%s\": %s", {{"errno", to_string(res->code)}}, path, res->error);
+	}
+}
+
+void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> opener) {
+	ListFiles(
+	    path,
+	    [&](const string &file, bool is_dir) {
+		    try {
+			    this->RemoveFile(file, opener);
+		    } catch (IOException &e) {
+				string errmsg(e.what());
+			    if (errmsg.find("No such file or directory") != std::string::npos) {
+				    return;
+			    }
+			    throw;
+		    }
+	    },
+	    opener.get());
 }
 
 void S3FileSystem::FileSync(FileHandle &handle) {
