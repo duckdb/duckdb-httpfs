@@ -426,8 +426,8 @@ unique_ptr<ResponseWrapper> HTTPFileSystem::GetRangeRequest(FileHandle &handle, 
 				    if (response.has_header("Content-Length")) {
 					    auto content_length = stoll(response.get_header_value("Content-Length", 0));
 					    if ((idx_t)content_length != buffer_out_len) {
-						    throw IOException("HTTP GET error: Content-Length from server mismatches requested "
-						                      "range, server may not support range requests.");
+						    throw HTTPException("HTTP GET error: Content-Length from server mismatches requested "
+						                        "range, server may not support range requests.");
 					    }
 				    }
 			    }
@@ -444,8 +444,8 @@ unique_ptr<ResponseWrapper> HTTPFileSystem::GetRangeRequest(FileHandle &handle, 
 					    // behaviour, so we have to improve logic elsewhere to properly handle this case.
 
 					    // To avoid corruption of memory, we bail out.
-					    throw IOException("Server sent back more data than expected, `SET force_download=true` might "
-					                      "help in this case");
+					    throw HTTPException("Server sent back more data than expected, `SET force_download=true` might "
+					                        "help in this case");
 				    }
 				    memcpy(buffer_out + out_offset, data, data_length);
 				    out_offset += data_length;
