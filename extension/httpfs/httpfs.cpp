@@ -157,7 +157,6 @@ HTTPFileSystem::RunRequestWithRetry(const std::function<duckdb_httplib_openssl::
 			case 418: // Server is pretending to be a teapot
 			case 429: // Rate limiter hit
 			case 500: // Server has error
-			case 503: // Server has error
 			case 504: // Server has error
 				break;
 			default:
