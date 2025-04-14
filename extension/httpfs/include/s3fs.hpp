@@ -111,9 +111,9 @@ class S3FileHandle : public HTTPFileHandle {
 	friend class S3FileSystem;
 
 public:
-	S3FileHandle(FileSystem &fs, string path_p, FileOpenFlags flags, const HTTPParams &http_params,
+	S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, const HTTPParams &http_params,
 	             const S3AuthParams &auth_params_p, const S3ConfigParams &config_params_p)
-	    : HTTPFileHandle(fs, std::move(path_p), flags, http_params), auth_params(auth_params_p),
+	    : HTTPFileHandle(fs, file, flags, http_params), auth_params(auth_params_p),
 	      config_params(config_params_p), uploads_in_progress(0), parts_uploaded(0), upload_finalized(false),
 	      uploader_has_error(false), upload_exception(nullptr) {
 		if (flags.OpenForReading() && flags.OpenForWriting()) {
@@ -218,7 +218,7 @@ public:
 	// Note: caller is responsible to not call this method twice on the same buffer
 	static void UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
 
-	vector<string> Glob(const string &glob_pattern, FileOpener *opener = nullptr) override;
+	vector<OpenFileInfo> Glob(const string &glob_pattern, FileOpener *opener = nullptr) override;
 	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
 	               FileOpener *opener = nullptr) override;
 
@@ -234,7 +234,7 @@ public:
 
 protected:
 	static void NotifyUploadsInProgress(S3FileHandle &file_handle);
-	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const string &path, FileOpenFlags flags,
+	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                                optional_ptr<FileOpener> opener) override;
 
 	void FlushBuffer(S3FileHandle &handle, shared_ptr<S3WriteBuffer> write_buffer);
@@ -250,7 +250,7 @@ protected:
 struct AWSListObjectV2 {
 	static string Request(string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
 	                      string &continuation_token, optional_ptr<HTTPState> state, bool use_delimiter = false);
-	static void ParseKey(string &aws_response, vector<string> &result);
+	static void ParseFileList(string &aws_response, vector<OpenFileInfo> &result);
 	static vector<string> ParseCommonPrefix(string &aws_response);
 	static string ParseContinuationToken(string &aws_response);
 };

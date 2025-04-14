@@ -715,16 +715,16 @@ unique_ptr<ResponseWrapper> S3FileSystem::DeleteRequest(FileHandle &handle, stri
 	return HTTPFileSystem::DeleteRequest(handle, http_url, headers);
 }
 
-unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const string &path, FileOpenFlags flags,
+unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                       optional_ptr<FileOpener> opener) {
-	FileOpenerInfo info = {path};
+	FileOpenerInfo info = {file.path};
 	S3AuthParams auth_params = S3AuthParams::ReadFrom(opener, info);
 
 	// Scan the query string for any s3 authentication parameters
-	auto parsed_s3_url = S3UrlParse(path, auth_params);
+	auto parsed_s3_url = S3UrlParse(file.path, auth_params);
 	ReadQueryParams(parsed_s3_url.query_param, auth_params);
 
-	return duckdb::make_uniq<S3FileHandle>(*this, path, flags, HTTPParams::ReadFrom(opener, info), auth_params,
+	return duckdb::make_uniq<S3FileHandle>(*this, file, flags, HTTPParams::ReadFrom(opener, info), auth_params,
 	                                       S3ConfigParams::ReadFrom(opener));
 }
 
@@ -973,7 +973,7 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 	return key == key_end && pattern == pattern_end;
 }
 
-vector<string> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener) {
+vector<OpenFileInfo> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener) {
 	if (opener == nullptr) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
 	}
@@ -1003,7 +1003,7 @@ vector<string> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener
 	ReadQueryParams(parsed_s3_url.query_param, s3_auth_params);
 
 	// Do main listobjectsv2 request
-	vector<string> s3_keys;
+	vector<OpenFileInfo> s3_keys;
 	string main_continuation_token;
 
 	// Main paging loop
@@ -1012,7 +1012,7 @@ vector<string> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener
 		string response_str = AWSListObjectV2::Request(shared_path, http_params, s3_auth_params,
 		                                               main_continuation_token, HTTPState::TryGetState(opener).get());
 		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
-		AWSListObjectV2::ParseKey(response_str, s3_keys);
+		AWSListObjectV2::ParseFileList(response_str, s3_keys);
 
 		// Repeat requests until the keys of all common prefixes are parsed.
 		auto common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
@@ -1027,7 +1027,7 @@ vector<string> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener
 				auto prefix_res =
 				    AWSListObjectV2::Request(prefix_path, http_params, s3_auth_params, common_prefix_continuation_token,
 				                             HTTPState::TryGetState(opener).get());
-				AWSListObjectV2::ParseKey(prefix_res, s3_keys);
+				AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
 				auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
 				common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
 				common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
@@ -1036,19 +1036,20 @@ vector<string> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener
 	} while (!main_continuation_token.empty());
 
 	vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
-	vector<string> result;
-	for (const auto &s3_key : s3_keys) {
+	vector<OpenFileInfo> result;
+	for (auto &s3_key : s3_keys) {
 
-		vector<string> key_splits = StringUtil::Split(s3_key, "/");
+		vector<string> key_splits = StringUtil::Split(s3_key.path, "/");
 		bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end());
 
 		if (is_match) {
-			auto result_full_url = parsed_s3_url.prefix + parsed_s3_url.bucket + "/" + s3_key;
+			auto result_full_url = parsed_s3_url.prefix + parsed_s3_url.bucket + "/" + s3_key.path;
 			// if a ? char was present, we re-add it here as the url parsing will have trimmed it.
 			if (!parsed_s3_url.query_param.empty()) {
 				result_full_url += '?' + parsed_s3_url.query_param;
 			}
-			result.push_back(result_full_url);
+			s3_key.path = std::move(result_full_url);
+			result.push_back(std::move(s3_key));
 		}
 	}
 	return result;
@@ -1069,7 +1070,7 @@ bool S3FileSystem::ListFiles(const string &directory, const std::function<void(c
 	}
 
 	for (const auto &file : glob_res) {
-		callback(file, false);
+		callback(file.path, false);
 	}
 
 	return true;
@@ -1152,24 +1153,75 @@ string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthPar
 	return response.str();
 }
 
-void AWSListObjectV2::ParseKey(string &aws_response, vector<string> &result) {
+optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
+	string open_tag = "<" + tag + ">";
+	string close_tag = "</" + tag + ">";
+	auto open_tag_pos = response.find(open_tag, cur_pos);
+	if (open_tag_pos == string::npos) {
+		// tag not found
+		return optional_idx();
+	}
+	auto close_tag_pos = response.find(close_tag, open_tag_pos + open_tag.size());
+	if (close_tag_pos == string::npos) {
+		throw InternalException("Failed to parse S3 result: found open tag for %s but did not find matching close tag", tag);
+	}
+	result = response.substr(open_tag_pos + open_tag.size(), close_tag_pos - open_tag_pos - open_tag.size());
+	return close_tag_pos + close_tag.size();
+}
+
+
+void AWSListObjectV2::ParseFileList(string &aws_response, vector<OpenFileInfo> &result) {
+	// Example S3 response:
+	//	<Contents>
+	//		<Key>lineitem_sf10_partitioned_shipdate/l_shipdate%3D1997-03-28/data_0.parquet</Key>
+	//		<LastModified>2024-11-09T11:38:08.000Z</LastModified>
+	//		<ETag>&quot;bdf10f525f8355fb80d1ff2d8c62cc8b&quot;</ETag>
+	//		<Size>1127863</Size>
+	//		<StorageClass>STANDARD</StorageClass>
+	//	</Contents>
 	idx_t cur_pos = 0;
-	while (true) {
-		auto next_open_tag_pos = aws_response.find("<Key>", cur_pos);
-		if (next_open_tag_pos == string::npos) {
+	while(true) {
+		string contents;
+		auto next_pos = FindTagContents(aws_response, "Contents", cur_pos, contents);
+		if (!next_pos.IsValid()) {
+			// exhausted all contents
 			break;
-		} else {
-			auto next_close_tag_pos = aws_response.find("</Key>", next_open_tag_pos + 5);
-			if (next_close_tag_pos == string::npos) {
-				throw InternalException("Failed to parse S3 result");
-			}
-			auto parsed_path = S3FileSystem::UrlDecode(
-			    aws_response.substr(next_open_tag_pos + 5, next_close_tag_pos - next_open_tag_pos - 5));
-			if (parsed_path.back() != '/') {
-				result.push_back(parsed_path);
-			}
-			cur_pos = next_close_tag_pos + 6;
 		}
+		// move to the next position
+		cur_pos = next_pos.GetIndex();
+
+		// parse the contents
+		string key;
+		auto key_pos = FindTagContents(contents, "Key", 0, key);
+		if (!key_pos.IsValid()) {
+			throw InternalException("Key not found in S3 response: %s", contents);
+		}
+		auto parsed_path = S3FileSystem::UrlDecode(key);
+		if (parsed_path.back() == '/') {
+			// not a file but a directory
+			continue;
+		}
+		// construct the file
+		OpenFileInfo result_file(parsed_path);
+
+		auto extra_info = make_shared_ptr<ExtendedOpenFileInfo>();
+		// get file attributes
+		string last_modified, etag, size;
+		auto last_modified_pos = FindTagContents(contents, "LastModified", 0, last_modified);
+		if (last_modified_pos.IsValid()) {
+			extra_info->options["last_modified"] = Value(last_modified).DefaultCastAs(LogicalType::TIMESTAMP);
+		}
+		auto etag_pos = FindTagContents(contents, "ETag", 0, etag);
+		if (etag_pos.IsValid()) {
+			etag = StringUtil::Replace(etag, "&quot;", "\"");
+			extra_info->options["etag"] = Value(std::move(etag));
+		}
+		auto size_pos = FindTagContents(contents, "Size", 0, size);
+		if (size_pos.IsValid()) {
+			extra_info->options["file_size"] = Value(size).DefaultCastAs(LogicalType::UBIGINT);
+		}
+		result_file.extended_info = std::move(extra_info);
+		result.push_back(std::move(result_file));
 	}
 }
 

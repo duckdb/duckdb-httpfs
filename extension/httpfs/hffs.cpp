@@ -201,7 +201,7 @@ end:
 // - hf://datasets/lhoestq/demo1/default/train/*.parquet
 // - hf://datasets/lhoestq/demo1/*/train/file_[abc].parquet
 // - hf://datasets/lhoestq/demo1/**/train/*.parquet
-vector<string> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opener) {
+vector<OpenFileInfo> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opener) {
 	// Ensure the glob pattern is a valid HF url
 	auto parsed_glob_url = HFUrlParse(path);
 	auto first_wildcard_pos = parsed_glob_url.path.find_first_of("*[\\");
@@ -251,7 +251,7 @@ vector<string> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opene
 	}
 
 	vector<string> pattern_splits = StringUtil::Split(parsed_glob_url.path, "/");
-	vector<string> result;
+	vector<OpenFileInfo> result;
 	for (const auto &file : files) {
 
 		vector<string> file_splits = StringUtil::Split(file, "/");
@@ -288,19 +288,19 @@ unique_ptr<ResponseWrapper> HuggingFaceFileSystem::GetRangeRequest(FileHandle &h
 	return HTTPFileSystem::GetRangeRequest(handle, http_url, header_map, file_offset, buffer_out, buffer_out_len);
 }
 
-unique_ptr<HTTPFileHandle> HuggingFaceFileSystem::CreateHandle(const string &path, FileOpenFlags flags,
+unique_ptr<HTTPFileHandle> HuggingFaceFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                                optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
-	auto parsed_url = HFUrlParse(path);
+	auto parsed_url = HFUrlParse(file.path);
 
 	FileOpenerInfo info;
-	info.file_path = path;
+	info.file_path = file.path;
 
 	auto params = HTTPParams::ReadFrom(opener, info);
-	SetParams(params, path, opener);
+	SetParams(params, file.path, opener);
 
-	return duckdb::make_uniq<HFFileHandle>(*this, std::move(parsed_url), path, flags, params);
+	return duckdb::make_uniq<HFFileHandle>(*this, std::move(parsed_url), file, flags, params);
 }
 
 void HuggingFaceFileSystem::SetParams(HTTPParams &params, const string &path, optional_ptr<FileOpener> opener) {
