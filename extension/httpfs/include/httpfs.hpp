@@ -2,6 +2,7 @@
 
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/exception/http_exception.hpp"
 #include "http_state.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -215,6 +216,8 @@ protected:
 	static duckdb::unique_ptr<ResponseWrapper>
 	RunRequestWithRetry(const std::function<duckdb_httplib_openssl::Result(void)> &request, string &url, string method,
 	                    const HTTPParams &params, const std::function<void(void)> &retry_cb = {});
+
+	virtual HTTPException GetHTTPError(FileHandle &handle, const duckdb_httplib_openssl::Response &response, const string &url);
 
 private:
 	// Global cache

@@ -230,6 +230,8 @@ public:
 		return true;
 	}
 
+	static HTTPException GetS3Error(S3AuthParams &s3_auth_params, const duckdb_httplib_openssl::Response &response, const string &url);
+
 protected:
 	static void NotifyUploadsInProgress(S3FileHandle &file_handle);
 	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const string &path, FileOpenFlags flags,
@@ -240,6 +242,8 @@ protected:
 
 	// helper for ReadQueryParams
 	void GetQueryParam(const string &key, string &param, CPPHTTPLIB_NAMESPACE::Params &query_params);
+
+	HTTPException GetHTTPError(FileHandle &, const duckdb_httplib_openssl::Response &response, const string &url) override;
 };
 
 // Helper class to do s3 ListObjectV2 api call https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html

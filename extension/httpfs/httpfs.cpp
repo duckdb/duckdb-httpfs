@@ -391,6 +391,16 @@ unique_ptr<ResponseWrapper> HTTPFileSystem::GetRequest(FileHandle &handle, strin
 	return response;
 }
 
+HTTPException HTTPFileSystem::GetHTTPError(FileHandle &, const duckdb_httplib_openssl::Response &response, const string &url) {
+	auto status_message = duckdb_httplib_openssl::status_message(response.status);
+	string error = "HTTP GET error on '" + url + "' (HTTP " + to_string(response.status) + " " + status_message + ")";
+	if (response.status == 416) {
+		error += " This could mean the file was changed. Try disabling the duckdb http metadata cache "
+				 "if enabled, and confirm the server supports range requests.";
+	}
+	return HTTPException(response, error);
+}
+
 unique_ptr<ResponseWrapper> HTTPFileSystem::GetRangeRequest(FileHandle &handle, string url, HeaderMap header_map,
                                                             idx_t file_offset, char *buffer_out, idx_t buffer_out_len) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
@@ -414,12 +424,7 @@ unique_ptr<ResponseWrapper> HTTPFileSystem::GetRangeRequest(FileHandle &handle, 
 		    path.c_str(), *headers,
 		    [&](const duckdb_httplib_openssl::Response &response) {
 			    if (response.status >= 400) {
-				    string error = "HTTP GET error on '" + url + "' (HTTP " + to_string(response.status) + ")";
-				    if (response.status == 416) {
-					    error += " This could mean the file was changed. Try disabling the duckdb http metadata cache "
-					             "if enabled, and confirm the server supports range requests.";
-				    }
-				    throw HTTPException(response, error);
+			    	throw GetHTTPError(handle, response, url);
 			    }
 			    if (response.status < 300) { // done redirecting
 				    out_offset = 0;

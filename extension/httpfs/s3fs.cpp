@@ -1075,6 +1075,27 @@ bool S3FileSystem::ListFiles(const string &directory, const std::function<void(c
 	return true;
 }
 
+HTTPException S3FileSystem::GetS3Error(S3AuthParams &s3_auth_params, const duckdb_httplib_openssl::Response &response, const string &url) {
+	string region = s3_auth_params.region;
+	string extra_text = "\n\nAuthentication Failure - this is usually caused by invalid or missing credentials.";
+	if (s3_auth_params.secret_access_key.empty() && s3_auth_params.access_key_id.empty()) {
+		extra_text += "\n* No credentials are provided.";
+	} else {
+		extra_text += "\n* Credentials are provided, but they did not work.";
+	}
+	extra_text += "\n* See https://duckdb.org/docs/stable/extensions/httpfs/s3api.html";
+	auto status_message = duckdb_httplib_openssl::status_message(response.status);
+	throw HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url, s3_auth_params.region, response.status, status_message, extra_text);
+}
+
+HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const duckdb_httplib_openssl::Response &response, const string &url) {
+	if (response.status == 403) {
+		auto &s3_handle = handle.Cast<S3FileHandle>();
+		return GetS3Error(s3_handle.auth_params, response, url);
+	}
+	return HTTPFileSystem::GetHTTPError(handle, response, url);
+}
+
 string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
                                 string &continuation_token, optional_ptr<HTTPState> state, bool use_delimiter) {
 	auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
@@ -1107,7 +1128,10 @@ string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthPar
 	    listobjectv2_url.c_str(), *headers,
 	    [&](const duckdb_httplib_openssl::Response &response) {
 		    if (response.status >= 400) {
-			    throw HTTPException(response, "HTTP GET error on '%s' (HTTP %d)", listobjectv2_url, response.status);
+		    	string trimmed_path = path;
+		    	StringUtil::RTrim(trimmed_path, "/");
+		    	trimmed_path += listobjectv2_url;
+		    	throw S3FileSystem::GetS3Error(s3_auth_params, response, trimmed_path);
 		    }
 		    return true;
 	    },
