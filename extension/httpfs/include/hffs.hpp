@@ -22,7 +22,7 @@ class HuggingFaceFileSystem : public HTTPFileSystem {
 public:
 	~HuggingFaceFileSystem() override;
 
-	vector<string> Glob(const string &path, FileOpener *opener = nullptr) override;
+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 
 	duckdb::unique_ptr<ResponseWrapper> HeadRequest(FileHandle &handle, string hf_url, HeaderMap header_map) override;
 	duckdb::unique_ptr<ResponseWrapper> GetRequest(FileHandle &handle, string hf_url, HeaderMap header_map) override;
@@ -45,7 +45,7 @@ public:
 	static void SetParams(HTTPParams &params, const string &path, optional_ptr<FileOpener> opener);
 
 protected:
-	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const string &path, FileOpenFlags flags,
+	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                                optional_ptr<FileOpener> opener) override;
 
 	string ListHFRequest(ParsedHFUrl &url, HTTPParams &http_params, string &next_page_url,
@@ -56,9 +56,9 @@ class HFFileHandle : public HTTPFileHandle {
 	friend class HuggingFaceFileSystem;
 
 public:
-	HFFileHandle(FileSystem &fs, ParsedHFUrl hf_url, string http_url, FileOpenFlags flags,
+	HFFileHandle(FileSystem &fs, ParsedHFUrl hf_url, const OpenFileInfo &file, FileOpenFlags flags,
 	             const HTTPParams &http_params)
-	    : HTTPFileHandle(fs, std::move(http_url), flags, http_params), parsed_url(std::move(hf_url)) {
+	    : HTTPFileHandle(fs, file, flags, http_params), parsed_url(std::move(hf_url)) {
 	}
 	~HFFileHandle() override;
 

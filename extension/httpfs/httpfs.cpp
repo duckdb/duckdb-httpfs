@@ -461,23 +461,58 @@ unique_ptr<ResponseWrapper> HTTPFileSystem::GetRangeRequest(FileHandle &handle, 
 	return response;
 }
 
-HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const string &path, FileOpenFlags flags, const HTTPParams &http_params)
-    : FileHandle(fs, path, flags), http_params(http_params), flags(flags), length(0), buffer_available(0),
-      buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
+void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
+	auto components = Timestamp::GetComponents(timestamp);
+	struct tm tm {};
+	tm.tm_year = components.year - 1900;
+	tm.tm_mon = components.month - 1;
+	tm.tm_mday = components.day;
+	tm.tm_hour = components.hour;
+	tm.tm_min = components.minute;
+	tm.tm_sec = components.second;
+	tm.tm_isdst = 0;
+	result = mktime(&tm);
 }
 
-unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const string &path, FileOpenFlags flags,
+HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, const HTTPParams &http_params)
+    : FileHandle(fs, file.path, flags), http_params(http_params), flags(flags), length(0), buffer_available(0),
+      buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
+	// check if the handle has extended properties that can be set directly in the handle
+	// if we have these properties we don't need to do a head request to obtain them later
+	if (file.extended_info) {
+		auto &info = file.extended_info->options;
+		auto lm_entry = info.find("last_modified");
+		if (lm_entry != info.end()) {
+			TimestampToTimeT(lm_entry->second.GetValue<timestamp_t>(), last_modified);
+		}
+		auto etag_entry = info.find("etag");
+		if (etag_entry != info.end()) {
+			etag = StringValue::Get(etag_entry->second);
+		}
+		auto fs_entry = info.find("file_size");
+		if (fs_entry != info.end()) {
+			length = fs_entry->second.GetValue<uint64_t>();
+		}
+		if (lm_entry != info.end() && etag_entry != info.end() && fs_entry != info.end()) {
+			// we found all relevant entries (last_modified, etag and file size)
+			// skip head request
+			initialized = true;
+		}
+	}
+}
+
+unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                         optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
 	FileOpenerInfo info;
-	info.file_path = path;
+	info.file_path = file.path;
 	auto params = HTTPParams::ReadFrom(opener, info);
 
 	auto secret_manager = FileOpener::TryGetSecretManager(opener);
 	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
 	if (secret_manager && transaction) {
-		auto secret_match = secret_manager->LookupSecret(*transaction, path, "bearer");
+		auto secret_match = secret_manager->LookupSecret(*transaction, file.path, "bearer");
 
 		if (secret_match.HasMatch()) {
 			const auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*secret_match.secret_entry->secret);
@@ -485,23 +520,21 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const string &path, File
 		}
 	}
 
-	auto result = duckdb::make_uniq<HTTPFileHandle>(*this, path, flags, params);
-
+	auto result = duckdb::make_uniq<HTTPFileHandle>(*this, file, flags, params);
 	auto client_context = FileOpener::TryGetClientContext(opener);
 	if (client_context && ClientConfig::GetConfig(*client_context).enable_http_logging) {
 		result->http_logger = client_context->client_data->http_logger.get();
 	}
-
 	return result;
 }
 
-unique_ptr<FileHandle> HTTPFileSystem::OpenFile(const string &path, FileOpenFlags flags,
+unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
                                                 optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
 	if (flags.ReturnNullIfNotExists()) {
 		try {
-			auto handle = CreateHandle(path, flags, opener);
+			auto handle = CreateHandle(file, flags, opener);
 			handle->Initialize(opener);
 			return std::move(handle);
 		} catch (...) {
@@ -509,7 +542,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFile(const string &path, FileOpenFlag
 		}
 	}
 
-	auto handle = CreateHandle(path, flags, opener);
+	auto handle = CreateHandle(file, flags, opener);
 	handle->Initialize(opener);
 	return std::move(handle);
 }
@@ -706,6 +739,70 @@ void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache)
 	}
 }
 
+bool HTTPFileSystem::TryParseLastModifiedTime(const string &timestamp, time_t &result) {
+	StrpTimeFormat::ParseResult parse_result;
+	if (!StrpTimeFormat::TryParse("%a, %d %h %Y %T %Z", timestamp, parse_result)) {
+		return false;
+	}
+	struct tm tm {};
+	tm.tm_year = parse_result.data[0] - 1900;
+	tm.tm_mon = parse_result.data[1] - 1;
+	tm.tm_mday = parse_result.data[2];
+	tm.tm_hour = parse_result.data[3];
+	tm.tm_min = parse_result.data[4];
+	tm.tm_sec = parse_result.data[5];
+	tm.tm_isdst = 0;
+	result = mktime(&tm);
+	return true;
+}
+
+void HTTPFileHandle::LoadFileInfo() {
+	if (initialized) {
+		// already initialized
+		return;
+	}
+	auto &hfs = file_system.Cast<HTTPFileSystem>();
+	auto res = hfs.HeadRequest(*this, path, {});
+	string range_length;
+
+	if (res->code != 200) {
+		if (flags.OpenForWriting() && res->code == 404) {
+			if (!flags.CreateFileIfNotExists() && !flags.OverwriteExistingFile()) {
+				throw IOException("Unable to open URL \"" + path +
+				                  "\" for writing: file does not exist and CREATE flag is not set");
+			}
+			length = 0;
+			return;
+		} else {
+			// HEAD request fail, use Range request for another try (read only one byte)
+			if (flags.OpenForReading() && res->code != 404) {
+				auto range_res = hfs.GetRangeRequest(*this, path, {}, 0, nullptr, 2);
+				if (range_res->code != 206 && range_res->code != 202 && range_res->code != 200) {
+					throw IOException("Unable to connect to URL \"%s\": %d (%s).", path, res->code, res->error);
+				}
+				auto range_find = range_res->headers["Content-Range"].find("/");
+				if (!(range_find == std::string::npos || range_res->headers["Content-Range"].size() < range_find + 1)) {
+					range_length = range_res->headers["Content-Range"].substr(range_find + 1);
+					if (range_length != "*") {
+						res = std::move(range_res);
+					}
+				}
+			} else {
+				// It failed again
+				throw HTTPException(*res, "Unable to connect to URL \"%s\": %s (%s).", res->http_url,
+				                    to_string(res->code), res->error);
+			}
+		}
+	}
+	if (!res->headers["Last-Modified"].empty()) {
+		HTTPFileSystem::TryParseLastModifiedTime(res->headers["Last-Modified"], last_modified);
+	}
+	if (!res->headers["Etag"].empty()) {
+		etag = res->headers["Etag"];
+	}
+	initialized = true;
+}
+
 void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	auto &hfs = file_system.Cast<HTTPFileSystem>();
 	state = HTTPState::TryGetState(opener);
@@ -748,82 +845,16 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	if (current_cache && flags.OpenForWriting()) {
 		current_cache->Erase(path);
 	}
-
-	auto res = hfs.HeadRequest(*this, path, {});
-	string range_length;
-
-	if (res->code != 200) {
-		if (flags.OpenForWriting() && res->code == 404) {
-			if (!flags.CreateFileIfNotExists() && !flags.OverwriteExistingFile()) {
-				throw IOException("Unable to open URL \"" + path +
-				                  "\" for writing: file does not exist and CREATE flag is not set");
-			}
-			length = 0;
-			return;
-		} else {
-			// HEAD request fail, use Range request for another try (read only one byte)
-			if (flags.OpenForReading() && res->code != 404) {
-				auto range_res = hfs.GetRangeRequest(*this, path, {}, 0, nullptr, 2);
-				if (range_res->code != 206 && range_res->code != 202 && range_res->code != 200) {
-					throw IOException("Unable to connect to URL \"%s\": %d (%s).", path, res->code, res->error);
-				}
-				auto range_find = range_res->headers["Content-Range"].find("/");
-				if (!(range_find == std::string::npos || range_res->headers["Content-Range"].size() < range_find + 1)) {
-					range_length = range_res->headers["Content-Range"].substr(range_find + 1);
-					if (range_length != "*") {
-						res = std::move(range_res);
-					}
-				}
-			} else {
-				// It failed again
-				throw HTTPException(*res, "Unable to connect to URL \"%s\": %s (%s).", res->http_url,
-				                    to_string(res->code), res->error);
-			}
-		}
-	}
+	LoadFileInfo();
 
 	// Initialize the read buffer now that we know the file exists
 	if (flags.OpenForReading()) {
 		read_buffer = duckdb::unique_ptr<data_t[]>(new data_t[READ_BUFFER_LEN]);
 	}
 
-	if (res->headers.find("Content-Length") == res->headers.end() || res->headers["Content-Length"].empty()) {
-		// There was no content-length header, we can not do range requests here, so we set the length to 0
-		length = 0;
-	} else {
-		try {
-			if (res->headers.find("Content-Range") == res->headers.end() || res->headers["Content-Range"].empty()) {
-				length = std::stoll(res->headers["Content-Length"]);
-			} else {
-				length = std::stoll(range_length);
-			}
-		} catch (std::invalid_argument &e) {
-			throw IOException("Invalid Content-Length header received: %s", res->headers["Content-Length"]);
-		} catch (std::out_of_range &e) {
-			throw IOException("Invalid Content-Length header received: %s", res->headers["Content-Length"]);
-		}
-	}
 	if (state && length == 0) {
 		FullDownload(hfs, should_write_cache);
 	}
-	if (!res->headers["Last-Modified"].empty()) {
-		StrpTimeFormat::ParseResult result;
-		if (StrpTimeFormat::TryParse("%a, %d %h %Y %T %Z", res->headers["Last-Modified"], result)) {
-			struct tm tm {};
-			tm.tm_year = result.data[0] - 1900;
-			tm.tm_mon = result.data[1] - 1;
-			tm.tm_mday = result.data[2];
-			tm.tm_hour = result.data[3];
-			tm.tm_min = result.data[4];
-			tm.tm_sec = result.data[5];
-			tm.tm_isdst = 0;
-			last_modified = mktime(&tm);
-		}
-	}
-	if (!res->headers["Etag"].empty()) {
-		etag = res->headers["Etag"];
-	}
-
 	if (should_write_cache) {
 		current_cache->Insert(path, {length, last_modified, etag});
 	}

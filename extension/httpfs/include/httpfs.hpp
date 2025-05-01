@@ -87,7 +87,7 @@ class HTTPFileSystem;
 
 class HTTPFileHandle : public FileHandle {
 public:
-	HTTPFileHandle(FileSystem &fs, const string &path, FileOpenFlags flags, const HTTPParams &params);
+	HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, const HTTPParams &params);
 	~HTTPFileHandle() override;
 	// This two-phase construction allows subclasses more flexible setup.
 	virtual void Initialize(optional_ptr<FileOpener> opener);
@@ -104,6 +104,7 @@ public:
 	idx_t length;
 	time_t last_modified;
 	string etag;
+	bool initialized = false;
 
 	// When using full file download, the full file will be written to a cached file handle
 	unique_ptr<CachedFileHandle> cached_file_handle;
@@ -138,6 +139,8 @@ public:
 protected:
 	//! Create a new Client
 	virtual unique_ptr<duckdb_httplib_openssl::Client> CreateClient(optional_ptr<ClientContext> client_context);
+	//! Perform a HEAD request to get the file info (if not yet loaded)
+	void LoadFileInfo();
 
 private:
 	//! Fully downloads a file
@@ -149,12 +152,11 @@ public:
 	static duckdb::unique_ptr<duckdb_httplib_openssl::Client>
 	GetClient(const HTTPParams &http_params, const char *proto_host_port, optional_ptr<HTTPFileHandle> hfs);
 	static void ParseUrl(string &url, string &path_out, string &proto_host_port_out);
-	duckdb::unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
-	                                        optional_ptr<FileOpener> opener = nullptr) final;
+	static bool TryParseLastModifiedTime(const string &timestamp, time_t &result);
 	static duckdb::unique_ptr<duckdb_httplib_openssl::Headers> InitializeHeaders(HeaderMap &header_map,
 	                                                                             const HTTPParams &http_params);
 
-	vector<string> Glob(const string &path, FileOpener *opener = nullptr) override {
+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override {
 		return {path}; // FIXME
 	}
 
@@ -209,7 +211,13 @@ public:
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
 
 protected:
-	virtual duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const string &path, FileOpenFlags flags,
+	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
+															   optional_ptr<FileOpener> opener) override;
+	bool SupportsOpenFileExtended() const override {
+		return true;
+	}
+protected:
+	virtual duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                                        optional_ptr<FileOpener> opener);
 
 	static duckdb::unique_ptr<ResponseWrapper>
