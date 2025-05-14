@@ -5,7 +5,16 @@
 #include <stdio.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httplib.hpp"
+
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
+#include <openssl/rand.h>
+
+#if defined(_WIN32) && defined(OPENSSL_USE_APPLINK)
+#include <openssl/applink.c>
+#endif
 
 namespace duckdb {
 
