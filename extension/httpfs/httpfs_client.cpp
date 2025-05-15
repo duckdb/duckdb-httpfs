@@ -2,9 +2,102 @@
 #include "http_state.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
+#include <curl/curl.h>
+#include <sys/stat.h>
 #include "httplib.hpp"
 
 namespace duckdb {
+
+// we statically compile in libcurl, which means the cert file location of the build machine is the
+// place curl will look. But not every distro has this file in the same location, so we search a
+// number of common locations and use the first one we find.
+static std::string certFileLocations[] = {
+	// Arch, Debian-based, Gentoo
+	"/etc/ssl/certs/ca-certificates.crt",
+	// RedHat 7 based
+	"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+	// Redhat 6 based
+	"/etc/pki/tls/certs/ca-bundle.crt",
+	// OpenSUSE
+	"/etc/ssl/ca-bundle.pem",
+	// Alpine
+	"/etc/ssl/cert.pem"};
+
+//! Grab the first path that exists, from a list of well-known locations
+static std::string SelectCURLCertPath() {
+	for (std::string &caFile : certFileLocations) {
+		struct stat buf;
+		if (stat(caFile.c_str(), &buf) == 0) {
+			return caFile;
+		}
+	}
+	return std::string();
+}
+
+static std::string cert_path = SelectCURLCertPath();
+
+static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+	((std::string *)userp)->append((char *)contents, size * nmemb);
+	return size * nmemb;
+}
+
+class CURLRequestHeaders {
+public:
+	CURLRequestHeaders(const vector<string> &input) {
+		for (auto &header : input) {
+			Add(header);
+		}
+	}
+	~CURLRequestHeaders() {
+		if (headers) {
+			curl_slist_free_all(headers);
+		}
+		headers = NULL;
+	}
+	operator bool() const {
+		return headers != NULL;
+	}
+
+public:
+	void Add(const string &header) {
+		headers = curl_slist_append(headers, header.c_str());
+	}
+
+public:
+	curl_slist *headers = NULL;
+};
+
+
+class CURLHandle {
+public:
+	CURLHandle(const string &token, const string &cert_path) {
+		curl = curl_easy_init();
+		if (!curl) {
+			throw InternalException("Failed to initialize curl");
+		}
+		if (!token.empty()) {
+			curl_easy_setopt(curl, CURLOPT_XOAUTH2_BEARER, token.c_str());
+			curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
+		}
+		if (!cert_path.empty()) {
+			curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
+		}
+	}
+	~CURLHandle() {
+		curl_easy_cleanup(curl);
+	}
+
+public:
+	operator CURL *() {
+		return curl;
+	}
+	CURLcode Execute() {
+		return curl_easy_perform(curl);
+	}
+
+private:
+	CURL *curl = NULL;
+};
 
 class HTTPFSClient : public HTTPClient {
 public:
@@ -32,30 +125,56 @@ public:
 			}
 		}
 		state = http_params.state;
+		auto bearer_token = "";
+		if (!http_params.bearer_token.empty()) {
+			bearer_token = http_params.bearer_token.c_str();
+		}
+		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
+		state = http_params.state;
+	}
+
+	void SetLogger(HTTPLogger &logger) {
+		client->set_logger(logger.GetLogger<duckdb_httplib_openssl::Request, duckdb_httplib_openssl::Response>());
 	}
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
+		auto headers = TransformHeadersForCurl(info.headers, info.params);
+		CURLRequestHeaders curl_headers(headers);
+
+		CURLcode res;
+		string result;
+		{
+			curl_easy_setopt(*curl_handle, CURLOPT_URL, info.url.c_str());
+			curl_easy_setopt(*curl_handle, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
+			curl_easy_setopt(*curl_handle, CURLOPT_WRITEDATA, &result);
+
+			if (curl_headers) {
+				curl_easy_setopt(*curl_handle, CURLOPT_HTTPHEADER, curl_headers.headers);
+			}
+			res = curl_handle->Execute();
+		}
+
+		// DUCKDB_LOG_DEBUG(context, "iceberg.Catalog.Curl.HTTPRequest", "GET %s (curl code '%s')", url,
+		// 				 curl_easy_strerror(res));
+		if (res != CURLcode::CURLE_OK) {
+			string error = curl_easy_strerror(res);
+			throw HTTPException(StringUtil::Format("Curl GET Request to '%s' failed with error: '%s'", url, error));
+		}
+		uint16_t response_code = 0;
+		curl_easy_getinfo(*curl_handle, CURLINFO_RESPONSE_CODE, response_code);
+
+		// TODO: replace this with better bytes received provided by curl.
 		if (state) {
-			state->get_count++;
+			state->total_bytes_received += sizeof(result);
 		}
-		auto headers = TransformHeaders(info.headers, info.params);
-		if (!info.response_handler && !info.content_handler) {
-			return TransformResult(client->Get(info.path, headers));
-		} else {
-			return TransformResult(client->Get(
-			    info.path.c_str(), headers,
-			    [&](const duckdb_httplib_openssl::Response &response) {
-				    auto http_response = TransformResponse(response);
-				    return info.response_handler(*http_response);
-			    },
-			    [&](const char *data, size_t data_length) {
-				    if (state) {
-					    state->total_bytes_received += data_length;
-				    }
-				    return info.content_handler(const_data_ptr_cast(data), data_length);
-			    }));
-		}
+
+		// get the response code
+		auto status_code = HTTPStatusCode(response_code);
+		auto return_result = make_uniq<HTTPResponse>(status_code);
+		return_result->body = result;
+		return return_result;
 	}
+
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
 		if (state) {
 			state->put_count++;
@@ -117,6 +236,19 @@ private:
 		return headers;
 	}
 
+	duckdb_httplib_openssl::Headers TransformHeadersForCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
+		 headers;
+		for (auto &entry : header_map) {
+			const std::string new_header = entry.first + "=" + entry.second;
+			headers.insert(new_header);
+		}
+		for (auto &entry : params.extra_headers) {
+			const std::string new_header = entry.first + "=" + entry.second;
+			headers.insert(new_header);
+		}
+		return headers;
+	}
+
 	unique_ptr<HTTPResponse> TransformResponse(const duckdb_httplib_openssl::Response &response) {
 		auto status_code = HTTPUtil::ToStatusCode(response.status);
 		auto result = make_uniq<HTTPResponse>(status_code);
@@ -141,6 +273,7 @@ private:
 
 private:
 	unique_ptr<duckdb_httplib_openssl::Client> client;
+	unique_ptr<CURLHandle> curl;
 	optional_ptr<HTTPState> state;
 };
 
