@@ -2,9 +2,11 @@
 #include "http_state.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
+
 #include <curl/curl.h>
-#include <sys/stat.h>
+// #include <sys/stat.h>
 #include "httplib.hpp"
+#include "duckdb/common/exception/http_exception.hpp"
 
 namespace duckdb {
 
@@ -22,6 +24,7 @@ static std::string certFileLocations[] = {
 	"/etc/ssl/ca-bundle.pem",
 	// Alpine
 	"/etc/ssl/cert.pem"};
+
 
 //! Grab the first path that exists, from a list of well-known locations
 static std::string SelectCURLCertPath() {
@@ -43,11 +46,12 @@ static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, vo
 
 class CURLRequestHeaders {
 public:
-	CURLRequestHeaders(const vector<string> &input) {
+	CURLRequestHeaders(vector<std::string> &input) {
 		for (auto &header : input) {
 			Add(header);
 		}
 	}
+	CURLRequestHeaders() {}
 	~CURLRequestHeaders() {
 		if (headers) {
 			curl_slist_free_all(headers);
@@ -144,24 +148,24 @@ public:
 		CURLcode res;
 		string result;
 		{
-			curl_easy_setopt(*curl_handle, CURLOPT_URL, info.url.c_str());
-			curl_easy_setopt(*curl_handle, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*curl_handle, CURLOPT_WRITEDATA, &result);
+			curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
+			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
+			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &result);
 
 			if (curl_headers) {
-				curl_easy_setopt(*curl_handle, CURLOPT_HTTPHEADER, curl_headers.headers);
+				curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.headers);
 			}
-			res = curl_handle->Execute();
+			res = curl->Execute();
 		}
 
 		// DUCKDB_LOG_DEBUG(context, "iceberg.Catalog.Curl.HTTPRequest", "GET %s (curl code '%s')", url,
 		// 				 curl_easy_strerror(res));
 		if (res != CURLcode::CURLE_OK) {
 			string error = curl_easy_strerror(res);
-			throw HTTPException(StringUtil::Format("Curl GET Request to '%s' failed with error: '%s'", url, error));
+			throw HTTPException(StringUtil::Format("Curl GET Request to '%s' failed with error: '%s'", info.url, error));
 		}
 		uint16_t response_code = 0;
-		curl_easy_getinfo(*curl_handle, CURLINFO_RESPONSE_CODE, response_code);
+		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, response_code);
 
 		// TODO: replace this with better bytes received provided by curl.
 		if (state) {
@@ -236,17 +240,22 @@ private:
 		return headers;
 	}
 
-	duckdb_httplib_openssl::Headers TransformHeadersForCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
-		 headers;
+	CURLRequestHeaders TransformHeadersForCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
+		std::vector<std::string> headers;
 		for (auto &entry : header_map) {
 			const std::string new_header = entry.first + "=" + entry.second;
-			headers.insert(new_header);
+			headers.push_back(new_header);
 		}
 		for (auto &entry : params.extra_headers) {
 			const std::string new_header = entry.first + "=" + entry.second;
-			headers.insert(new_header);
+			headers.push_back(new_header);
 		}
-		return headers;
+		CURLRequestHeaders curl_headers;
+		for (auto &header : headers) {
+			curl_headers.Add(header);
+		}
+		return curl_headers;
+		// return CURLRequestHeaders(headers);
 	}
 
 	unique_ptr<HTTPResponse> TransformResponse(const duckdb_httplib_openssl::Response &response) {
