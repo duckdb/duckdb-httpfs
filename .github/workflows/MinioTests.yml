@@ -33,7 +33,10 @@ jobs:
 
       - name: Install Ninja
         shell: bash
-        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq software-properties-common
+          sudo apt-get install -y -qq libcurl4-gnutls-dev libcurl4-openssl-dev ninja-build
 
       - name: Setup Ccache
         uses: hendrikmuhs/ccache-action@main
