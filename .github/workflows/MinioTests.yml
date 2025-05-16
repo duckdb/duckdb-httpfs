@@ -10,7 +10,7 @@ defaults:
 jobs:
   minio-tests:
     name: Minio Tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
       S3_TEST_SERVER_AVAILABLE: 1
       AWS_DEFAULT_REGION: eu-west-1
