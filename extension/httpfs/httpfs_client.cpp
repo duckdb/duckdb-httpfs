@@ -105,22 +105,56 @@ CURLHandle::~CURLHandle() {
 class HTTPFSClient : public HTTPClient {
 public:
 	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
-		// initializing curl
 		auto bearer_token = "";
 		if (!http_params.bearer_token.empty()) {
 			bearer_token = http_params.bearer_token.c_str();
 		}
 		state = http_params.state;
 		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
-	}
 
+		// set curl options
+		// follow redirects
+		curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+		// Curl re-uses connections by default
+		if (!http_params.keep_alive) {
+			curl_easy_setopt(*curl, CURLOPT_FORBID_REUSE, 1L);
+		}
+
+		// client->enable_server_certificate_verification(http_params.enable_server_cert_verification);
+		if (http_params.enable_server_cert_verification) {
+			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYPEER, 1L);   // Verify the cert
+			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYHOST, 2L);   // Verify that the cert matches the hostname
+		}
+
+		// TODO: no global write timeout option, but you could put customize a timeout in the write functions
+		//  or handle use CURLOPT_XFERINFOFUNCTION (progress callback) with CURLOPT_TIMEOUT_MS
+		//  we could also set CURLOPT_LOW_SPEED_LIMIT and timeout if the speed is too low for
+		//  too long.
+
+		// set read timeout
+		curl_easy_setopt(*curl, CURLOPT_TIMEOUT, http_params.timeout);
+		// set connection timeout
+		curl_easy_setopt(*curl, CURLOPT_CONNECTTIMEOUT, http_params.timeout);
+		// accept content as-is (i.e no decompressing)
+		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, "identity");
+
+		if (!http_params.http_proxy.empty()) {
+			curl_easy_setopt(*curl, CURLOPT_PROXY, StringUtil::Format("%s:%s", http_params.http_proxy, http_params.http_proxy_port).c_str());
+
+			if (!http_params.http_proxy_username.empty()) {
+				curl_easy_setopt(*curl, CURLOPT_PROXYUSERNAME, http_params.http_proxy_username.c_str());
+				curl_easy_setopt(*curl, CURLOPT_PROXYPASSWORD, http_params.http_proxy_password.c_str());
+			}
+		}
+	}
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
 		if (state) {
 			state->get_count++;
 		}
 
-		auto curl_headers = TransformHeadersForCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		auto url = info.url;
 		if (!info.params.extra_headers.empty()) {
 			auto curl_params = TransformParamsCurl(info.params);
@@ -134,8 +168,7 @@ public:
 			// If the same handle served a HEAD request, we must set NOBODY back to 0L to request content again
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
 
-			// follow redirects
-			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
+
 			curl_easy_setopt(*curl, CURLOPT_URL, url.c_str());
 			// write response data
 			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
@@ -144,18 +177,10 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
 			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
 
-			if (curl_headers) {
-				curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.headers);
-			}
+			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 			res = curl->Execute();
 		}
 
-		// DUCKDB_LOG_DEBUG(context, "iceberg.Catalog.Curl.HTTPRequest", "GET %s (curl code '%s')", url,
-		// 				 curl_easy_strerror(res));
-		if (res != CURLcode::CURLE_OK) {
-			string error = curl_easy_strerror(res);
-			throw HTTPException(StringUtil::Format("Curl GET Request to '%s' failed with error: '%s'", info.url, error));
-		}
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 
@@ -181,7 +206,7 @@ public:
 			state->total_bytes_sent += info.buffer_in_len;
 		}
 
-		auto curl_headers = TransformHeadersForCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		// Add content type header from info
 		curl_headers.Add("Content-Type: " + info.content_type);
 		// transform parameters
@@ -217,18 +242,10 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
 
 			// Apply headers
-			if (curl_headers) {
-				curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.headers);
-			}
+			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			// Execute the request
 			res = curl->Execute();
-		}
-
-		// Check response
-		if (res != CURLcode::CURLE_OK) {
-			std::string error = curl_easy_strerror(res);
-			throw HTTPException(StringUtil::Format("Curl PUT Request to '%s' failed with error: '%s'", info.url, error));
 		}
 
 		uint16_t response_code = 0;
@@ -242,7 +259,7 @@ public:
 			state->head_count++;
 		}
 
-		auto curl_headers = TransformHeadersForCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		// transform parameters
 		auto url = info.url;
 		if (!info.params.extra_headers.empty()) {
@@ -257,7 +274,6 @@ public:
 		{
 			// Set URL
 			curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
-			// curl_easy_setopt(*curl, CURLOPT_VERBOSE, 1L);
 
 			// Perform HEAD request instead of GET
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
@@ -275,19 +291,13 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
 
 			// Add headers if any
-			if (curl_headers) {
-				curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.headers);
-			}
+			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			// Execute HEAD request
 			res = curl->Execute();
 		}
 
-		// Handle result
-		if (res != CURLcode::CURLE_OK) {
-			string error = curl_easy_strerror(res);
-			throw HTTPException(StringUtil::Format("Curl HEAD Request to '%s' failed with error: '%s'", info.url, error));
-		}
+
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
@@ -298,7 +308,7 @@ public:
 			state->delete_count++;
 		}
 
-		auto curl_headers = TransformHeadersForCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		// transform parameters
 		auto url = info.url;
 		if (!info.params.extra_headers.empty()) {
@@ -310,7 +320,6 @@ public:
 		std::string result;
 		HeaderCollector response_header_collection;
 
-		// TODO: some delete requests require a BODY
 		{
 			// Set URL
 			curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
@@ -330,18 +339,10 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
 
 			// Add headers if any
-			if (curl_headers) {
-				curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.headers);
-			}
+			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			// Execute DELETE request
 			res = curl->Execute();
-		}
-
-		// Handle result
-		if (res != CURLcode::CURLE_OK) {
-			std::string error = curl_easy_strerror(res);
-			throw HTTPException(StringUtil::Format("Curl DELETE Request to '%s' failed with error: '%s'", info.url, error));
 		}
 
 		// Get HTTP response status code
@@ -356,7 +357,7 @@ public:
 			state->total_bytes_sent += info.buffer_in_len;
 		}
 
-		auto curl_headers = TransformHeadersForCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		const string content_type = "Content-Type: application/octet-stream";
 		curl_headers.Add(content_type.c_str());
 		// transform parameters
@@ -391,19 +392,12 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
 
 			// Add headers if any
-			if (curl_headers) {
-				curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.headers);
-			}
+			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			// Execute POST request
 			res = curl->Execute();
 		}
 
-		// Handle result
-		if (res != CURLcode::CURLE_OK) {
-			string error = curl_easy_strerror(res);
-			throw HTTPException(StringUtil::Format("Curl POST Request to '%s' failed with error: '%s'", info.url, error));
-		}
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 		info.buffer_out = result;
@@ -413,7 +407,7 @@ public:
 
 private:
 
-	CURLRequestHeaders TransformHeadersForCurl(const HTTPHeaders &header_map) {
+	CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map) {
 		std::vector<std::string> headers;
 		for (auto &entry : header_map) {
 			const std::string new_header = entry.first + ": " + entry.second;
@@ -445,7 +439,7 @@ private:
 	unique_ptr<HTTPResponse> TransformResponseCurl(uint16_t response_code, HeaderCollector &header_collection, string &body, CURLcode res, string &url) {
 		auto status_code = HTTPStatusCode(response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
-		if (response_code >= 400) {
+		if (res != CURLcode::CURLE_OK) {
 			if (header_collection.header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
 				response->request_error =header_collection.header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
 			} else {
@@ -461,7 +455,6 @@ private:
 
 private:
 	unique_ptr<CURLHandle> curl;
-	CURLRequestHeaders request_headers;
 	optional_ptr<HTTPState> state;
 };
 
