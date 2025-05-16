@@ -162,7 +162,12 @@ public:
 		// 		}));
 		// }
 
-		auto curl_headers = TransformHeadersForCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersForCurl(info.headers);
+		auto url = info.url;
+		if (!info.params.extra_headers.empty()) {
+			auto curl_params = TransformParamsCurl(info.params);
+			url += "?" + curl_params;
+		}
 
 		CURLcode res;
 		std::string result;
@@ -173,7 +178,7 @@ public:
 
 			// follow redirects
 			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
-			curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
+			curl_easy_setopt(*curl, CURLOPT_URL, url.c_str());
 			// write response data
 			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
 			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &result);
@@ -228,7 +233,7 @@ public:
 		// return TransformResult(client->Put(info.path, headers, const_char_ptr_cast(info.buffer_in), info.buffer_in_len,
 		//                                    info.content_type));
 
-		auto curl_headers = TransformHeadersForCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersForCurl(info.headers);
 		// Optionally add headers directly
 		curl_headers.headers = curl_slist_append(curl_headers.headers, "Content-Type: application/json");
 
@@ -286,7 +291,7 @@ public:
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
 
-		 auto curl_headers = TransformHeadersForCurl(info.headers, info.params);
+		 auto curl_headers = TransformHeadersForCurl(info.headers);
 
 		 CURLcode res;
 		 std::string result;
@@ -338,7 +343,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
-		auto curl_headers = TransformHeadersForCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersForCurl(info.headers);
 
 		CURLcode res;
 		std::string result;
@@ -413,7 +418,7 @@ public:
 		// req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
 		// return TransformResult(client->send(req));
 
-		auto curl_headers = TransformHeadersForCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersForCurl(info.headers);
 		curl_headers.Add("Content-Type: application/octet-stream");
 
 		CURLcode res;
@@ -478,13 +483,9 @@ private:
 		return headers;
 	}
 
-	CURLRequestHeaders TransformHeadersForCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
+	CURLRequestHeaders TransformHeadersForCurl(const HTTPHeaders &header_map) {
 		std::vector<std::string> headers;
 		for (auto &entry : header_map) {
-			const std::string new_header = entry.first + ": " + entry.second;
-			headers.push_back(new_header);
-		}
-		for (auto &entry : params.extra_headers) {
 			const std::string new_header = entry.first + ": " + entry.second;
 			headers.push_back(new_header);
 		}
@@ -493,6 +494,22 @@ private:
 			curl_headers.Add(header);
 		}
 		return curl_headers;
+	}
+
+	string TransformParamsCurl(const HTTPParams &params) {
+		string result = "";
+		unordered_map<string, string> escaped_params;
+		bool first_param = true;
+		for (auto &entry : params.extra_headers) {
+			const string key = entry.first;
+			const string value = curl_easy_escape(*curl, entry.second.c_str(), 0);
+			if (!first_param) {
+				result += "&";
+			}
+			result += key + "=" + value;
+			first_param = false;
+		}
+		return result;
 	}
 
 	unique_ptr<HTTPResponse> TransformResponse(const duckdb_httplib_openssl::Response &response) {
