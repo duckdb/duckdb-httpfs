@@ -18,6 +18,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: minio_duckdb_user_password
       DUCKDB_S3_ENDPOINT: duckdb-minio.com:9000
       DUCKDB_S3_USE_SSL: false
+      CORE_EXTENSIONS: 'parquet;json'
       GEN: ninja
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: x64-linux
