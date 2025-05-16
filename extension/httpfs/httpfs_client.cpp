@@ -63,6 +63,7 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	// so we clear all of the current header_collection
 	if (header.rfind("HTTP/", 0) == 0) {
 		header_collection->header_collection.push_back(HTTPHeaders());
+		header_collection->header_collection.back().Insert("__RESPONSE_STATUS__", header);
 	}
 
 	size_t colonPos = header.find(':');
@@ -135,7 +136,6 @@ public:
 			bearer_token = http_params.bearer_token.c_str();
 		}
 		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
-
 	}
 
 
@@ -143,24 +143,6 @@ public:
 		if (state) {
 			state->get_count++;
 		}
-
-		// auto headers = TransformHeaders(info.headers, info.params);
-		// if (!info.response_handler && !info.content_handler) {
-		// 	return TransformResult(client->Get(info.path, headers));
-		// } else {
-		// 	return TransformResult(client->Get(
-		// 		info.path.c_str(), headers,
-		// 		[&](const duckdb_httplib_openssl::Response &response) {
-		// 			auto http_response = TransformResponse(response);
-		// 			return info.response_handler(*http_response);
-		// 		},
-		// 		[&](const char *data, size_t data_length) {
-		// 			if (state) {
-		// 				state->total_bytes_received += data_length;
-		// 			}
-		// 			return info.content_handler(const_data_ptr_cast(data), data_length);
-		// 		}));
-		// }
 
 		auto curl_headers = TransformHeadersForCurl(info.headers);
 		auto url = info.url;
@@ -214,14 +196,7 @@ public:
 
 		const char* data = result.c_str();
 		info.content_handler(const_data_ptr_cast(data), bytes_received);
-
-		// Construct HTTPResponse
-		auto status_code = HTTPStatusCode(response_code);
-		auto return_result = make_uniq<HTTPResponse>(status_code);
-		return_result->body = result;
-		return_result->headers = response_header_collection.header_collection.back();
-		return_result->url = info.url;
-		return return_result;
+		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
 	}
 
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
@@ -229,13 +204,16 @@ public:
 			state->put_count++;
 			state->total_bytes_sent += info.buffer_in_len;
 		}
-		// auto headers = TransformHeaders(info.headers, info.params);
-		// return TransformResult(client->Put(info.path, headers, const_char_ptr_cast(info.buffer_in), info.buffer_in_len,
-		//                                    info.content_type));
 
 		auto curl_headers = TransformHeadersForCurl(info.headers);
-		// Optionally add headers directly
-		curl_headers.headers = curl_slist_append(curl_headers.headers, "Content-Type: application/json");
+		// Add content type header from info
+		curl_headers.Add("Content-Type: " + info.content_type);
+		// transform parameters
+		auto url = info.url;
+		if (!info.params.extra_headers.empty()) {
+			auto curl_params = TransformParamsCurl(info.params);
+			url += "?" + curl_params;
+		}
 
 		CURLcode res;
 		std::string result;
@@ -280,70 +258,78 @@ public:
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 
+		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
+
 		// Construct HTTPResponse
-		auto status_code = HTTPStatusCode(response_code);
-		auto return_result = make_uniq<HTTPResponse>(status_code);
-		return_result->body = "";
-		return_result->headers = response_header_collection.header_collection.back();
-		return_result->url = info.url;
-		return return_result;
+		// auto status_code = HTTPStatusCode(response_code);
+		// auto return_result = make_uniq<HTTPResponse>(status_code);
+		// return_result->body = "";
+		// return_result->headers = response_header_collection.header_collection.back();
+		// return_result->url = info.url;
+		// return return_result;
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
 
-		 auto curl_headers = TransformHeadersForCurl(info.headers);
+		auto curl_headers = TransformHeadersForCurl(info.headers);
+		// transform parameters
+		auto url = info.url;
+		if (!info.params.extra_headers.empty()) {
+			auto curl_params = TransformParamsCurl(info.params);
+			url += "?" + curl_params;
+		}
 
-		 CURLcode res;
-		 std::string result;
-		 HeaderCollector response_header_collection;
+		CURLcode res;
+		std::string result;
+		HeaderCollector response_header_collection;
 
-		 {
-		 	// Set URL
-		 	curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
+		{
+			// Set URL
+			curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
 			// curl_easy_setopt(*curl, CURLOPT_VERBOSE, 1L);
 
-		 	// Perform HEAD request instead of GET
-		 	curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
-		 	curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
+			// Perform HEAD request instead of GET
+			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
+			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
 
-		 	// Follow redirects
-		 	curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
+			// Follow redirects
+			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-		 	//  set write function to collect body — no body expected, so safe to omit
-		 	curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-		 	curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &result);
+			//  set write function to collect body — no body expected, so safe to omit
+			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
+			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &result);
 
-		 	// Collect response headers (multiple header blocks for redirects)
-		 	curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-		 	curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
+			// Collect response headers (multiple header blocks for redirects)
+			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
+			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
 
-		 	// Add headers if any
-		 	if (curl_headers) {
-		 		curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.headers);
-		 	}
+			// Add headers if any
+			if (curl_headers) {
+				curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.headers);
+			}
 
-		 	// Execute HEAD request
-		 	res = curl->Execute();
-		 }
+			// Execute HEAD request
+			res = curl->Execute();
+		}
 
-		 // Handle result
-		 if (res != CURLcode::CURLE_OK) {
-		 	string error = curl_easy_strerror(res);
-		 	throw HTTPException(StringUtil::Format("Curl HEAD Request to '%s' failed with error: '%s'", info.url, error));
-		 }
-		 uint16_t response_code = 0;
-		 curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
-		 // Construct HTTPResponse
-		 auto status_code = HTTPStatusCode(response_code);
-		 auto return_result = make_uniq<HTTPResponse>(status_code);
-		 return_result->body = "";
-		 return_result->headers = response_header_collection.header_collection.back();
-		 return_result->url = info.url;
-		 return return_result;
+		// Handle result
+		if (res != CURLcode::CURLE_OK) {
+			string error = curl_easy_strerror(res);
+			throw HTTPException(StringUtil::Format("Curl HEAD Request to '%s' failed with error: '%s'", info.url, error));
+		}
+		uint16_t response_code = 0;
+		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
+		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
 		auto curl_headers = TransformHeadersForCurl(info.headers);
+		// transform parameters
+		auto url = info.url;
+		if (!info.params.extra_headers.empty()) {
+			auto curl_params = TransformParamsCurl(info.params);
+			url += "?" + curl_params;
+		}
 
 		CURLcode res;
 		std::string result;
@@ -386,13 +372,7 @@ public:
 		// Get HTTP response status code
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
-		// Construct HTTPResponse
-		auto status_code = HTTPStatusCode(response_code);
-		auto return_result = make_uniq<HTTPResponse>(status_code);
-		return_result->headers = response_header_collection.header_collection.back();
-		return_result->url = info.url;
-		return return_result;
-
+		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
@@ -401,25 +381,15 @@ public:
 			state->total_bytes_sent += info.buffer_in_len;
 		}
 
-		// // We use a custom Request method here, because there is no Post call with a contentreceiver in httplib
-		// duckdb_httplib_openssl::Request req;
-		// req.method = "POST";
-		// req.path = info.path;
-		// req.headers = TransformHeaders(info.headers, info.params);
-		// req.headers.emplace("Content-Type", "application/octet-stream");
-		// req.content_receiver = [&](const char *data, size_t data_length, uint64_t /*offset*/,
-		//                            uint64_t /*total_length*/) {
-		// 	if (state) {
-		// 		state->total_bytes_received += data_length;
-		// 	}
-		// 	info.buffer_out += string(data, data_length);
-		// 	return true;
-		// };
-		// req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
-		// return TransformResult(client->send(req));
-
 		auto curl_headers = TransformHeadersForCurl(info.headers);
-		curl_headers.Add("Content-Type: application/octet-stream");
+		const string content_type = "Content-Type: application/octet-stream";
+		curl_headers.Add(content_type.c_str());
+		// transform parameters
+		auto url = info.url;
+		if (!info.params.extra_headers.empty()) {
+			auto curl_params = TransformParamsCurl(info.params);
+			url += "?" + curl_params;
+		}
 
 		CURLcode res;
 		std::string result;
@@ -434,7 +404,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, info.buffer_in_len);
 
 			// Follow redirects
-			// TODO: follow redirects for POST?
+			// TODO: should we follow redirects for POST?
 			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
 
 			// Set write function to collect response body
@@ -461,14 +431,9 @@ public:
 		}
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
-
 		info.buffer_out = result;
 		// Construct HTTPResponse
-		auto status_code = HTTPStatusCode(response_code);
-		auto return_result = make_uniq<HTTPResponse>(status_code);
-		return_result->headers = response_header_collection.header_collection.back();
-		return_result->url = info.url;
-		return return_result;
+		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
 	}
 
 private:
@@ -521,6 +486,23 @@ private:
 			result->headers.Insert(entry.first, entry.second);
 		}
 		return result;
+	}
+
+	unique_ptr<HTTPResponse> TransformResponseCurl(uint16_t response_code, HeaderCollector &header_collection, string &body, CURLcode res, string &url) {
+		auto status_code = HTTPStatusCode(response_code);
+		auto response = make_uniq<HTTPResponse>(status_code);
+		if (response_code >= 400) {
+			if (header_collection.header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
+				response->request_error =header_collection.header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
+			} else {
+				response->request_error = curl_easy_strerror(res);
+			}
+			return response;
+		}
+		response->body = body;
+		response->url = url;
+		response->headers = header_collection.header_collection.back();
+		return response;
 	}
 
 	unique_ptr<HTTPResponse> TransformResult(duckdb_httplib_openssl::Result &&res) {
