@@ -6,6 +6,12 @@ require parquet
 
 require httpfs
 
+require json
+
+# Test Force download with server that doesn't want to give us the head
+statement ok
+FROM read_json('https://api.spring.io/projects/spring-boot/generations')
+
 statement ok
 SET force_download=false;
 
