@@ -4,8 +4,7 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
 #include <curl/curl.h>
-// #include <sys/stat.h>
-#include "httplib.hpp"
+#include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
 
 namespace duckdb {
@@ -106,30 +105,6 @@ CURLHandle::~CURLHandle() {
 class HTTPFSClient : public HTTPClient {
 public:
 	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
-		client = make_uniq<duckdb_httplib_openssl::Client>(proto_host_port);
-		client->set_follow_location(true);
-		client->set_keep_alive(http_params.keep_alive);
-		if (!http_params.ca_cert_file.empty()) {
-			client->set_ca_cert_path(http_params.ca_cert_file.c_str());
-		}
-		client->enable_server_certificate_verification(http_params.enable_server_cert_verification);
-		client->set_write_timeout(http_params.timeout, http_params.timeout_usec);
-		client->set_read_timeout(http_params.timeout, http_params.timeout_usec);
-		client->set_connection_timeout(http_params.timeout, http_params.timeout_usec);
-		client->set_decompress(false);
-		if (!http_params.bearer_token.empty()) {
-			client->set_bearer_token_auth(http_params.bearer_token.c_str());
-		}
-
-		if (!http_params.http_proxy.empty()) {
-			client->set_proxy(http_params.http_proxy, http_params.http_proxy_port);
-
-			if (!http_params.http_proxy_username.empty()) {
-				client->set_proxy_basic_auth(http_params.http_proxy_username, http_params.http_proxy_password);
-			}
-		}
-		state = http_params.state;
-
 		// initializing curl
 		auto bearer_token = "";
 		if (!http_params.bearer_token.empty()) {
@@ -437,16 +412,6 @@ public:
 	}
 
 private:
-	duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
-		duckdb_httplib_openssl::Headers headers;
-		for (auto &entry : header_map) {
-			headers.insert(entry);
-		}
-		for (auto &entry : params.extra_headers) {
-			headers.insert(entry);
-		}
-		return headers;
-	}
 
 	CURLRequestHeaders TransformHeadersForCurl(const HTTPHeaders &header_map) {
 		std::vector<std::string> headers;
@@ -477,17 +442,6 @@ private:
 		return result;
 	}
 
-	unique_ptr<HTTPResponse> TransformResponse(const duckdb_httplib_openssl::Response &response) {
-		auto status_code = HTTPUtil::ToStatusCode(response.status);
-		auto result = make_uniq<HTTPResponse>(status_code);
-		result->body = response.body;
-		result->reason = response.reason;
-		for (auto &entry : response.headers) {
-			result->headers.Insert(entry.first, entry.second);
-		}
-		return result;
-	}
-
 	unique_ptr<HTTPResponse> TransformResponseCurl(uint16_t response_code, HeaderCollector &header_collection, string &body, CURLcode res, string &url) {
 		auto status_code = HTTPStatusCode(response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
@@ -505,19 +459,7 @@ private:
 		return response;
 	}
 
-	unique_ptr<HTTPResponse> TransformResult(duckdb_httplib_openssl::Result &&res) {
-		if (res.error() == duckdb_httplib_openssl::Error::Success) {
-			auto &response = res.value();
-			return TransformResponse(response);
-		} else {
-			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			result->request_error = to_string(res.error());
-			return result;
-		}
-	}
-
 private:
-	unique_ptr<duckdb_httplib_openssl::Client> client;
 	unique_ptr<CURLHandle> curl;
 	CURLRequestHeaders request_headers;
 	optional_ptr<HTTPState> state;
@@ -529,14 +471,27 @@ unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, con
 }
 
 unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
-	duckdb_httplib_openssl::Params query_params;
-	duckdb_httplib_openssl::detail::parse_query_text(text, query_params);
+	unordered_map<std::string, std::string> params;
 
-	unordered_map<string, string> result;
-	for (auto &entry : query_params) {
-		result.emplace(std::move(entry.first), std::move(entry.second));
+	auto pos = text.find('?');
+	if (pos == std::string::npos) return params;
+
+	std::string query = text.substr(pos + 1);
+	std::stringstream ss(query);
+	std::string item;
+
+	while (std::getline(ss, item, '&')) {
+		auto eq_pos = item.find('=');
+		if (eq_pos != std::string::npos) {
+			std::string key = item.substr(0, eq_pos);
+			std::string value = StringUtil::URLDecode(item.substr(eq_pos + 1));
+			params[key] = value;
+		} else {
+			params[item] = "";  // key with no value
+		}
 	}
-	return result;
+
+	return params;
 }
 
 string HTTPFSUtil::GetName() const {
