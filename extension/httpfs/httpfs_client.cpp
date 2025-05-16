@@ -138,9 +138,6 @@ public:
 
 	}
 
-	void SetLogger(HTTPLogger &logger) {
-		client->set_logger(logger.GetLogger<duckdb_httplib_openssl::Request, duckdb_httplib_openssl::Response>());
-	}
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
 		if (state) {
