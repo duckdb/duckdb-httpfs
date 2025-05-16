@@ -19,6 +19,7 @@ jobs:
       DUCKDB_S3_ENDPOINT: duckdb-minio.com:9000
       DUCKDB_S3_USE_SSL: false
       GEN: ninja
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: x64-linux
 
     steps:
@@ -31,12 +32,9 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Ninja
+      - name: Install libraries
         shell: bash
-        run: |
-          sudo apt-get update -y -qq
-          sudo apt-get install -y -qq software-properties-common
-          sudo apt-get install -y -qq libcurl4-gnutls-dev libcurl4-openssl-dev ninja-build
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
 
       - name: Setup Ccache
         uses: hendrikmuhs/ccache-action@main
@@ -49,9 +47,11 @@ jobs:
         with:
           vcpkgGitCommitId: 5e5d0e1cd7785623065e77eff011afdeec1a3574
 
-      - name: Build
-        shell: bash
-        run: make
+      - name: Build extension
+        env:
+          GEN: ninja
+        run: |
+          make release
 
       - name: Start S3/HTTP test server
         shell: bash
