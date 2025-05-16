@@ -110,6 +110,7 @@ public:
 		if (!http_params.bearer_token.empty()) {
 			bearer_token = http_params.bearer_token.c_str();
 		}
+		state = http_params.state;
 		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
 	}
 
@@ -234,17 +235,12 @@ public:
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 
 		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
-
-		// Construct HTTPResponse
-		// auto status_code = HTTPStatusCode(response_code);
-		// auto return_result = make_uniq<HTTPResponse>(status_code);
-		// return_result->body = "";
-		// return_result->headers = response_header_collection.header_collection.back();
-		// return_result->url = info.url;
-		// return return_result;
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
+		if (state) {
+			state->head_count++;
+		}
 
 		auto curl_headers = TransformHeadersForCurl(info.headers);
 		// transform parameters
@@ -298,6 +294,10 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
+		if (state) {
+			state->delete_count++;
+		}
+
 		auto curl_headers = TransformHeadersForCurl(info.headers);
 		// transform parameters
 		auto url = info.url;
