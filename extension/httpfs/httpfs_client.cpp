@@ -94,6 +94,8 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	}
 	if (!cert_path.empty()) {
 		curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
+	} else {
+		throw InternalException("Could not set certificate authority");
 	}
 }
 
@@ -109,6 +111,8 @@ struct RequestInfo {
 };
 
 
+static idx_t httpfs_client_count = 0;
+
 class HTTPFSClient : public HTTPClient {
 public:
 	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
@@ -118,8 +122,9 @@ public:
 		}
 		state = http_params.state;
 
-		// init curl globally,
-		curl_global_init(CURL_GLOBAL_DEFAULT);
+		// call curl_global_init if not already done by another HTTPFS Client
+		InitCurlGlobal();
+
 		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
 
 		// set curl options
@@ -160,7 +165,7 @@ public:
 	}
 
 	~HTTPFSClient() {
-		curl_global_cleanup();
+		DestroyCurlGlobal();
 	}
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
@@ -288,6 +293,8 @@ public:
 			// Perform HEAD request instead of GET
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
+
+			curl_easy_setopt(*curl, CURLOPT_VERBOSE, 1L);
 
 			// Follow redirects
 			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -443,6 +450,7 @@ private:
 		auto status_code = HTTPStatusCode(request_info->response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
 		if (res != CURLcode::CURLE_OK) {
+			// TODO: request error can come from HTTPS Status code toString() value.
 			if (header_collection && !header_collection->header_collection.empty() && header_collection->header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
 				response->request_error = header_collection->header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
 			} else {
@@ -463,6 +471,32 @@ private:
 private:
 	unique_ptr<CURLHandle> curl;
 	optional_ptr<HTTPState> state;
+
+	static std::mutex &GetRefLock() {
+		static std::mutex mtx;
+		return mtx;
+	}
+
+	static void InitCurlGlobal() {
+		GetRefLock();
+		if (httpfs_client_count == 0) {
+			curl_global_init(CURL_GLOBAL_DEFAULT);
+		}
+		++httpfs_client_count;
+	}
+
+	static void DestroyCurlGlobal() {
+		// TODO: when to call curl_global_cleanup()
+		// calling it on client destruction causes SSL errors when verification is on (due to many requests).
+		// GetRefLock();
+		// if (httpfs_client_count == 0) {
+		// 	throw InternalException("Destroying Httpfs client that did not initialize CURL");
+		// }
+		// --httpfs_client_count;
+		// if (httpfs_client_count == 0) {
+		// 	curl_global_cleanup();
+		// }
+	}
 };
 
 unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
