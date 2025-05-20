@@ -110,6 +110,8 @@ public:
 			bearer_token = http_params.bearer_token.c_str();
 		}
 		state = http_params.state;
+		// init curl globally,
+		// curl_global_init(CURL_GLOBAL_DEFAULT);
 		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
 
 		// set curl options
@@ -149,6 +151,11 @@ public:
 		}
 	}
 
+	~HTTPFSClient() {
+		// init curl globally,
+		 // curl_global_cleanup();
+	}
+
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
 		if (state) {
 			state->get_count++;
@@ -163,7 +170,7 @@ public:
 
 		CURLcode res;
 		std::string result;
-		HeaderCollector response_header_collection;
+		auto response_header_collection = make_uniq<HeaderCollector>();
 		{
 			// If the same handle served a HEAD request, we must set NOBODY back to 0L to request content again
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
@@ -175,7 +182,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &result);
 			// write response headers (different header collection for each redirect)
 			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
+			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, response_header_collection.get());
 
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 			res = curl->Execute();
@@ -185,8 +192,8 @@ public:
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 
 		idx_t bytes_received = 0;
-		if (response_header_collection.header_collection.back().HasHeader("content-length")) {
-			bytes_received = std::stoi(response_header_collection.header_collection.back().GetHeaderValue("content-length"));
+		if (response_header_collection && response_header_collection->header_collection.back().HasHeader("content-length")) {
+			bytes_received = std::stoi(response_header_collection->header_collection.back().GetHeaderValue("content-length"));
 			D_ASSERT(bytes_received == result.size());
 		} else {
 			bytes_received = result.size();
@@ -197,7 +204,7 @@ public:
 
 		const char* data = result.c_str();
 		info.content_handler(const_data_ptr_cast(data), bytes_received);
-		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
+		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, result, res, url);
 	}
 
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
@@ -218,7 +225,7 @@ public:
 
 		CURLcode res;
 		std::string result;
-		HeaderCollector response_header_collection;
+		auto response_header_collection = make_uniq<HeaderCollector>();
 
 		{
 			curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
@@ -239,7 +246,7 @@ public:
 
 			// Capture response headers
 			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
+			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, response_header_collection.get());
 
 			// Apply headers
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
@@ -251,7 +258,7 @@ public:
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 
-		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
+		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, result, res, url);
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
@@ -269,7 +276,7 @@ public:
 
 		CURLcode res;
 		std::string result;
-		HeaderCollector response_header_collection;
+		auto response_header_collection = make_uniq<HeaderCollector>();
 
 		{
 			// Set URL
@@ -288,7 +295,7 @@ public:
 
 			// Collect response headers (multiple header blocks for redirects)
 			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
+			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, response_header_collection.get());
 
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
@@ -300,7 +307,7 @@ public:
 
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
-		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
+		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, result, res, url);
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
@@ -318,7 +325,7 @@ public:
 
 		CURLcode res;
 		std::string result;
-		HeaderCollector response_header_collection;
+		auto response_header_collection = make_uniq<HeaderCollector>();
 
 		{
 			// Set URL
@@ -336,7 +343,7 @@ public:
 
 			// Collect response headers (multiple header blocks for redirects)
 			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
+			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, response_header_collection.get());
 
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
@@ -348,7 +355,7 @@ public:
 		// Get HTTP response status code
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
-		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
+		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, result, res, url);
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
@@ -369,7 +376,7 @@ public:
 
 		CURLcode res;
 		std::string result;
-		HeaderCollector response_header_collection;
+		auto response_header_collection = make_uniq<HeaderCollector>();
 
 		{
 			curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
@@ -389,7 +396,7 @@ public:
 
 			// Collect response headers (multiple header blocks for redirects)
 			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &response_header_collection);
+			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, response_header_collection.get());
 
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
@@ -402,7 +409,7 @@ public:
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 		info.buffer_out = result;
 		// Construct HTTPResponse
-		return TransformResponseCurl(response_code, response_header_collection, result, res, url);
+		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, result, res, url);
 	}
 
 private:
@@ -436,20 +443,24 @@ private:
 		return result;
 	}
 
-	unique_ptr<HTTPResponse> TransformResponseCurl(uint16_t response_code, HeaderCollector &header_collection, string &body, CURLcode res, string &url) {
+	unique_ptr<HTTPResponse> TransformResponseCurl(uint16_t response_code, unique_ptr<HeaderCollector> header_collection, string &body, CURLcode res, string &url) {
 		auto status_code = HTTPStatusCode(response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
-		if (res != CURLcode::CURLE_OK) {
-			if (header_collection.header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
-				response->request_error =header_collection.header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
+		if (header_collection && res != CURLcode::CURLE_OK) {
+			if (!header_collection->header_collection.empty() && header_collection->header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
+				response->request_error =header_collection->header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
 			} else {
 				response->request_error = curl_easy_strerror(res);
 			}
 			return response;
 		}
 		response->body = body;
-		response->url = url;
-		response->headers = header_collection.header_collection.back();
+		response->url= url;
+		if (header_collection && !header_collection->header_collection.empty()) {
+			for (auto &header : header_collection->header_collection.back()) {
+				response->headers.Insert(header.first, header.second);
+			}
+		}
 		return response;
 	}
 
