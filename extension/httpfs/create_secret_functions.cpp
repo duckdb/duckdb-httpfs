@@ -211,6 +211,7 @@ void CreateS3SecretFunctions::RegisterCreateSecretFunction(DatabaseInstance &ins
 	secret_type.name = type;
 	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type.default_provider = "config";
+	secret_type.extension = "httpfs";
 
 	ExtensionUtil::RegisterSecretType(instance, secret_type);
 
@@ -225,6 +226,7 @@ void CreateBearerTokenFunctions::Register(DatabaseInstance &instance) {
 	secret_type_hf.name = HUGGINGFACE_TYPE;
 	secret_type_hf.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type_hf.default_provider = "config";
+	secret_type_hf.extension = "httpfs";
 	ExtensionUtil::RegisterSecretType(instance, secret_type_hf);
 
 	// Huggingface config provider

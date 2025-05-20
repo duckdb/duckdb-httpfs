@@ -117,6 +117,7 @@ public:
 			bearer_token = http_params.bearer_token.c_str();
 		}
 		state = http_params.state;
+
 		// init curl globally,
 		curl_global_init(CURL_GLOBAL_DEFAULT);
 		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
