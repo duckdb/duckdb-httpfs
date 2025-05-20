@@ -268,10 +268,10 @@ public:
 
 		auto curl_headers = TransformHeadersCurl(info.headers);
 		// transform parameters
-		auto url = info.url;
+		auto url = make_uniq<string>(info.url);
 		if (!info.params.extra_headers.empty()) {
 			auto curl_params = TransformParamsCurl(info.params);
-			url += "?" + curl_params;
+			*url += "?" + curl_params;
 		}
 
 		CURLcode res;
@@ -280,7 +280,7 @@ public:
 
 		{
 			// Set URL
-			curl_easy_setopt(*curl, CURLOPT_URL, info.url.c_str());
+			curl_easy_setopt(*curl, CURLOPT_URL, url->c_str());
 
 			// Perform HEAD request instead of GET
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
@@ -303,11 +303,14 @@ public:
 			// Execute HEAD request
 			res = curl->Execute();
 		}
-
+		Printer::Print("executed HEad");
+		Printer::Print("url is " + *url);
+		Printer::Print("body is " + result);
 
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
-		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, result, res, url);
+		Printer::Print("start transforming");
+		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, result, res, *url);
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
@@ -454,7 +457,9 @@ private:
 			}
 			return response;
 		}
+		Printer::Print("assigning body");
 		response->body = body;
+		Printer::Print("assigning url");
 		response->url= url;
 		if (header_collection && !header_collection->header_collection.empty()) {
 			for (auto &header : header_collection->header_collection.back()) {
