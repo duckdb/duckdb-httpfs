@@ -102,6 +102,12 @@ CURLHandle::~CURLHandle() {
 }
 
 
+struct RequestInfo {
+	string url;
+	string body;
+};
+
+
 class HTTPFSClient : public HTTPClient {
 public:
 	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
@@ -267,20 +273,20 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers);
+		auto request_info = make_uniq<RequestInfo>();
+		request_info->url = info.url;
 		// transform parameters
-		auto url = make_uniq<string>(info.url);
 		if (!info.params.extra_headers.empty()) {
 			auto curl_params = TransformParamsCurl(info.params);
-			*url += "?" + curl_params;
+			request_info->url += "?" + curl_params;
 		}
 
 		CURLcode res;
-		std::string result;
 		auto response_header_collection = make_uniq<HeaderCollector>();
 
 		{
 			// Set URL
-			curl_easy_setopt(*curl, CURLOPT_URL, url->c_str());
+			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
 
 			// Perform HEAD request instead of GET
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
@@ -291,7 +297,7 @@ public:
 
 			//  set write function to collect body — no body expected, so safe to omit
 			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &result);
+			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, request_info->body.c_str());
 
 			// Collect response headers (multiple header blocks for redirects)
 			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
@@ -304,13 +310,13 @@ public:
 			res = curl->Execute();
 		}
 		Printer::Print("executed HEad");
-		Printer::Print("url is " + *url);
-		Printer::Print("body is " + result);
+		Printer::Print("url is " + request_info->url);
+		Printer::Print("body is " + request_info->body);
 
 		uint16_t response_code = 0;
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &response_code);
 		Printer::Print("start transforming");
-		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, result, res, *url);
+		return TransformResponseCurl(response_code, response_header_collection ? std::move(response_header_collection) : nullptr, request_info->body, res, request_info->url);
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
