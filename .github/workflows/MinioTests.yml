@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install libraries
+      - name: Install Ninja
         shell: bash
         run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
 
@@ -48,11 +48,9 @@ jobs:
         with:
           vcpkgGitCommitId: 5e5d0e1cd7785623065e77eff011afdeec1a3574
 
-      - name: Build extension
-        env:
-          GEN: ninja
-        run: |
-          make release
+      - name: Build
+        shell: bash
+        run: make
 
       - name: Start S3/HTTP test server
         shell: bash

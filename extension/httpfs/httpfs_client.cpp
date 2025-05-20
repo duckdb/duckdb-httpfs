@@ -118,7 +118,7 @@ public:
 		}
 		state = http_params.state;
 		// init curl globally,
-		// curl_global_init(CURL_GLOBAL_DEFAULT);
+		curl_global_init(CURL_GLOBAL_DEFAULT);
 		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
 
 		// set curl options
@@ -159,8 +159,7 @@ public:
 	}
 
 	~HTTPFSClient() {
-		// init curl globally,
-		 // curl_global_cleanup();
+		curl_global_cleanup();
 	}
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
