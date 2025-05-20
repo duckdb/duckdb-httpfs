@@ -294,8 +294,6 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
 
-			curl_easy_setopt(*curl, CURLOPT_VERBOSE, 1L);
-
 			// Follow redirects
 			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
 
