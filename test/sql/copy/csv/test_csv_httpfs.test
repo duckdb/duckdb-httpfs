@@ -28,8 +28,6 @@ select * from 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_
 11	production designer
 12	guest
 
-pragma enable_logging('HTTP');
-
 query IIIIIIIIIIIIIIIIII
 select * from 'https://github.com/duckdb/duckdb/raw/9cf66f950dde0173e1a863a7659b3ecf11bf3978/data/csv/customer.csv';
 ----
