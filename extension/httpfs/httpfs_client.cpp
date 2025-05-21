@@ -59,7 +59,7 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	}
 
 	// If header starts with HTTP/... curl has followed a redirect and we have a new Header,
-	// so we clear all of the current header_collection
+	// so we push back a new header_collection and store headers from the redirect there.
 	if (header.rfind("HTTP/", 0) == 0) {
 		header_collection->header_collection.push_back(HTTPHeaders());
 		header_collection->header_collection.back().Insert("__RESPONSE_STATUS__", header);
@@ -108,6 +108,7 @@ struct RequestInfo {
 	string url = "";
 	string body = "";
 	uint16_t response_code = 0;
+	std::vector<HTTPHeaders> header_collection;
 };
 
 
@@ -126,6 +127,7 @@ public:
 		InitCurlGlobal();
 
 		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
+		request_info = make_uniq<RequestInfo>();
 
 		// set curl options
 		// follow redirects
@@ -153,6 +155,15 @@ public:
 		curl_easy_setopt(*curl, CURLOPT_CONNECTTIMEOUT, http_params.timeout);
 		// accept content as-is (i.e no decompressing)
 		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, "identity");
+		// follow redirects
+		curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+		// define the header callback
+		curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
+		curl_easy_setopt(*curl, CURLOPT_HEADERDATA, &request_info->header_collection);
+		// define the write data callback (for get requests)
+		curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
+		curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &request_info->body);
 
 		if (!http_params.http_proxy.empty()) {
 			curl_easy_setopt(*curl, CURLOPT_PROXY, StringUtil::Format("%s:%s", http_params.http_proxy, http_params.http_proxy_port).c_str());
@@ -174,28 +185,17 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers);
-		auto request_info = make_uniq<RequestInfo>();
 		request_info->url = info.url;
 		if (!info.params.extra_headers.empty()) {
 			auto curl_params = TransformParamsCurl(info.params);
 			request_info->url += "?" + curl_params;
 		}
 
-		auto header_collector = make_uniq<HeaderCollector>();
 		CURLcode res;
 		{
 			// If the same handle served a HEAD request, we must set NOBODY back to 0L to request content again
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
-
-
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
-			// write response data
-			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &request_info->body);
-			// write response headers (different header collection for each redirect)
-			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, header_collector.get());
-
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 			res = curl->Execute();
 		}
@@ -203,8 +203,8 @@ public:
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
 
 		idx_t bytes_received = 0;
-		if (header_collector && header_collector->header_collection.empty() && header_collector->header_collection.back().HasHeader("content-length")) {
-			bytes_received = std::stoi(header_collector->header_collection.back().GetHeaderValue("content-length"));
+		if (!request_info->header_collection.empty() && request_info->header_collection.back().HasHeader("content-length")) {
+			bytes_received = std::stoi(request_info->header_collection.back().GetHeaderValue("content-length"));
 			D_ASSERT(bytes_received == request_info->body.size());
 		} else {
 			bytes_received = request_info->body.size();
@@ -215,7 +215,7 @@ public:
 
 		const char* data = request_info->body.c_str();
 		info.content_handler(const_data_ptr_cast(data), bytes_received);
-		return TransformResponseCurl(std::move(request_info), std::move(header_collector), res);
+		return TransformResponseCurl(res);
 	}
 
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
@@ -225,7 +225,6 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers);
-		auto request_info = make_uniq<RequestInfo>();
 		// Add content type header from info
 		curl_headers.Add("Content-Type: " + info.content_type);
 		// transform parameters
@@ -235,39 +234,24 @@ public:
 			request_info->url += "?" + curl_params;
 		}
 
-		auto header_collector = make_uniq<HeaderCollector>();
 		CURLcode res;
 		{
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
-
 			// Perform PUT
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "PUT");
-
 			// Include PUT body
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, info.buffer_in_len);
 
-			// Follow redirects if needed
-			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-			// Capture response body
-			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &request_info->body);
-
-			// Capture response headers
-			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, header_collector.get());
-
 			// Apply headers
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
-			// Execute the request
 			res = curl->Execute();
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
 
-		return TransformResponseCurl(std::move(request_info), std::move(header_collector), res);
+		return TransformResponseCurl(res);
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
@@ -276,7 +260,6 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers);
-		auto request_info = make_uniq<RequestInfo>();
 		request_info->url = info.url;
 		// transform parameters
 		if (!info.params.extra_headers.empty()) {
@@ -285,7 +268,6 @@ public:
 		}
 
 		CURLcode res;
-		auto header_collector = make_uniq<HeaderCollector>();
 		{
 			// Set URL
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
@@ -293,17 +275,6 @@ public:
 			// Perform HEAD request instead of GET
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
-
-			// Follow redirects
-			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-			//  set write function to collect body — no body expected, so safe to omit
-			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &request_info->body);
-
-			// Collect response headers (multiple header blocks for redirects)
-			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, header_collector.get());
 
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
@@ -313,7 +284,7 @@ public:
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
-		return TransformResponseCurl(std::move(request_info), std::move(header_collector), res);
+		return TransformResponseCurl(res);
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
@@ -322,7 +293,6 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers);
-		auto request_info = make_uniq<RequestInfo>();
 		// transform parameters
 		request_info->url = info.url;
 		if (!info.params.extra_headers.empty()) {
@@ -331,7 +301,6 @@ public:
 		}
 
 		CURLcode res;
-		auto header_collector = make_uniq<HeaderCollector>();
 		{
 			// Set URL
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
@@ -342,14 +311,6 @@ public:
 			// Follow redirects
 			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-			// Set write function to collect response body
-			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &request_info->body);
-
-			// Collect response headers (multiple header blocks for redirects)
-			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, header_collector.get());
-
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
@@ -359,7 +320,7 @@ public:
 
 		// Get HTTP response status code
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
-		return TransformResponseCurl(std::move(request_info), std::move(header_collector), res);
+		return TransformResponseCurl( res);
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
@@ -369,7 +330,6 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers);
-		auto request_info = make_uniq<RequestInfo>();
 		const string content_type = "Content-Type: application/octet-stream";
 		curl_headers.Add(content_type.c_str());
 		// transform parameters
@@ -380,7 +340,6 @@ public:
 		}
 
 		CURLcode res;
-		auto header_collector = make_uniq<HeaderCollector>();
 		{
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
 			curl_easy_setopt(*curl, CURLOPT_POST, 1L);
@@ -388,18 +347,6 @@ public:
 			// Set POST body
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, info.buffer_in_len);
-
-			// Follow redirects
-			// TODO: should we follow redirects for POST?
-			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-			// Set write function to collect response body
-			curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &request_info->body);
-
-			// Collect response headers (multiple header blocks for redirects)
-			curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*curl, CURLOPT_HEADERDATA, header_collector.get());
 
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
@@ -411,7 +358,7 @@ public:
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
 		info.buffer_out = request_info->body;
 		// Construct HTTPResponse
-		return TransformResponseCurl(std::move(request_info), std::move(header_collector), res);
+		return TransformResponseCurl( res);
 	}
 
 private:
@@ -444,13 +391,22 @@ private:
 		return result;
 	}
 
-	unique_ptr<HTTPResponse> TransformResponseCurl(unique_ptr<RequestInfo> request_info, unique_ptr<HeaderCollector> header_collection, CURLcode res) {
+	void ResetRequestInfo() {
+		// clear headers after transform
+		request_info->header_collection.clear();
+		// reset request info.
+		request_info->body = "";
+		request_info->url = "";
+		request_info->response_code = 0;
+	}
+
+	unique_ptr<HTTPResponse> TransformResponseCurl(CURLcode res) {
 		auto status_code = HTTPStatusCode(request_info->response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
 		if (res != CURLcode::CURLE_OK) {
 			// TODO: request error can come from HTTPS Status code toString() value.
-			if (header_collection && !header_collection->header_collection.empty() && header_collection->header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
-				response->request_error = header_collection->header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
+			if (!request_info->header_collection.empty() && request_info->header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
+				response->request_error = request_info->header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
 			} else {
 				response->request_error = curl_easy_strerror(res);
 			}
@@ -458,17 +414,19 @@ private:
 		}
 		response->body = request_info->body;
 		response->url= request_info->url;
-		if (header_collection && !header_collection->header_collection.empty()) {
-			for (auto &header : header_collection->header_collection.back()) {
+		if (!request_info->header_collection.empty()) {
+			for (auto &header : request_info->header_collection.back()) {
 				response->headers.Insert(header.first, header.second);
 			}
 		}
+		ResetRequestInfo();
 		return response;
 	}
 
 private:
 	unique_ptr<CURLHandle> curl;
 	optional_ptr<HTTPState> state;
+	unique_ptr<RequestInfo> request_info;
 
 	static std::mutex &GetRefLock() {
 		static std::mutex mtx;
