@@ -25,7 +25,7 @@ select * from 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_
 11	production designer
 12	guest
 
-query II
+query I
 select response.status from duckdb_logs_parsed('HTTP') order by all;
 ----
 OK_200
