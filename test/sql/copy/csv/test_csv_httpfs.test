@@ -9,6 +9,9 @@ require parquet
 statement ok
 PRAGMA enable_verification
 
+statement ok
+pragma enable_logging('HTTP');
+
 query II
 select * from 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_role_type.parquet' order by all;
 ----
@@ -24,6 +27,8 @@ select * from 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_
 10	miscellaneous crew
 11	production designer
 12	guest
+
+pragma enable_logging('HTTP');
 
 query IIIIIIIIIIIIIIIIII
 select * from 'https://github.com/duckdb/duckdb/raw/9cf66f950dde0173e1a863a7659b3ecf11bf3978/data/csv/customer.csv';
