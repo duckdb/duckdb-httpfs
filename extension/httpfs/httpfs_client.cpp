@@ -94,8 +94,6 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	}
 	if (!cert_path.empty()) {
 		curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
-	} else {
-		throw InternalException("Could not set certificate authority");
 	}
 }
 
