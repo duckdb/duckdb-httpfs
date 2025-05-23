@@ -1019,10 +1019,10 @@ string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthPar
 	    create_s3_header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
 
 	// Get requests use fresh connection
-	auto client = http_params.http_util.InitializeClient(http_params, parsed_url.http_proto + parsed_url.host);
+	string full_host = parsed_url.http_proto + parsed_url.host;
 	std::stringstream response;
 	GetRequestInfo get_request(
-	    parsed_url.host, listobjectv2_url, header_map, http_params,
+	    full_host, listobjectv2_url, header_map, http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
 			    string trimmed_path = path;
