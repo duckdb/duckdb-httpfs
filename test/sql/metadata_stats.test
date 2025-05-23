@@ -1,0 +1,21 @@
+# name: test/sql/metadata_stats.test
+# description: Test getting metadata stats
+# group: []
+
+require parquet
+
+require httpfs
+
+require json
+
+# Test Force download with server that doesn't want to give us the head
+statement ok
+FROM read_json('https://api.spring.io/projects/spring-boot/generations')
+
+statement ok
+SET force_download=false;
+
+query II
+explain analyze SELECT id, first_name, last_name, email FROM PARQUET_SCAN('https://raw.githubusercontent.com/duckdb/duckdb/main/data/parquet-testing/userdata1.parquet')
+----
+analyzed_plan	<REGEX>:.*GET: 2.*
