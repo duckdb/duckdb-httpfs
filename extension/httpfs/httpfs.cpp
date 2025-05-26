@@ -279,7 +279,7 @@ void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
                                unique_ptr<HTTPParams> params_p)
     : FileHandle(fs, file.path, flags), params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()),
-      flags(flags), buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
+      flags(flags), length(0), buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {
