@@ -48,6 +48,7 @@ public:
 	idx_t length;
 	time_t last_modified;
 	string etag;
+	shared_ptr<ExtendedOpenFileInfo> extended_info;
 	bool initialized = false;
 
 	// When using full file download, the full file will be written to a cached file handle
