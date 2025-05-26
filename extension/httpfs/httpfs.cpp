@@ -279,13 +279,14 @@ void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
                                unique_ptr<HTTPParams> params_p)
     : FileHandle(fs, file.path, flags), params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()),
-      flags(flags), length(0), buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
+      flags(flags), buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {
 		auto &info = file.extended_info->options;
 		auto lm_entry = info.find("last_modified");
 		if (lm_entry != info.end()) {
+			last_modified = 0; // keep clang-tidy happy
 			TimestampToTimeT(lm_entry->second.GetValue<timestamp_t>(), last_modified);
 		}
 		auto etag_entry = info.find("etag");
@@ -301,6 +302,8 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 			// skip head request
 			initialized = true;
 		}
+		// copy the rest of the extended info
+		extended_info = file.extended_info;
 	}
 }
 unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
@@ -672,6 +675,8 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 				last_modified = value.last_modified;
 				length = value.length;
 				etag = value.etag;
+				extended_info = value.extended_info;
+
 
 				if (flags.OpenForReading()) {
 					read_buffer = duckdb::unique_ptr<data_t[]>(new data_t[READ_BUFFER_LEN]);
@@ -689,7 +694,7 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			FullDownload(hfs, should_write_cache);
 		}
 		if (should_write_cache) {
-			current_cache->Insert(path, {length, last_modified, etag});
+			current_cache->Insert(path, {length, last_modified, etag, extended_info});
 		}
 
 		// Initialize the read buffer now that we know the file exists

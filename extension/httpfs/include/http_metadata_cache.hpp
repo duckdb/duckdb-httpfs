@@ -19,6 +19,7 @@ struct HTTPMetadataCacheEntry {
 	idx_t length;
 	time_t last_modified;
 	string etag;
+	shared_ptr<ExtendedOpenFileInfo> extended_info;
 };
 
 // Simple cache with a max age for an entry to be valid
