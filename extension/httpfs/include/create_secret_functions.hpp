@@ -7,7 +7,6 @@ struct CreateSecretInput;
 struct S3AuthParams;
 class CreateSecretFunction;
 class BaseSecret;
-struct CreateSecretInfo;
 struct SecretEntry;
 
 struct CreateS3SecretFunctions {
@@ -16,7 +15,7 @@ public:
 	static void Register(DatabaseInstance &instance);
 
 	//! Secret refreshing mechanisms
-	static CreateSecretInfo GenerateRefreshSecretInfo(const SecretEntry &secret_entry, Value &refresh_info);
+	static CreateSecretInput GenerateRefreshSecretInfo(const SecretEntry &secret_entry, Value &refresh_info);
 	static bool TryRefreshS3Secret(ClientContext &context, const SecretEntry &secret_to_refresh);
 
 protected:

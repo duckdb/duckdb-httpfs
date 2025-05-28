@@ -12,9 +12,6 @@
 #include <chrono>
 #include <string>
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httplib.hpp"
-
 #include <map>
 
 namespace duckdb {
@@ -47,49 +44,34 @@ static string ParseNextUrlFromLinkHeader(const string &link_header_content) {
 
 HFFileHandle::~HFFileHandle() {};
 
-unique_ptr<duckdb_httplib_openssl::Client> HFFileHandle::CreateClient(optional_ptr<ClientContext> client_context) {
-	return HTTPFileSystem::GetClient(this->http_params, parsed_url.endpoint.c_str(), this);
+unique_ptr<HTTPClient> HFFileHandle::CreateClient() {
+	return http_params.http_util.InitializeClient(http_params, parsed_url.endpoint);
 }
 
-string HuggingFaceFileSystem::ListHFRequest(ParsedHFUrl &url, HTTPParams &http_params, string &next_page_url,
+string HuggingFaceFileSystem::ListHFRequest(ParsedHFUrl &url, HTTPFSParams &http_params, string &next_page_url,
                                             optional_ptr<HTTPState> state) {
-	HeaderMap header_map;
-	auto headers = HTTPFileSystem::InitializeHeaders(header_map, http_params);
+	HTTPHeaders header_map;
 	string link_header_result;
 
-	auto client = HTTPFileSystem::GetClient(http_params, url.endpoint.c_str(), nullptr);
 	std::stringstream response;
-
-	std::function<duckdb_httplib_openssl::Result(void)> request([&]() {
-		if (state) {
-			state->get_count++;
-		}
-
-		return client->Get(
-		    next_page_url.c_str(), *headers,
-		    [&](const duckdb_httplib_openssl::Response &response) {
-			    if (response.status >= 400) {
-				    throw HTTPException(response, "HTTP GET error on '%s' (HTTP %d)", next_page_url, response.status);
-			    }
-			    auto link_res = response.headers.find("Link");
-			    if (link_res != response.headers.end()) {
-				    link_header_result = link_res->second;
-			    }
-			    return true;
-		    },
-		    [&](const char *data, size_t data_length) {
-			    if (state) {
-				    state->total_bytes_received += data_length;
-			    }
-			    response << string(data, data_length);
-			    return true;
-		    });
-	});
-
-	auto res = RunRequestWithRetry(request, next_page_url, "GET", http_params, nullptr);
-
-	if (res->code != 200) {
-		throw IOException(res->error + " error for HTTP GET to '" + next_page_url + "'");
+	GetRequestInfo get_request(
+	    url.endpoint, next_page_url, header_map, http_params,
+	    [&](const HTTPResponse &response) {
+		    if (static_cast<int>(response.status) >= 400) {
+			    throw HTTPException(response, "HTTP GET error on '%s' (HTTP %d)", next_page_url, response.status);
+		    }
+		    if (response.HasHeader("Link")) {
+			    link_header_result = response.GetHeaderValue("Link");
+		    }
+		    return true;
+	    },
+	    [&](const_data_ptr_t data, idx_t data_length) {
+		    response << string(const_char_ptr_cast(data), data_length);
+		    return true;
+	    });
+	auto res = http_params.http_util.Request(get_request);
+	if (res->status != HTTPStatusCode::OK_200) {
+		throw IOException(res->GetError() + " error for HTTP GET to '" + next_page_url + "'");
 	}
 
 	if (!link_header_result.empty()) {
@@ -201,7 +183,7 @@ end:
 // - hf://datasets/lhoestq/demo1/default/train/*.parquet
 // - hf://datasets/lhoestq/demo1/*/train/file_[abc].parquet
 // - hf://datasets/lhoestq/demo1/**/train/*.parquet
-vector<string> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opener) {
+vector<OpenFileInfo> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opener) {
 	// Ensure the glob pattern is a valid HF url
 	auto parsed_glob_url = HFUrlParse(path);
 	auto first_wildcard_pos = parsed_glob_url.path.find_first_of("*[\\");
@@ -223,7 +205,9 @@ vector<string> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opene
 
 	FileOpenerInfo info;
 	info.file_path = path;
-	auto http_params = HTTPParams::ReadFrom(opener, info);
+	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util->InitializeParameters(opener, info);
+	auto &http_params = params->Cast<HTTPFSParams>();
 	SetParams(http_params, path, opener);
 	auto http_state = HTTPState::TryGetState(opener).get();
 
@@ -251,7 +235,7 @@ vector<string> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opene
 	}
 
 	vector<string> pattern_splits = StringUtil::Split(parsed_glob_url.path, "/");
-	vector<string> result;
+	vector<OpenFileInfo> result;
 	for (const auto &file : files) {
 
 		vector<string> file_splits = StringUtil::Split(file, "/");
@@ -267,43 +251,43 @@ vector<string> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opene
 	return result;
 }
 
-unique_ptr<ResponseWrapper> HuggingFaceFileSystem::HeadRequest(FileHandle &handle, string hf_url,
-                                                               HeaderMap header_map) {
+unique_ptr<HTTPResponse> HuggingFaceFileSystem::HeadRequest(FileHandle &handle, string hf_url, HTTPHeaders header_map) {
 	auto &hf_handle = handle.Cast<HFFileHandle>();
 	auto http_url = HuggingFaceFileSystem::GetFileUrl(hf_handle.parsed_url);
 	return HTTPFileSystem::HeadRequest(handle, http_url, header_map);
 }
 
-unique_ptr<ResponseWrapper> HuggingFaceFileSystem::GetRequest(FileHandle &handle, string s3_url, HeaderMap header_map) {
+unique_ptr<HTTPResponse> HuggingFaceFileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map) {
 	auto &hf_handle = handle.Cast<HFFileHandle>();
 	auto http_url = HuggingFaceFileSystem::GetFileUrl(hf_handle.parsed_url);
 	return HTTPFileSystem::GetRequest(handle, http_url, header_map);
 }
 
-unique_ptr<ResponseWrapper> HuggingFaceFileSystem::GetRangeRequest(FileHandle &handle, string s3_url,
-                                                                   HeaderMap header_map, idx_t file_offset,
-                                                                   char *buffer_out, idx_t buffer_out_len) {
+unique_ptr<HTTPResponse> HuggingFaceFileSystem::GetRangeRequest(FileHandle &handle, string s3_url,
+                                                                HTTPHeaders header_map, idx_t file_offset,
+                                                                char *buffer_out, idx_t buffer_out_len) {
 	auto &hf_handle = handle.Cast<HFFileHandle>();
 	auto http_url = HuggingFaceFileSystem::GetFileUrl(hf_handle.parsed_url);
 	return HTTPFileSystem::GetRangeRequest(handle, http_url, header_map, file_offset, buffer_out, buffer_out_len);
 }
 
-unique_ptr<HTTPFileHandle> HuggingFaceFileSystem::CreateHandle(const string &path, FileOpenFlags flags,
+unique_ptr<HTTPFileHandle> HuggingFaceFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                                optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
-	auto parsed_url = HFUrlParse(path);
+	auto parsed_url = HFUrlParse(file.path);
 
 	FileOpenerInfo info;
-	info.file_path = path;
+	info.file_path = file.path;
 
-	auto params = HTTPParams::ReadFrom(opener, info);
-	SetParams(params, path, opener);
+	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util->InitializeParameters(opener, info);
+	SetParams(params->Cast<HTTPFSParams>(), file.path, opener);
 
-	return duckdb::make_uniq<HFFileHandle>(*this, std::move(parsed_url), path, flags, params);
+	return duckdb::make_uniq<HFFileHandle>(*this, std::move(parsed_url), file, flags, std::move(params));
 }
 
-void HuggingFaceFileSystem::SetParams(HTTPParams &params, const string &path, optional_ptr<FileOpener> opener) {
+void HuggingFaceFileSystem::SetParams(HTTPFSParams &params, const string &path, optional_ptr<FileOpener> opener) {
 	auto secret_manager = FileOpener::TryGetSecretManager(opener);
 	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
 	if (secret_manager && transaction) {

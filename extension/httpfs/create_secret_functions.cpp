@@ -12,7 +12,7 @@ void CreateS3SecretFunctions::Register(DatabaseInstance &instance) {
 	RegisterCreateSecretFunction(instance, "gcs");
 }
 
-static Value MapToStruct(const Value &map){
+static Value MapToStruct(const Value &map) {
 	auto children = MapValue::GetChildren(map);
 
 	child_list_t<Value> struct_fields;
@@ -109,17 +109,21 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 			refresh = true;
 			secret->secret_map["refresh_info"] = MapToStruct(named_param.second);
 		} else {
-			throw InvalidInputException("Unknown named parameter passed to CreateSecretFunctionInternal: " + lower_name);
+			throw InvalidInputException("Unknown named parameter passed to CreateSecretFunctionInternal: " +
+			                            lower_name);
 		}
 	}
 
 	return std::move(secret);
 }
 
-CreateSecretInfo CreateS3SecretFunctions::GenerateRefreshSecretInfo(const SecretEntry &secret_entry, Value &refresh_info) {
-	const auto &kv_secret = dynamic_cast<const KeyValueSecret&>(*secret_entry.secret);
+CreateSecretInput CreateS3SecretFunctions::GenerateRefreshSecretInfo(const SecretEntry &secret_entry,
+                                                                     Value &refresh_info) {
+	const auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*secret_entry.secret);
 
-	CreateSecretInfo result(OnCreateConflict::REPLACE_ON_CONFLICT, secret_entry.persist_type);
+	CreateSecretInput result;
+	result.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
+	result.persist_type = SecretPersistType::TEMPORARY;
 
 	result.type = kv_secret.GetType();
 	result.name = kv_secret.GetName();
@@ -141,7 +145,7 @@ CreateSecretInfo CreateS3SecretFunctions::GenerateRefreshSecretInfo(const Secret
 
 //! Function that will automatically try to refresh a secret
 bool CreateS3SecretFunctions::TryRefreshS3Secret(ClientContext &context, const SecretEntry &secret_to_refresh) {
-	const auto &kv_secret = dynamic_cast<const KeyValueSecret&>(*secret_to_refresh.secret);
+	const auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*secret_to_refresh.secret);
 
 	Value refresh_info;
 	if (!kv_secret.TryGetValue("refresh_info", refresh_info)) {
@@ -153,12 +157,15 @@ bool CreateS3SecretFunctions::TryRefreshS3Secret(ClientContext &context, const S
 	// TODO: change SecretManager API to avoid requiring catching this exception
 	try {
 		auto res = secret_manager.CreateSecret(context, refresh_input);
-		auto &new_secret = dynamic_cast<const KeyValueSecret&>(*res->secret);
-		DUCKDB_LOG_INFO(context, "httpfs.SecretRefresh", "Successfully refreshed secret: %s, new key_id: %s", secret_to_refresh.secret->GetName(), new_secret.TryGetValue("key_id").ToString());
+		auto &new_secret = dynamic_cast<const KeyValueSecret &>(*res->secret);
+		DUCKDB_LOG_INFO(context, "Successfully refreshed secret: %s, new key_id: %s",
+		                secret_to_refresh.secret->GetName(), new_secret.TryGetValue("key_id").ToString());
 		return true;
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
-		string new_message = StringUtil::Format("Exception thrown while trying to refresh secret %s. To fix this, please recreate or remove the secret and try again. Error: '%s'", secret_to_refresh.secret->GetName(), error.Message());
+		string new_message = StringUtil::Format("Exception thrown while trying to refresh secret %s. To fix this, "
+		                                        "please recreate or remove the secret and try again. Error: '%s'",
+		                                        secret_to_refresh.secret->GetName(), error.Message());
 		throw Exception(error.Type(), new_message);
 	}
 }
@@ -204,6 +211,7 @@ void CreateS3SecretFunctions::RegisterCreateSecretFunction(DatabaseInstance &ins
 	secret_type.name = type;
 	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type.default_provider = "config";
+	secret_type.extension = "httpfs";
 
 	ExtensionUtil::RegisterSecretType(instance, secret_type);
 
@@ -218,6 +226,7 @@ void CreateBearerTokenFunctions::Register(DatabaseInstance &instance) {
 	secret_type_hf.name = HUGGINGFACE_TYPE;
 	secret_type_hf.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type_hf.default_provider = "config";
+	secret_type_hf.extension = "httpfs";
 	ExtensionUtil::RegisterSecretType(instance, secret_type_hf);
 
 	// Huggingface config provider
