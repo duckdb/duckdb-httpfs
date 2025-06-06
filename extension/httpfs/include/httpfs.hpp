@@ -48,7 +48,7 @@ public:
 	idx_t length;
 	time_t last_modified;
 	string etag;
-	bool direct_complete_download;
+	bool force_full_download;
 	bool initialized = false;
 
 	// When using full file download, the full file will be written to a cached file handle
