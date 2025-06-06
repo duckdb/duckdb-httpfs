@@ -296,9 +296,9 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		if (fs_entry != info.end()) {
 			length = fs_entry->second.GetValue<uint64_t>();
 		}
-		auto direct_complete_download_entry = info.find("direct_complete_download");
-		if (direct_complete_download_entry != info.end()) {
-			force_full_download = direct_complete_download_entry->second.GetValue<bool>();
+		auto force_full_download_entry = info.find("force_full_download");
+		if (force_full_download_entry != info.end()) {
+			force_full_download = force_full_download_entry->second.GetValue<bool>();
 		}
 		if (lm_entry != info.end() && etag_entry != info.end() && fs_entry != info.end()) {
 			// we found all relevant entries (last_modified, etag and file size)
