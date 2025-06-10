@@ -143,6 +143,7 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 	this->SetExtensionOptionValue("s3_endpoint", DUCKDB_ENDPOINT_ENV_VAR);
 	this->SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR);
 	this->SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR);
+	this->SetExtensionOptionValue("s3_url_style", DUCKDB_URL_STYLE_ENV_VAR);
 }
 
 S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
@@ -156,6 +157,7 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 	params.endpoint = DUCKDB_ENDPOINT_ENV_VAR;
 	params.kms_key_id = DUCKDB_KMS_KEY_ID_ENV_VAR;
 	params.use_ssl = DUCKDB_USE_SSL_ENV_VAR;
+	params.url_style = DUCKDB_URL_STYLE_ENV_VAR;
 
 	return params;
 }
