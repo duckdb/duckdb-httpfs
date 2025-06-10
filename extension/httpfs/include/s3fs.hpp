@@ -223,6 +223,8 @@ public:
 		return true;
 	}
 
+	static string GetS3BadRequestError(S3AuthParams &s3_auth_params);
+	static string GetS3AuthError(S3AuthParams &s3_auth_params);
 	static HTTPException GetS3Error(S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url);
 
 protected:

@@ -741,6 +741,20 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 				return;
 			}
 		}
+		auto &extra_info = error.ExtraInfo();
+		auto entry = extra_info.find("status_code");
+		if (entry != extra_info.end()) {
+			if (entry->second == "400") {
+				// 400: BAD REQUEST
+				auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params);
+				throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
+			}
+			if (entry->second == "403") {
+				// 403: FORBIDDEN
+				auto extra_text = S3FileSystem::GetS3AuthError(auth_params);
+				throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
+			}
+		}
 		throw;
 	}
 
@@ -973,8 +987,17 @@ bool S3FileSystem::ListFiles(const string &directory, const std::function<void(c
 	return true;
 }
 
-HTTPException S3FileSystem::GetS3Error(S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url) {
-	string region = s3_auth_params.region;
+string S3FileSystem::GetS3BadRequestError(S3AuthParams &s3_auth_params) {
+	string extra_text = "\n\nBad Request - this can be caused by the S3 region being set incorrectly.";
+	if (s3_auth_params.region.empty()) {
+		extra_text += "\n* No region is provided.";
+	} else {
+		extra_text += "\n* Provided region is \"" + s3_auth_params.region + "\"";
+	}
+	return extra_text;
+}
+
+string S3FileSystem::GetS3AuthError(S3AuthParams &s3_auth_params) {
 	string extra_text = "\n\nAuthentication Failure - this is usually caused by invalid or missing credentials.";
 	if (s3_auth_params.secret_access_key.empty() && s3_auth_params.access_key_id.empty()) {
 		extra_text += "\n* No credentials are provided.";
@@ -982,17 +1005,25 @@ HTTPException S3FileSystem::GetS3Error(S3AuthParams &s3_auth_params, const HTTPR
 		extra_text += "\n* Credentials are provided, but they did not work.";
 	}
 	extra_text += "\n* See https://duckdb.org/docs/stable/extensions/httpfs/s3api.html";
+	return extra_text;
+}
+
+HTTPException S3FileSystem::GetS3Error(S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url) {
+	string extra_text;
+	if (response.status == HTTPStatusCode::BadRequest_400) {
+		extra_text = GetS3BadRequestError(s3_auth_params);
+	}
+	if (response.status == HTTPStatusCode::Forbidden_403) {
+		extra_text = GetS3AuthError(s3_auth_params);
+	}
 	auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
 	throw HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url,
 	                    s3_auth_params.region, response.status, status_message, extra_text);
 }
 
 HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &response, const string &url) {
-	if (response.status == HTTPStatusCode::Forbidden_403) {
-		auto &s3_handle = handle.Cast<S3FileHandle>();
-		return GetS3Error(s3_handle.auth_params, response, url);
-	}
-	return HTTPFileSystem::GetHTTPError(handle, response, url);
+	auto &s3_handle = handle.Cast<S3FileHandle>();
+	return GetS3Error(s3_handle.auth_params, response, url);
 }
 string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
                                 string &continuation_token, optional_ptr<HTTPState> state, bool use_delimiter) {
