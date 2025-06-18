@@ -536,7 +536,7 @@ void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache)
 		// Try to fully download the file first
 		const auto full_download_result = hfs.GetRequest(*this, path, {});
 		if (full_download_result->status != HTTPStatusCode::OK_200) {
-			throw HTTPException(*full_download_result, "Full download failed to to URL \"%s\": %s (%s)",
+			throw HTTPException(*full_download_result, "Full download failed to to URL \"%s\": %d (%s)",
 			                    full_download_result->url, static_cast<int>(full_download_result->status),
 			                    full_download_result->GetError());
 		}
