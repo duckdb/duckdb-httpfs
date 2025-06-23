@@ -9,6 +9,7 @@
 #include "duckdb/main/client_data.hpp"
 #include "http_metadata_cache.hpp"
 #include "httpfs_client.hpp"
+#include "duckdb/common/http_util.hpp"
 
 #include <mutex>
 
@@ -21,48 +22,13 @@ using HeaderMap = case_insensitive_map_t<string>;
 // avoid including httplib in header
 struct ResponseWrapper {
 public:
-	explicit ResponseWrapper(duckdb_httplib_openssl::Response &res, string &original_url);
+	explicit ResponseWrapper(HTTPResponse &res, string &original_url);
 	int code;
 	string error;
 	HeaderMap headers;
 	string http_url;
 	string body;
 };
-
-struct HTTPParams {
-
-	static constexpr uint64_t DEFAULT_TIMEOUT_SECONDS = 30; // 30 sec
-	static constexpr uint64_t DEFAULT_RETRIES = 3;
-	static constexpr uint64_t DEFAULT_RETRY_WAIT_MS = 100;
-	static constexpr float DEFAULT_RETRY_BACKOFF = 4;
-	static constexpr bool DEFAULT_FORCE_DOWNLOAD = false;
-	static constexpr bool DEFAULT_ENABLE_HTTP_WRITE = false;
-	static constexpr bool DEFAULT_KEEP_ALIVE = true;
-	static constexpr bool DEFAULT_ENABLE_SERVER_CERT_VERIFICATION = false;
-	static constexpr uint64_t DEFAULT_HF_MAX_PER_PAGE = 0;
-
-	uint64_t timeout = DEFAULT_TIMEOUT_SECONDS; // seconds component of a timeout
-	uint64_t timeout_usec = 0;                  // usec component of a timeout
-	uint64_t retries = DEFAULT_RETRIES;
-	uint64_t retry_wait_ms = DEFAULT_RETRY_WAIT_MS;
-	float retry_backoff = DEFAULT_RETRY_BACKOFF;
-	bool force_download = DEFAULT_FORCE_DOWNLOAD;
-	bool enable_http_write = DEFAULT_ENABLE_HTTP_WRITE;
-	bool keep_alive = DEFAULT_KEEP_ALIVE;
-	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
-	idx_t hf_max_per_page = DEFAULT_HF_MAX_PER_PAGE;
-
-	string ca_cert_file;
-	string http_proxy;
-	idx_t http_proxy_port;
-	string http_proxy_username;
-	string http_proxy_password;
-	string bearer_token;
-	unordered_map<string, string> extra_headers;
-
-	static HTTPParams ReadFrom(optional_ptr<FileOpener> opener, optional_ptr<FileOpenerInfo> info);
-};
-
 
 class HTTPClientCache {
 public:

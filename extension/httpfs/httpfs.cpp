@@ -22,6 +22,17 @@
 
 namespace duckdb {
 
+class HTTPFSUtil : public HTTPUtil {
+public:
+	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
+	                                            optional_ptr<FileOpenerInfo> info) override;
+	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+
+	string GetName() const override {
+		return "httpfs";
+	}
+};
+
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		auto db = opener->TryGetDatabase();
@@ -54,9 +65,9 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	FileOpener::TryGetCurrentSetting(opener, "http_keep_alive", result->keep_alive, info);
 	FileOpener::TryGetCurrentSetting(opener, "enable_server_cert_verification", result->enable_server_cert_verification,
 	                                 info);
-	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result.ca_cert_file, info);
-	FileOpener::TryGetCurrentSetting(opener, "hf_max_per_page", result.hf_max_per_page, info);
-	FileOpener::TryGetCurrentSetting(opener, "enable_http_write", result.enable_http_write, info);
+	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);
+	FileOpener::TryGetCurrentSetting(opener, "hf_max_per_page", result->hf_max_per_page, info);
+	FileOpener::TryGetCurrentSetting(opener, "enable_http_write", result->enable_http_write, info);
 
 	// HTTP Secret lookups
 	KeyValueSecretReader settings_reader(*opener, info, "http");
@@ -452,90 +463,48 @@ int64_t HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes)
 void HTTPFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 
-	// Check if HTTP write is enabled
-	if (!hfh.http_params.enable_http_write) {
-		throw NotImplementedException("Writing to HTTP files not implemented");
+	if (location != hfh.SeekPosition()) {
+		throw NotImplementedException("Writing to HTTP Files must be sequential");
 	}
 
-	if (!buffer || nr_bytes <= 1) {
-		return;
-	}
-
-	// Initialize the write buffer if it is not already done
-	if (hfh.write_buffer.empty()) {
-		hfh.write_buffer.resize(hfh.WRITE_BUFFER_LEN);
-		hfh.write_buffer_idx = 0;
-	}
-
-	idx_t bytes_to_copy = nr_bytes;
-	idx_t buffer_offset = 0;
-
-	// Accumulate data into the write buffer
-	while (bytes_to_copy > 0) {
-		idx_t space_in_buffer = hfh.WRITE_BUFFER_LEN - hfh.write_buffer_idx;
-		idx_t copy_amount = MinValue<idx_t>(space_in_buffer, bytes_to_copy);
-
-		// Copy data to the write buffer
-		memcpy(hfh.write_buffer.data() + hfh.write_buffer_idx, (char *)buffer + buffer_offset, copy_amount);
-		hfh.write_buffer_idx += copy_amount;
-		bytes_to_copy -= copy_amount;
-		buffer_offset += copy_amount;
-
-		// std::cout << "Write buffer idx after write: " << hfh.write_buffer_idx << std::endl;
-
-		// If the buffer is full, send the data
-		if (hfh.write_buffer_idx == hfh.WRITE_BUFFER_LEN) {
-			// Perform the HTTP POST request
+	// Adapted from Write logic, but to a buffer instead of disk
+	idx_t remaining = nr_bytes;
+	auto data = reinterpret_cast<const data_t *>(buffer);
+	while (remaining > 0) {
+		idx_t to_write = std::min(remaining, hfh.current_buffer_len - hfh.write_buffer_idx);
+		if (to_write > 0) {
+			memcpy(hfh.write_buffer.data() + hfh.write_buffer_idx, data, to_write);
+			hfh.write_buffer_idx += to_write;
+			data += to_write;
+			remaining -= to_write;
+		}
+		if (remaining > 0) {
 			FlushBuffer(hfh);
 		}
 	}
-
-	// Update the file offset
-	hfh.file_offset += nr_bytes;
-
-	// std::cout << "Completed Write operation. Total bytes written: " << nr_bytes << std::endl;
 }
 
 void HTTPFileSystem::FlushBuffer(HTTPFileHandle &hfh) {
-	// If no data in buffer, return
-	if (hfh.write_buffer_idx <= 1) {
+	if (hfh.write_buffer_idx == 0) {
 		return;
 	}
 
-	// Prepare the URL and headers for the HTTP POST request
 	string path, proto_host_port;
-	ParseUrl(hfh.path, path, proto_host_port);
+	HTTPUtil::DecomposeURL(hfh.path, path, proto_host_port);
 
-	HeaderMap header_map;
-	auto headers = InitializeHeaders(header_map, hfh.http_params);
+	HTTPHeaders header_map;
+	hfh.AddHeaders(header_map);
 
-	// Define the request lambda
-	std::function<duckdb_httplib_openssl::Result(void)> request([&]() {
-		auto client = GetClient(hfh.http_params, proto_host_port.c_str(), &hfh);
-		duckdb_httplib_openssl::Request req;
-		req.method = "POST";
-		req.path = path;
-		req.headers = *headers;
-		req.headers.emplace("Content-Type", "application/octet-stream");
+	auto &http_util = hfh.http_params.http_util;
 
-		// Prepare the request body from the write buffer
-		req.body = std::string(reinterpret_cast<const char *>(hfh.write_buffer.data()), hfh.write_buffer_idx);
+	PostRequestInfo post_request(hfh.path, header_map, hfh.http_params,
+	                             const_data_ptr_cast(hfh.write_buffer.data()), hfh.write_buffer_idx);
 
-		// std::cout << "Sending request with " << hfh.write_buffer_idx << " bytes of data" << std::endl;
-
-		return client->send(req);
-	});
-
-	// Perform the HTTP POST request and handle retries
-	auto response = RunRequestWithRetry(request, hfh.path, "POST", hfh.http_params);
-
-	// Check if the response was successful (HTTP 200-299 status code)
-	if (response->code < 200 || response->code >= 300) {
-		throw HTTPException(*response, "HTTP POST request failed to '%s' with status code: %d", hfh.path.c_str(),
-		                    response->code);
+	auto res = http_util.Request(post_request);
+	if (!res->Success()) {
+		throw HTTPException(hfh, *res, "Failed to write to file");
 	}
 
-	// Reset the write buffer index after sending data
 	hfh.write_buffer_idx = 0;
 }
 
@@ -548,7 +517,7 @@ void HTTPFileHandle::Close() {
 
 int64_t HTTPFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
-	Write(handle, buffer, nr_bytes, hfh.file_offset);
+	Write(handle, buffer, nr_bytes, hfh.SeekPosition());
 	return nr_bytes;
 }
 
@@ -823,18 +792,26 @@ void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
 	client_cache.StoreClient(std::move(client));
 }
 
-ResponseWrapper::ResponseWrapper(duckdb_httplib_openssl::Response &res, string &original_url) {
-	code = res.status;
-	error = res.reason;
-	for (auto &h : res.headers) {
-		headers[h.first] = h.second;
+ResponseWrapper::ResponseWrapper(HTTPResponse &res, string &original_url) {
+	this->code = res.status;
+	this->error = res.reason;
+	for (auto &header : res.headers) {
+		this->headers[header.first] = header.second;
 	}
-	http_url = original_url;
-	body = res.body;
+	this->http_url = res.url;
+	this->body = res.body;
 }
 
 HTTPFileHandle::~HTTPFileHandle() {
 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
-};
+}
+
+string HTTPFileSystem::GetName() const {
+	return "httpfs";
+}
+
+void HTTPFileSystem::Verify() {
+	// TODO
+}
 
 } // namespace duckdb

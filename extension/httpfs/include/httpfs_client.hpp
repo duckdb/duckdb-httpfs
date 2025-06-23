@@ -9,31 +9,30 @@ struct FileOpenerInfo;
 class HTTPState;
 
 struct HTTPFSParams : public HTTPParams {
-	HTTPFSParams(HTTPUtil &http_util) : HTTPParams(http_util) {
-	}
+	using HTTPParams::HTTPParams;
 
-	static constexpr bool DEFAULT_ENABLE_SERVER_CERT_VERIFICATION = false;
-	static constexpr uint64_t DEFAULT_HF_MAX_PER_PAGE = 0;
 	static constexpr bool DEFAULT_FORCE_DOWNLOAD = false;
+	static constexpr uint64_t DEFAULT_HF_MAX_PER_PAGE = 0;
+	static constexpr bool DEFAULT_ENABLE_SERVER_CERT_VERIFICATION = true;
 
 	bool force_download = DEFAULT_FORCE_DOWNLOAD;
-	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
 	idx_t hf_max_per_page = DEFAULT_HF_MAX_PER_PAGE;
+	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
 	string ca_cert_file;
-	string bearer_token;
-	shared_ptr<HTTPState> state;
 };
 
-class HTTPFSUtil : public HTTPUtil {
+class HTTPClient {
 public:
-	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
-	                                            optional_ptr<FileOpenerInfo> info) override;
-	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+	virtual ~HTTPClient() = default;
 
-	static unordered_map<string, string> ParseGetParameters(const string &text);
-	static shared_ptr<HTTPUtil> GetHTTPUtil(optional_ptr<FileOpener> opener);
-
-	string GetName() const override;
+	virtual duckdb::unique_ptr<HTTPResponse> Get(const string &url, HTTPHeaders &headers, idx_t file_offset,
+	                                             char *buffer_out, idx_t buffer_out_len);
+	virtual duckdb::unique_ptr<HTTPResponse> Head(const string &url, HTTPHeaders &headers);
+	virtual duckdb::unique_ptr<HTTPResponse> Post(const string &url, HTTPHeaders &headers, const char *buffer_in,
+	                                              idx_t buffer_in_len, string &result_p, string &params_p);
+	virtual duckdb::unique_ptr<HTTPResponse> Put(const string &url, HTTPHeaders &headers, const char *buffer_in,
+	                                             idx_t buffer_in_len, const string &params);
+	virtual duckdb::unique_ptr<HTTPResponse> Delete(const string &url, HTTPHeaders &headers);
 };
 
 } // namespace duckdb
