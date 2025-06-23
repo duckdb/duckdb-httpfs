@@ -22,23 +22,6 @@
 
 namespace duckdb {
 
-string HTTPFSUtil::GetName() const {
-	return "httpfs";
-}
-
-unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
-	unordered_map<string, string> result;
-	auto pairs = StringUtil::Split(text, '&');
-	for (const auto &pair : pairs) {
-		auto kv = StringUtil::Split(pair, '=');
-		if (kv.size() != 2) {
-			throw IOException("Error parsing GET parameters");
-		}
-		result[kv[0]] = kv[1];
-	}
-	return result;
-}
-
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		auto db = opener->TryGetDatabase();
