@@ -17,6 +17,7 @@ source_files = [
             'http_state.cpp',
             'httpfs.cpp',
             'httpfs_extension.cpp',
+            'httpfs_client.cpp',
             's3fs.cpp',
         ]
     ]

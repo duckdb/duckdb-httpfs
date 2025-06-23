@@ -11,7 +11,6 @@
 namespace duckdb {
 
 static void LoadInternal(DatabaseInstance &instance) {
-	S3FileSystem::Verify(); // run some tests to see if all the hashes work out
 	auto &fs = instance.GetFileSystem();
 
 	fs.RegisterSubSystem(make_uniq<HTTPFileSystem>());
@@ -22,8 +21,8 @@ static void LoadInternal(DatabaseInstance &instance) {
 
 	// Global HTTP config
 	// Single timeout value is used for all 4 types of timeouts, we could split it into 4 if users need that
-	config.AddExtensionOption("http_timeout", "HTTP timeout read/write/connection/retry (in seconds)", LogicalType::UBIGINT,
-	                          Value::UBIGINT(HTTPParams::DEFAULT_TIMEOUT_SECONDS));
+	config.AddExtensionOption("http_timeout", "HTTP timeout read/write/connection/retry (in seconds)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HTTPParams::DEFAULT_TIMEOUT_SECONDS));
 	config.AddExtensionOption("http_retries", "HTTP retries on I/O error", LogicalType::UBIGINT, Value(3));
 	config.AddExtensionOption("http_retry_wait_ms", "Time between retries", LogicalType::UBIGINT, Value(100));
 	config.AddExtensionOption("force_download", "Forces upfront download of file", LogicalType::BOOLEAN, Value(false));
@@ -50,6 +49,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	config.AddExtensionOption("s3_endpoint", "S3 Endpoint", LogicalType::VARCHAR);
 	config.AddExtensionOption("s3_url_style", "S3 URL style", LogicalType::VARCHAR, Value("vhost"));
 	config.AddExtensionOption("s3_use_ssl", "S3 use SSL", LogicalType::BOOLEAN, Value(true));
+	config.AddExtensionOption("s3_kms_key_id", "S3 KMS Key ID", LogicalType::VARCHAR);
 	config.AddExtensionOption("s3_url_compatibility_mode", "Disable Globs and Query Parameters on S3 URLs",
 	                          LogicalType::BOOLEAN, Value(false));
 
@@ -64,6 +64,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	// HuggingFace options
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+	config.http_util = make_shared_ptr<HTTPFSUtil>();
 
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	provider->SetAll();
@@ -72,7 +73,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	CreateBearerTokenFunctions::Register(instance);
 
 	// set pointer to OpenSSL encryption state
-	config.encryption_util = make_shared_ptr<AESGCMStateSSLFactory>();
+	config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
 }
 void HttpfsExtension::Load(DuckDB &db) {
 	LoadInternal(*db.instance);

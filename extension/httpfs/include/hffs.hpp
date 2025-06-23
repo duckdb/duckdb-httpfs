@@ -22,13 +22,13 @@ class HuggingFaceFileSystem : public HTTPFileSystem {
 public:
 	~HuggingFaceFileSystem() override;
 
-	vector<string> Glob(const string &path, FileOpener *opener = nullptr) override;
+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 
-	duckdb::unique_ptr<ResponseWrapper> HeadRequest(FileHandle &handle, string hf_url, HeaderMap header_map) override;
-	duckdb::unique_ptr<ResponseWrapper> GetRequest(FileHandle &handle, string hf_url, HeaderMap header_map) override;
-	duckdb::unique_ptr<ResponseWrapper> GetRangeRequest(FileHandle &handle, string hf_url, HeaderMap header_map,
-	                                                    idx_t file_offset, char *buffer_out,
-	                                                    idx_t buffer_out_len) override;
+	duckdb::unique_ptr<HTTPResponse> HeadRequest(FileHandle &handle, string hf_url, HTTPHeaders header_map) override;
+	duckdb::unique_ptr<HTTPResponse> GetRequest(FileHandle &handle, string hf_url, HTTPHeaders header_map) override;
+	duckdb::unique_ptr<HTTPResponse> GetRangeRequest(FileHandle &handle, string hf_url, HTTPHeaders header_map,
+	                                                 idx_t file_offset, char *buffer_out,
+	                                                 idx_t buffer_out_len) override;
 
 	bool CanHandleFile(const string &fpath) override {
 		return fpath.rfind("hf://", 0) == 0;
@@ -42,13 +42,13 @@ public:
 	string GetTreeUrl(const ParsedHFUrl &url, idx_t limit);
 	string GetFileUrl(const ParsedHFUrl &url);
 
-	static void SetParams(HTTPParams &params, const string &path, optional_ptr<FileOpener> opener);
+	static void SetParams(HTTPFSParams &params, const string &path, optional_ptr<FileOpener> opener);
 
 protected:
-	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const string &path, FileOpenFlags flags,
+	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                                optional_ptr<FileOpener> opener) override;
 
-	string ListHFRequest(ParsedHFUrl &url, HTTPParams &http_params, string &next_page_url,
+	string ListHFRequest(ParsedHFUrl &url, HTTPFSParams &http_params, string &next_page_url,
 	                     optional_ptr<HTTPState> state);
 };
 
@@ -56,13 +56,13 @@ class HFFileHandle : public HTTPFileHandle {
 	friend class HuggingFaceFileSystem;
 
 public:
-	HFFileHandle(FileSystem &fs, ParsedHFUrl hf_url, string http_url, FileOpenFlags flags,
-	             const HTTPParams &http_params)
-	    : HTTPFileHandle(fs, std::move(http_url), flags, http_params), parsed_url(std::move(hf_url)) {
+	HFFileHandle(FileSystem &fs, ParsedHFUrl hf_url, const OpenFileInfo &file, FileOpenFlags flags,
+	             unique_ptr<HTTPParams> http_params)
+	    : HTTPFileHandle(fs, file, flags, std::move(http_params)), parsed_url(std::move(hf_url)) {
 	}
 	~HFFileHandle() override;
 
-	unique_ptr<duckdb_httplib_openssl::Client> CreateClient(optional_ptr<ClientContext> client_context) override;
+	unique_ptr<HTTPClient> CreateClient() override;
 
 protected:
 	ParsedHFUrl parsed_url;

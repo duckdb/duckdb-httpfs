@@ -52,6 +52,7 @@ void HTTPState::Reset() {
 	get_count = 0;
 	put_count = 0;
 	post_count = 0;
+	delete_count = 0;
 	total_bytes_received = 0;
 	total_bytes_sent = 0;
 
@@ -78,6 +79,7 @@ void HTTPState::WriteProfilingInformation(std::ostream &ss) {
 	string get = "#GET: " + to_string(get_count);
 	string put = "#PUT: " + to_string(put_count);
 	string post = "#POST: " + to_string(post_count);
+	string del = "#DELETE: " + to_string(delete_count);
 
 	constexpr idx_t TOTAL_BOX_WIDTH = 39;
 	ss << "┌─────────────────────────────────────┐\n";
@@ -90,6 +92,7 @@ void HTTPState::WriteProfilingInformation(std::ostream &ss) {
 	ss << "││" + QueryProfiler::DrawPadded(get, TOTAL_BOX_WIDTH - 4) + "││\n";
 	ss << "││" + QueryProfiler::DrawPadded(put, TOTAL_BOX_WIDTH - 4) + "││\n";
 	ss << "││" + QueryProfiler::DrawPadded(post, TOTAL_BOX_WIDTH - 4) + "││\n";
+	ss << "││" + QueryProfiler::DrawPadded(del, TOTAL_BOX_WIDTH - 4) + "││\n";
 	ss << "│└───────────────────────────────────┘│\n";
 	ss << "└─────────────────────────────────────┘\n";
 }
