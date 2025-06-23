@@ -500,7 +500,11 @@ void HTTPFileSystem::FlushBuffer(HTTPFileHandle &hfh) {
 
 	HeaderMap header_map;
 	hfh.AddHeaders(header_map);
-	HTTPHeaders headers(header_map);
+
+	HTTPHeaders headers;
+	for (const auto &kv : header_map) {
+		headers.Insert(kv.first, kv.second);
+	}
 
 	auto &http_util = hfh.http_params.http_util;
 
