@@ -19,6 +19,9 @@ struct HTTPFSParams : public HTTPParams {
 	idx_t hf_max_per_page = DEFAULT_HF_MAX_PER_PAGE;
 	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
 	string ca_cert_file;
+	bool enable_http_write = false;
+	string bearer_token;
+	shared_ptr<HTTPState> state;
 };
 
 class HTTPFSUtil : public HTTPUtil {

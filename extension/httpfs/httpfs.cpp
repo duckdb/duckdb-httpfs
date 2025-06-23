@@ -498,17 +498,18 @@ void HTTPFileSystem::FlushBuffer(HTTPFileHandle &hfh) {
 	string path, proto_host_port;
 	HTTPUtil::DecomposeURL(hfh.path, path, proto_host_port);
 
-	HTTPHeaders header_map;
+	HeaderMap header_map;
 	hfh.AddHeaders(header_map);
+	HTTPHeaders headers(header_map);
 
 	auto &http_util = hfh.http_params.http_util;
 
-	PostRequestInfo post_request(hfh.path, header_map, hfh.http_params,
+	PostRequestInfo post_request(hfh.path, headers, hfh.http_params,
 	                             const_data_ptr_cast(hfh.write_buffer.data()), hfh.write_buffer_idx);
 
 	auto res = http_util.Request(post_request);
 	if (!res->Success()) {
-		throw HTTPException(hfh, *res, "Failed to write to file");
+		throw HTTPException(*res, "Failed to write to file");
 	}
 
 	hfh.write_buffer_idx = 0;
@@ -799,7 +800,7 @@ void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
 }
 
 ResponseWrapper::ResponseWrapper(HTTPResponse &res, string &original_url) {
-	this->code = res.status;
+	this->code = static_cast<int>(res.status);
 	this->error = res.reason;
 	for (auto &header : res.headers) {
 		this->headers[header.first] = header.second;
@@ -810,10 +811,6 @@ ResponseWrapper::ResponseWrapper(HTTPResponse &res, string &original_url) {
 
 HTTPFileHandle::~HTTPFileHandle() {
 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
-}
-
-string HTTPFileSystem::GetName() const {
-	return "httpfs";
 }
 
 void HTTPFileSystem::Verify() {
