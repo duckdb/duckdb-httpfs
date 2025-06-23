@@ -22,16 +22,22 @@
 
 namespace duckdb {
 
-class HTTPFSUtil : public HTTPUtil {
-public:
-	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
-	                                            optional_ptr<FileOpenerInfo> info) override;
-	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+string HTTPFSUtil::GetName() const {
+	return "httpfs";
+}
 
-	string GetName() const override {
-		return "httpfs";
+unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
+	unordered_map<string, string> result;
+	auto pairs = StringUtil::Split(text, '&');
+	for (const auto &pair : pairs) {
+		auto kv = StringUtil::Split(pair, '=');
+		if (kv.size() != 2) {
+			throw IOException("Error parsing GET parameters");
+		}
+		result[kv[0]] = kv[1];
 	}
-};
+	return result;
+}
 
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
@@ -158,7 +164,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::DeleteRequest(FileHandle &handle, strin
 }
 
 HTTPException HTTPFileSystem::GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url) {
-	auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
+	auto status_message = HTTPUtil::GetStatusMessage(response.status);
 	string error = "HTTP GET error on '" + url + "' (HTTP " + to_string(static_cast<int>(response.status)) + " " +
 	               status_message + ")";
 	if (response.status == HTTPStatusCode::RangeNotSatisfiable_416) {

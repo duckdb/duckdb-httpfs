@@ -21,18 +21,16 @@ struct HTTPFSParams : public HTTPParams {
 	string ca_cert_file;
 };
 
-class HTTPClient {
+class HTTPFSUtil : public HTTPUtil {
 public:
-	virtual ~HTTPClient() = default;
+	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
+	                                            optional_ptr<FileOpenerInfo> info) override;
+	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 
-	virtual duckdb::unique_ptr<HTTPResponse> Get(const string &url, HTTPHeaders &headers, idx_t file_offset,
-	                                             char *buffer_out, idx_t buffer_out_len);
-	virtual duckdb::unique_ptr<HTTPResponse> Head(const string &url, HTTPHeaders &headers);
-	virtual duckdb::unique_ptr<HTTPResponse> Post(const string &url, HTTPHeaders &headers, const char *buffer_in,
-	                                              idx_t buffer_in_len, string &result_p, string &params_p);
-	virtual duckdb::unique_ptr<HTTPResponse> Put(const string &url, HTTPHeaders &headers, const char *buffer_in,
-	                                             idx_t buffer_in_len, const string &params);
-	virtual duckdb::unique_ptr<HTTPResponse> Delete(const string &url, HTTPHeaders &headers);
+	static unordered_map<string, string> ParseGetParameters(const string &text);
+	static shared_ptr<HTTPUtil> GetHTTPUtil(optional_ptr<FileOpener> opener);
+
+	string GetName() const override;
 };
 
 } // namespace duckdb

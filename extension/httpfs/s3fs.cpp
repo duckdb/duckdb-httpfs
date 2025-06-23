@@ -1016,7 +1016,7 @@ HTTPException S3FileSystem::GetS3Error(S3AuthParams &s3_auth_params, const HTTPR
 	if (response.status == HTTPStatusCode::Forbidden_403) {
 		extra_text = GetS3AuthError(s3_auth_params);
 	}
-	auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
+	auto status_message = HTTPUtil::GetStatusMessage(response.status);
 	throw HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url,
 	                    s3_auth_params.region, response.status, status_message, extra_text);
 }
