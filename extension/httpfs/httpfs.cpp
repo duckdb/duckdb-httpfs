@@ -456,18 +456,26 @@ void HTTPFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, i
 		throw NotImplementedException("Writing to HTTP Files must be sequential");
 	}
 
-	// Adapted from Write logic, but to a buffer instead of disk
+	// Ensure the write buffer is allocated and sized
+	if (hfh.write_buffer.empty() || hfh.current_buffer_len == 0) {
+		hfh.write_buffer.resize(hfh.WRITE_BUFFER_LEN);
+		hfh.current_buffer_len = hfh.WRITE_BUFFER_LEN;
+		hfh.write_buffer_idx = 0;
+	}
+
 	idx_t remaining = nr_bytes;
 	auto data = reinterpret_cast<const data_t *>(buffer);
 	while (remaining > 0) {
-		idx_t to_write = std::min(remaining, hfh.current_buffer_len - hfh.write_buffer_idx);
+		idx_t space_left = hfh.current_buffer_len - hfh.write_buffer_idx;
+		idx_t to_write = std::min(remaining, space_left);
 		if (to_write > 0) {
 			memcpy(hfh.write_buffer.data() + hfh.write_buffer_idx, data, to_write);
 			hfh.write_buffer_idx += to_write;
 			data += to_write;
 			remaining -= to_write;
 		}
-		if (remaining > 0) {
+		// If buffer is full, flush it
+		if (hfh.write_buffer_idx == hfh.current_buffer_len) {
 			FlushBuffer(hfh);
 		}
 	}
@@ -483,7 +491,6 @@ void HTTPFileSystem::FlushBuffer(HTTPFileHandle &hfh) {
 
 	HeaderMap header_map;
 	hfh.AddHeaders(header_map);
-
 	HTTPHeaders headers;
 	for (const auto &kv : header_map) {
 		headers.Insert(kv.first, kv.second);
