@@ -804,4 +804,8 @@ void HTTPFileSystem::Verify() {
 	// TODO
 }
 
+void HTTPFileHandle::AddHeaders(HeaderMap &map) {
+	// Add any necessary headers here. For now, this is a stub to resolve the linker error.
+}
+
 } // namespace duckdb
