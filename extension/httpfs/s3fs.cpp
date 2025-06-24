@@ -1016,7 +1016,7 @@ HTTPException S3FileSystem::GetS3Error(S3AuthParams &s3_auth_params, const HTTPR
 	if (response.status == HTTPStatusCode::Forbidden_403) {
 		extra_text = GetS3AuthError(s3_auth_params);
 	}
-	auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
+	auto status_message = HTTPUtil::GetStatusMessage(response.status);
 	throw HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url,
 	                    s3_auth_params.region, response.status, status_message, extra_text);
 }
@@ -1044,16 +1044,15 @@ string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthPar
 		req_params += "&delimiter=%2F";
 	}
 
-	string listobjectv2_url = req_path + "?" + req_params;
+	string listobjectv2_url = parsed_url.http_proto + parsed_url.host + req_path + "?" + req_params;
 
 	auto header_map =
 	    create_s3_header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
 
 	// Get requests use fresh connection
-	string full_host = parsed_url.http_proto + parsed_url.host;
 	std::stringstream response;
 	GetRequestInfo get_request(
-	    full_host, listobjectv2_url, header_map, http_params,
+	    listobjectv2_url, header_map, http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
 			    string trimmed_path = path;

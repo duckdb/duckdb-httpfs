@@ -12,6 +12,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 #include "http_state.hpp"
 
 #include <chrono>
@@ -55,6 +56,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);
 	FileOpener::TryGetCurrentSetting(opener, "hf_max_per_page", result->hf_max_per_page, info);
+	FileOpener::TryGetCurrentSetting(opener, "enable_http_write", result->enable_http_write, info);
 
 	// HTTP Secret lookups
 	KeyValueSecretReader settings_reader(*opener, info, "http");
@@ -145,7 +147,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::DeleteRequest(FileHandle &handle, strin
 }
 
 HTTPException HTTPFileSystem::GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url) {
-	auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
+	auto status_message = HTTPUtil::GetStatusMessage(response.status);
 	string error = "HTTP GET error on '" + url + "' (HTTP " + to_string(static_cast<int>(response.status)) + " " +
 	               status_message + ")";
 	if (response.status == HTTPStatusCode::RangeNotSatisfiable_416) {
@@ -448,12 +450,75 @@ int64_t HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes)
 }
 
 void HTTPFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
-	throw NotImplementedException("Writing to HTTP files not implemented");
+	auto &hfh = handle.Cast<HTTPFileHandle>();
+
+	if (location != hfh.SeekPosition()) {
+		throw NotImplementedException("Writing to HTTP Files must be sequential");
+	}
+
+	// Ensure the write buffer is allocated and sized
+	if (hfh.write_buffer.empty() || hfh.current_buffer_len == 0) {
+		hfh.write_buffer.resize(hfh.WRITE_BUFFER_LEN);
+		hfh.current_buffer_len = hfh.WRITE_BUFFER_LEN;
+		hfh.write_buffer_idx = 0;
+	}
+
+	idx_t remaining = nr_bytes;
+	auto data = reinterpret_cast<const data_t *>(buffer);
+	while (remaining > 0) {
+		idx_t space_left = hfh.current_buffer_len - hfh.write_buffer_idx;
+		idx_t to_write = std::min(remaining, space_left);
+		if (to_write > 0) {
+			memcpy(hfh.write_buffer.data() + hfh.write_buffer_idx, data, to_write);
+			hfh.write_buffer_idx += to_write;
+			data += to_write;
+			remaining -= to_write;
+		}
+		// If buffer is full, flush it
+		if (hfh.write_buffer_idx == hfh.current_buffer_len) {
+			FlushBuffer(hfh);
+		}
+	}
+}
+
+void HTTPFileSystem::FlushBuffer(HTTPFileHandle &hfh) {
+	if (hfh.write_buffer_idx == 0) {
+		return;
+	}
+
+	string path, proto_host_port;
+	HTTPUtil::DecomposeURL(hfh.path, path, proto_host_port);
+
+	HeaderMap header_map;
+	hfh.AddHeaders(header_map);
+	HTTPHeaders headers;
+	for (const auto &kv : header_map) {
+		headers.Insert(kv.first, kv.second);
+	}
+
+	auto &http_util = hfh.http_params.http_util;
+
+	PostRequestInfo post_request(hfh.path, headers, hfh.http_params,
+	                             const_data_ptr_cast(hfh.write_buffer.data()), hfh.write_buffer_idx);
+
+	auto res = http_util.Request(post_request);
+	if (!res->Success()) {
+		throw HTTPException(*res, "Failed to write to file");
+	}
+
+	hfh.write_buffer_idx = 0;
+}
+
+void HTTPFileHandle::Close() {
+	auto &fs = (HTTPFileSystem &)file_system;
+	if (flags.OpenForWriting()) {
+		fs.FlushBuffer(*this);
+	}
 }
 
 int64_t HTTPFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
-	Write(handle, buffer, nr_bytes, hfh.file_offset);
+	Write(handle, buffer, nr_bytes, hfh.SeekPosition());
 	return nr_bytes;
 }
 
@@ -728,7 +793,26 @@ void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
 	client_cache.StoreClient(std::move(client));
 }
 
+ResponseWrapper::ResponseWrapper(HTTPResponse &res, string &original_url) {
+	this->code = static_cast<int>(res.status);
+	this->error = res.reason;
+	for (auto &header : res.headers) {
+		this->headers[header.first] = header.second;
+	}
+	this->http_url = res.url;
+	this->body = res.body;
+}
+
 HTTPFileHandle::~HTTPFileHandle() {
 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
-};
+}
+
+void HTTPFileSystem::Verify() {
+	// TODO
+}
+
+void HTTPFileHandle::AddHeaders(HeaderMap &map) {
+	// Add any necessary headers here. For now, this is a stub to resolve the linker error.
+}
+
 } // namespace duckdb

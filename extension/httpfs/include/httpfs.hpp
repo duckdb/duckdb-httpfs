@@ -9,10 +9,26 @@
 #include "duckdb/main/client_data.hpp"
 #include "http_metadata_cache.hpp"
 #include "httpfs_client.hpp"
+#include "duckdb/common/http_util.hpp"
 
 #include <mutex>
 
 namespace duckdb {
+
+class HTTPLogger;
+
+using HeaderMap = case_insensitive_map_t<string>;
+
+// avoid including httplib in header
+struct ResponseWrapper {
+public:
+	explicit ResponseWrapper(HTTPResponse &res, string &original_url);
+	int code;
+	string error;
+	HeaderMap headers;
+	string http_url;
+	string body;
+};
 
 class HTTPClientCache {
 public:
@@ -68,7 +84,15 @@ public:
 	duckdb::unique_ptr<data_t[]> read_buffer;
 	constexpr static idx_t READ_BUFFER_LEN = 1000000;
 
-	void AddHeaders(HTTPHeaders &map);
+  // Write buffer
+	constexpr static idx_t WRITE_BUFFER_LEN = 1000000;
+	std::vector<data_t> write_buffer; // Use a vector instead of a fixed-size array
+	idx_t write_buffer_idx = 0;       // Tracks the current index in the buffer
+	idx_t current_buffer_len;
+
+	shared_ptr<HTTPState> state;
+
+	void AddHeaders(HeaderMap &map);
 
 	// Get a Client to run requests over
 	unique_ptr<HTTPClient> GetClient();
@@ -76,8 +100,7 @@ public:
 	void StoreClient(unique_ptr<HTTPClient> client);
 
 public:
-	void Close() override {
-	}
+	void Close() override;
 
 protected:
 	//! Create a new Client
@@ -91,6 +114,8 @@ private:
 };
 
 class HTTPFileSystem : public FileSystem {
+    friend HTTPFileHandle;
+
 public:
 	static bool TryParseLastModifiedTime(const string &timestamp, time_t &result);
 
@@ -163,6 +188,7 @@ private:
 	// Global cache
 	mutex global_cache_lock;
 	duckdb::unique_ptr<HTTPMetadataCache> global_metadata_cache;
+	void FlushBuffer(HTTPFileHandle &hfh);
 };
 
 } // namespace duckdb

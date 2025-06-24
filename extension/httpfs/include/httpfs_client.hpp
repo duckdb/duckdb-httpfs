@@ -9,17 +9,17 @@ struct FileOpenerInfo;
 class HTTPState;
 
 struct HTTPFSParams : public HTTPParams {
-	HTTPFSParams(HTTPUtil &http_util) : HTTPParams(http_util) {
-	}
+	using HTTPParams::HTTPParams;
 
-	static constexpr bool DEFAULT_ENABLE_SERVER_CERT_VERIFICATION = false;
-	static constexpr uint64_t DEFAULT_HF_MAX_PER_PAGE = 0;
 	static constexpr bool DEFAULT_FORCE_DOWNLOAD = false;
+	static constexpr uint64_t DEFAULT_HF_MAX_PER_PAGE = 0;
+	static constexpr bool DEFAULT_ENABLE_SERVER_CERT_VERIFICATION = true;
 
 	bool force_download = DEFAULT_FORCE_DOWNLOAD;
-	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
 	idx_t hf_max_per_page = DEFAULT_HF_MAX_PER_PAGE;
+	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
 	string ca_cert_file;
+	bool enable_http_write = false;
 	string bearer_token;
 	shared_ptr<HTTPState> state;
 };
