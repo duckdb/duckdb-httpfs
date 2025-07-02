@@ -23,13 +23,9 @@ namespace duckdb {
 
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
-		auto db = opener->TryGetDatabase();
-		if (db) {
-			auto &config = DBConfig::GetConfig(*db);
-			return config.http_util;
-		}
+		return opener->GetHTTPUtil();
 	}
-	return make_shared_ptr<HTTPFSUtil>();
+	throw InternalException("FileOpener not provided, can't get HTTPUtil");
 }
 
 unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener> opener,
