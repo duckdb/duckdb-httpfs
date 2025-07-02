@@ -9,6 +9,11 @@ add_extension_definitions()
 include_directories(extension/httpfs/include
                     ${DUCKDB_MODULE_BASE_DIR}/third_party/httplib)
 
+if (NOT EMSCRIPTEN)
+  set(EXTRA_SOURCES "extension/httpfs/crypto.cpp")
+  add_definitions(-DOVERRIDE_ENCRYPTION_UTILS=1)
+endif()
+
 build_static_extension(
   httpfs
   extension/httpfs/hffs.cpp
@@ -19,7 +24,8 @@ build_static_extension(
   extension/httpfs/crypto.cpp
   extension/httpfs/hash_functions.cpp
   extension/httpfs/create_secret_functions.cpp
-  extension/httpfs/httpfs_extension.cpp)
+  extension/httpfs/httpfs_extension.cpp
+  ${EXTRA_SOURCES})
 
 set(PARAMETERS "-warnings")
 build_loadable_extension(
@@ -33,7 +39,8 @@ build_loadable_extension(
   extension/httpfs/crypto.cpp
   extension/httpfs/hash_functions.cpp
   extension/httpfs/create_secret_functions.cpp
-  extension/httpfs/httpfs_extension.cpp)
+  extension/httpfs/httpfs_extension.cpp
+  ${EXTRA_SOURCES})
 
 if(MINGW)
   set(OPENSSL_USE_STATIC_LIBS TRUE)

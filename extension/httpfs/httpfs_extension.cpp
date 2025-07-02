@@ -6,7 +6,9 @@
 #include "duckdb.hpp"
 #include "s3fs.hpp"
 #include "hffs.hpp"
+#ifdef OVERRIDE_ENCRYPTION_UTILS
 #include "crypto.hpp"
+#endif // OVERRIDE_ENCRYPTION_UTILS
 
 namespace duckdb {
 
@@ -74,8 +76,10 @@ static void LoadInternal(DatabaseInstance &instance) {
 	CreateS3SecretFunctions::Register(instance);
 	CreateBearerTokenFunctions::Register(instance);
 
+#ifdef OVERRIDE_ENCRYPTION_UTILS
 	// set pointer to OpenSSL encryption state
 	config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
+#endif // OVERRIDE_ENCRYPTION_UTILS
 }
 void HttpfsExtension::Load(DuckDB &db) {
 	LoadInternal(*db.instance);
