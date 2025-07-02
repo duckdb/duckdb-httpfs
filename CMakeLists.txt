@@ -17,6 +17,7 @@ build_static_extension(
   extension/httpfs/httpfs_client.cpp
   extension/httpfs/http_state.cpp
   extension/httpfs/crypto.cpp
+  extension/httpfs/hash_functions.cpp
   extension/httpfs/create_secret_functions.cpp
   extension/httpfs/httpfs_extension.cpp)
 
@@ -30,6 +31,7 @@ build_loadable_extension(
   extension/httpfs/httpfs_client.cpp
   extension/httpfs/http_state.cpp
   extension/httpfs/crypto.cpp
+  extension/httpfs/hash_functions.cpp
   extension/httpfs/create_secret_functions.cpp
   extension/httpfs/httpfs_extension.cpp)
 
