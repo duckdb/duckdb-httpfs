@@ -42,3 +42,4 @@ jobs:
       duckdb_version: v1.3-ossivalis
       ci_tools_version: main
       extra_toolchains: 'python3'
+      format_checks: 'format;tidy'
