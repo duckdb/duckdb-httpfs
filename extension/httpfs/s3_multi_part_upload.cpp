@@ -229,6 +229,10 @@ void S3MultiPartUpload::FinalizeMultipartUpload() {
 }
 
 void S3MultiPartUpload::Finalize() {
+	if (upload_finalized) {
+		// already finalized
+		return;
+	}
 	FlushAllBuffers();
 	if (parts_uploaded) {
 		FinalizeMultipartUpload();
