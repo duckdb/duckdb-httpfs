@@ -12,6 +12,8 @@ include_directories(extension/httpfs/include
 if (NOT EMSCRIPTEN)
   set(EXTRA_SOURCES extension/httpfs/crypto.cpp extension/httpfs/httpfs_client.cpp)
   add_definitions(-DOVERRIDE_ENCRYPTION_UTILS=1)
+else()
+  set(EXTRA_SOURCES extension/httpfs/httpfs_client_wasm.cpp)
 endif()
 
 build_static_extension(

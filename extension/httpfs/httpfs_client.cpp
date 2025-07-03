@@ -160,8 +160,4 @@ unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text)
 	return result;
 }
 
-string HTTPFSUtil::GetName() const {
-	return "HTTPFS";
-}
-
 } // namespace duckdb
