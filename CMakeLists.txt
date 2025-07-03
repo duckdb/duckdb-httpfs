@@ -9,17 +9,24 @@ add_extension_definitions()
 include_directories(extension/httpfs/include
                     ${DUCKDB_MODULE_BASE_DIR}/third_party/httplib)
 
+if (NOT EMSCRIPTEN)
+  set(EXTRA_SOURCES extension/httpfs/crypto.cpp extension/httpfs/httpfs_httplib_client.cpp extension/httpfs/httpfs_curl_client.cpp)
+  add_definitions(-DOVERRIDE_ENCRYPTION_UTILS=1)
+else()
+  set(EXTRA_SOURCES extension/httpfs/httpfs_client_wasm.cpp)
+endif()
+
 build_static_extension(
   httpfs
   extension/httpfs/hffs.cpp
   extension/httpfs/s3fs.cpp
   extension/httpfs/httpfs.cpp
-  extension/httpfs/httpfs_httplib_client.cpp
-  extension/httpfs/httpfs_curl_client.cpp
   extension/httpfs/http_state.cpp
   extension/httpfs/crypto.cpp
+  extension/httpfs/hash_functions.cpp
   extension/httpfs/create_secret_functions.cpp
-  extension/httpfs/httpfs_extension.cpp)
+  extension/httpfs/httpfs_extension.cpp
+  ${EXTRA_SOURCES} )
 
 set(PARAMETERS "-warnings")
 build_loadable_extension(
@@ -28,12 +35,12 @@ build_loadable_extension(
   extension/httpfs/hffs.cpp
   extension/httpfs/s3fs.cpp
   extension/httpfs/httpfs.cpp
-  extension/httpfs/httpfs_httplib_client.cpp
-  extension/httpfs/httpfs_curl_client.cpp
   extension/httpfs/http_state.cpp
   extension/httpfs/crypto.cpp
+  extension/httpfs/hash_functions.cpp
   extension/httpfs/create_secret_functions.cpp
-  extension/httpfs/httpfs_extension.cpp)
+  extension/httpfs/httpfs_extension.cpp
+  ${EXTRA_SOURCES} )
 
 if(MINGW)
   set(OPENSSL_USE_STATIC_LIBS TRUE)

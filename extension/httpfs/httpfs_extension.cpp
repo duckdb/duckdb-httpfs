@@ -7,7 +7,9 @@
 #include "duckdb.hpp"
 #include "s3fs.hpp"
 #include "hffs.hpp"
+#ifdef OVERRIDE_ENCRYPTION_UTILS
 #include "crypto.hpp"
+#endif // OVERRIDE_ENCRYPTION_UTILS
 
 namespace duckdb {
 
@@ -63,21 +65,38 @@ static void LoadInternal(DatabaseInstance &instance) {
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
-        auto callback_httpfs_client_implementation = [](ClientContext& context, SetScope scope, Value& parameter) {
+	auto callback_httpfs_client_implementation = [](ClientContext &context, SetScope scope, Value &parameter) {
 		auto &config = DBConfig::GetConfig(context);
 		string value = StringValue::Get(parameter);
-		if (value == "curl" && (!config.http_util || config.http_util->GetName() != "HTTPFSUtil-Curl")) {
-			config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+		if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+			if (value == "wasm" || value == "default") {
+				return;
+			}
+			throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
+			                            "`default` are currently supported for duckdb-wasm");
 		}
-		if ((value == "httplib" || value == "default" )&& (!config.http_util || config.http_util->GetName() != "HTTPFSUtil")) {
-			config.http_util = make_shared_ptr<HTTPFSUtil>();
+		if (value == "curl") {
+			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil-Curl") {
+				config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+			}
+			return;
+		} else if (value == "httplib" || value == "default") {
+			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
+				config.http_util = make_shared_ptr<HTTPFSUtil>();
+			}
+			return;
 		}
-        };
+		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
+		                            "`default` are currently supported");
+	};
 	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
 	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
 
-
-	config.http_util = make_shared_ptr<HTTPFSUtil>();
+	if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+		// Already handled, do not override
+	} else {
+		config.http_util = make_shared_ptr<HTTPFSUtil>();
+	}
 
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	provider->SetAll();
@@ -85,8 +104,10 @@ static void LoadInternal(DatabaseInstance &instance) {
 	CreateS3SecretFunctions::Register(instance);
 	CreateBearerTokenFunctions::Register(instance);
 
+#ifdef OVERRIDE_ENCRYPTION_UTILS
 	// set pointer to OpenSSL encryption state
 	config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
+#endif // OVERRIDE_ENCRYPTION_UTILS
 }
 void HttpfsExtension::Load(DuckDB &db) {
 	LoadInternal(*db.instance);
