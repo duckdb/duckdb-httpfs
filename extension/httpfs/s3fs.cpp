@@ -737,7 +737,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 				// We have succesfully refreshed a secret: retry initializing with new credentials
 				FileOpenerInfo info = {path};
 				auth_params = S3AuthParams::ReadFrom(opener, info);
-				HTTPFileHandle::Initialize(opener);
+				S3FileHandle::Initialize(opener);
 				return;
 			}
 		}
