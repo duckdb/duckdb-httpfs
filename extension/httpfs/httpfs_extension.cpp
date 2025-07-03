@@ -2,6 +2,7 @@
 
 #include "httpfs_extension.hpp"
 
+#include "httpfs_client.hpp"
 #include "create_secret_functions.hpp"
 #include "duckdb.hpp"
 #include "s3fs.hpp"
@@ -61,6 +62,21 @@ static void LoadInternal(DatabaseInstance &instance) {
 	// HuggingFace options
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+
+        auto callback_httpfs_client_implementation = [](ClientContext& context, SetScope scope, Value& parameter) {
+		auto &config = DBConfig::GetConfig(context);
+		string value = StringValue::Get(parameter);
+		if (value == "curl" && (!config.http_util || config.http_util->GetName() != "HTTPFSUtil-Curl")) {
+			config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+		}
+		if ((value == "httplib" || value == "default" )&& (!config.http_util || config.http_util->GetName() != "HTTPFSUtil")) {
+			config.http_util = make_shared_ptr<HTTPFSUtil>();
+		}
+        };
+	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
+	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
+
+
 	config.http_util = make_shared_ptr<HTTPFSUtil>();
 
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);

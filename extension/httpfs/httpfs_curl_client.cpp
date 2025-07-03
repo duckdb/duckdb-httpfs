@@ -112,9 +112,9 @@ struct RequestInfo {
 
 static idx_t httpfs_client_count = 0;
 
-class HTTPFSClient : public HTTPClient {
+class HTTPFSCurlClient : public HTTPClient {
 public:
-	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
+	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
 		auto bearer_token = "";
 		if (!http_params.bearer_token.empty()) {
 			bearer_token = http_params.bearer_token.c_str();
@@ -173,7 +173,7 @@ public:
 		}
 	}
 
-	~HTTPFSClient() {
+	~HTTPFSCurlClient() {
 		DestroyCurlGlobal();
 	}
 
@@ -453,12 +453,12 @@ private:
 	}
 };
 
-unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
-	auto client = make_uniq<HTTPFSClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
+unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
+	auto client = make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
 	return std::move(client);
 }
 
-unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
+unordered_map<string, string> HTTPFSCurlUtil::ParseGetParameters(const string &text) {
 	unordered_map<std::string, std::string> params;
 
 	auto pos = text.find('?');
@@ -482,8 +482,8 @@ unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text)
 	return params;
 }
 
-string HTTPFSUtil::GetName() const {
-	return "HTTPFS";
+string HTTPFSCurlUtil::GetName() const {
+	return "HTTPFS-Curl";
 }
 
 } // namespace duckdb

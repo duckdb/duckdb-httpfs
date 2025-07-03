@@ -37,6 +37,15 @@ public:
 	string GetName() const override;
 };
 
+class HTTPFSCurlUtil : public HTTPFSUtil {
+public:
+	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+
+	static unordered_map<string, string> ParseGetParameters(const string &text);
+
+	string GetName() const override;
+};
+
 class CURLHandle {
 public:
 	CURLHandle(const string &token, const string &cert_path);
