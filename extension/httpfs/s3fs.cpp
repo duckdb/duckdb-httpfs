@@ -720,8 +720,8 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		HTTPFileHandle::Initialize(opener);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
+		bool refreshed_secret = false;
 		if (error.Type() == ExceptionType::IO || error.Type() == ExceptionType::HTTP) {
-			bool refreshed_secret = false;
 			auto context = opener->TryGetClientContext();
 			if (context) {
 				auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*context);
@@ -732,30 +732,28 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 					}
 				}
 			}
-
-			if (refreshed_secret) {
-				// We have succesfully refreshed a secret: retry initializing with new credentials
-				FileOpenerInfo info = {path};
-				auth_params = S3AuthParams::ReadFrom(opener, info);
-				S3FileHandle::Initialize(opener);
-				return;
-			}
 		}
-		auto &extra_info = error.ExtraInfo();
-		auto entry = extra_info.find("status_code");
-		if (entry != extra_info.end()) {
-			if (entry->second == "400") {
-				// 400: BAD REQUEST
-				auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params);
-				throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
+		if (!refreshed_secret) {
+			auto &extra_info = error.ExtraInfo();
+			auto entry = extra_info.find("status_code");
+			if (entry != extra_info.end()) {
+				if (entry->second == "400") {
+					// 400: BAD REQUEST
+					auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params);
+					throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
+				}
+				if (entry->second == "403") {
+					// 403: FORBIDDEN
+					auto extra_text = S3FileSystem::GetS3AuthError(auth_params);
+					throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
+				}
 			}
-			if (entry->second == "403") {
-				// 403: FORBIDDEN
-				auto extra_text = S3FileSystem::GetS3AuthError(auth_params);
-				throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
-			}
+			throw;
 		}
-		throw;
+		// We have succesfully refreshed a secret: retry initializing with new credentials
+		FileOpenerInfo info = {path};
+		auth_params = S3AuthParams::ReadFrom(opener, info);
+		HTTPFileHandle::Initialize(opener);
 	}
 
 	auto &s3fs = file_system.Cast<S3FileSystem>();
