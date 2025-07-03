@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/http_util.hpp"
+#include <curl/curl.h>
 
 namespace duckdb {
 class HTTPLogger;
@@ -35,5 +36,64 @@ public:
 
 	string GetName() const override;
 };
+
+class HTTPFSCurlUtil : public HTTPFSUtil {
+public:
+	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+
+	static unordered_map<string, string> ParseGetParameters(const string &text);
+
+	string GetName() const override;
+};
+
+class CURLHandle {
+public:
+	CURLHandle(const string &token, const string &cert_path);
+	~CURLHandle();
+
+public:
+	operator CURL *() {
+		return curl;
+	}
+	CURLcode Execute() {
+		return curl_easy_perform(curl);
+	}
+
+private:
+	CURL *curl = NULL;
+};
+
+class CURLRequestHeaders {
+public:
+	CURLRequestHeaders(vector<std::string> &input) {
+		for (auto &header : input) {
+			Add(header);
+		}
+	}
+	CURLRequestHeaders() {}
+
+	~CURLRequestHeaders() {
+		if (headers) {
+			curl_slist_free_all(headers);
+		}
+		headers = NULL;
+	}
+	operator bool() const {
+		return headers != NULL;
+	}
+
+public:
+	void Add(const string &header) {
+		headers = curl_slist_append(headers, header.c_str());
+	}
+
+public:
+	curl_slist *headers = NULL;
+};
+
+struct HeaderCollector {
+	std::vector<HTTPHeaders> header_collection;
+};
+
 
 } // namespace duckdb
