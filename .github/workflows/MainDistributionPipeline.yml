@@ -19,7 +19,6 @@ jobs:
       extension_name: httpfs
       duckdb_version: v1.3-ossivalis
       ci_tools_version: main
-      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads'
 
 
   duckdb-stable-deploy:
@@ -32,7 +31,6 @@ jobs:
       duckdb_version: v1.3-ossivalis
       ci_tools_version: main
       deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
-      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads'
 
   code-quality:
     name: Code Quality
