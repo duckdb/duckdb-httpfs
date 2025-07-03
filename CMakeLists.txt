@@ -24,9 +24,10 @@ build_static_extension(
   extension/httpfs/http_state.cpp
   extension/httpfs/crypto.cpp
   extension/httpfs/hash_functions.cpp
+  extension/httpfs/s3_multi_part_upload.cpp
   extension/httpfs/create_secret_functions.cpp
   extension/httpfs/httpfs_extension.cpp
-  ${EXTRA_SOURCES} )
+  ${EXTRA_SOURCES})
 
 set(PARAMETERS "-warnings")
 build_loadable_extension(
