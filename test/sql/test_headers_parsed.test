@@ -7,6 +7,9 @@ require httpfs
 require parquet
 
 statement ok
+SET httpfs_client_implementation='curl';
+
+statement ok
 pragma enable_logging('HTTP');
 
 query II
@@ -30,7 +33,6 @@ select response.status from duckdb_logs_parsed('HTTP') order by all;
 ----
 OK_200
 PartialContent_206
-
 
 # response status is either
 # HTTP/2 200
