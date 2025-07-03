@@ -4,7 +4,7 @@
 namespace duckdb {
 
 S3MultiPartUpload::S3MultiPartUpload(S3FileSystem &s3fs_p, S3FileHandle &file_handle_p)
-    : s3fs(s3fs_p), file_handle(file_handle_p), path(file_handle.path), config_params(file_handle.config_params),
+    : s3fs(s3fs_p), http_input(file_handle_p.http_input), path(file_handle_p.path), config_params(file_handle_p.config_params),
       uploads_in_progress(0), parts_uploaded(0), upload_finalized(false) {
 }
 
@@ -32,7 +32,7 @@ shared_ptr<S3MultiPartUpload> S3MultiPartUpload::Initialize(S3FileHandle &file_h
 string S3MultiPartUpload::InitializeMultipartUpload() {
 	string result;
 	string query_param = "uploads=";
-	auto res = s3fs.PostRequest(file_handle, path, {}, result, nullptr, 0, query_param);
+	auto res = s3fs.PostRequest(*http_input, path, {}, result, nullptr, 0, query_param);
 
 	if (res->status != HTTPStatusCode::OK_200) {
 		throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %d)", res->url, res->GetError(),
@@ -100,7 +100,7 @@ void S3MultiPartUpload::UploadBuffer(shared_ptr<S3MultiPartUpload> upload_state,
 	string etag;
 
 	try {
-		res = s3fs.PutRequest(upload_state->file_handle, upload_state->path, {}, (char *)write_buffer->Ptr(),
+		res = s3fs.PutRequest(*upload_state->http_input, upload_state->path, {}, (char *)write_buffer->Ptr(),
 		                      write_buffer->idx, query_param);
 
 		if (res->status != HTTPStatusCode::OK_200) {
@@ -220,7 +220,7 @@ void S3MultiPartUpload::FinalizeMultipartUpload() {
 
 	string query_param = "uploadId=" + S3FileSystem::UrlEncode(multipart_upload_id, true);
 	auto res =
-	    s3fs.PostRequest(file_handle, file_handle.path, {}, result, (char *)body.c_str(), body.length(), query_param);
+	    s3fs.PostRequest(*http_input, path, {}, result, (char *)body.c_str(), body.length(), query_param);
 	auto open_tag_pos = result.find("<CompleteMultipartUploadResult", 0);
 	if (open_tag_pos == string::npos) {
 		throw HTTPException(*res, "Unexpected response during S3 multipart upload finalization: %d\n\n%s",

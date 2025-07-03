@@ -225,6 +225,23 @@ unique_ptr<KeyValueSecret> CreateSecret(vector<string> &prefix_paths_p, string &
 	return return_value;
 }
 
+S3HTTPInput::S3HTTPInput(unique_ptr<HTTPParams> params_p, const S3AuthParams &auth_params_p, const S3ConfigParams &config_params_p) :
+	HTTPInput(std::move(params_p)), auth_params(auth_params_p), config_params(config_params_p) {}
+
+S3HTTPInput::~S3HTTPInput() {
+}
+
+S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, unique_ptr<HTTPParams> http_params_p,
+			 const S3AuthParams &auth_params_p, const S3ConfigParams &config_params_p)
+	: HTTPFileHandle(fs, file, flags, make_shared_ptr<S3HTTPInput>(std::move(http_params_p), auth_params_p, config_params_p)), auth_params(http_input->Cast<S3HTTPInput>().auth_params),
+	  config_params(http_input->Cast<S3HTTPInput>().config_params) {
+	if (flags.OpenForReading() && flags.OpenForWriting()) {
+		throw NotImplementedException("Cannot open an HTTP file for both reading and writing");
+	} else if (flags.OpenForAppending()) {
+		throw NotImplementedException("Cannot open an HTTP file for appending");
+	}
+}
+
 S3FileHandle::~S3FileHandle() {
 	if (Exception::UncaughtException()) {
 		// We are in an exception, don't do anything
@@ -426,30 +443,30 @@ string ParsedS3Url::GetHTTPUrl(S3AuthParams &auth_params, const string &http_que
 	return full_url;
 }
 
-unique_ptr<HTTPResponse> S3FileSystem::PostRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+unique_ptr<HTTPResponse> S3FileSystem::PostRequest(HTTPInput &input, string url, HTTPHeaders header_map,
                                                    string &result, char *buffer_in, idx_t buffer_in_len,
                                                    string http_params) {
-	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
-	auto parsed_s3_url = S3UrlParse(url, auth_params);
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, http_params);
+    auto &s3_input = input.Cast<S3HTTPInput>();
+	auto parsed_s3_url = S3UrlParse(url, s3_input.auth_params);
+	string http_url = parsed_s3_url.GetHTTPUrl(s3_input.auth_params, http_params);
 	auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
-	auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "POST", auth_params, "",
+	auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "POST", s3_input.auth_params, "",
 	                                "", payload_hash, "application/octet-stream");
 
-	return HTTPFileSystem::PostRequest(handle, http_url, headers, result, buffer_in, buffer_in_len);
+	return HTTPFileSystem::PostRequest(input, http_url, headers, result, buffer_in, buffer_in_len);
 }
 
-unique_ptr<HTTPResponse> S3FileSystem::PutRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+unique_ptr<HTTPResponse> S3FileSystem::PutRequest(HTTPInput &input, string url, HTTPHeaders header_map,
                                                   char *buffer_in, idx_t buffer_in_len, string http_params) {
-	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
-	auto parsed_s3_url = S3UrlParse(url, auth_params);
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, http_params);
+    auto &s3_input = input.Cast<S3HTTPInput>();
+	auto parsed_s3_url = S3UrlParse(url, s3_input.auth_params);
+	string http_url = parsed_s3_url.GetHTTPUrl(s3_input.auth_params, http_params);
 	auto content_type = "application/octet-stream";
 	auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
 
-	auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", auth_params, "",
+	auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", s3_input.auth_params, "",
 	                                "", payload_hash, content_type);
-	return HTTPFileSystem::PutRequest(handle, http_url, headers, buffer_in, buffer_in_len);
+	return HTTPFileSystem::PutRequest(input, http_url, headers, buffer_in, buffer_in_len);
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map) {

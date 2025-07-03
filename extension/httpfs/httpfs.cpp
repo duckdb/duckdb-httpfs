@@ -96,23 +96,21 @@ void HTTPClientCache::StoreClient(unique_ptr<HTTPClient> client) {
 	clients.push_back(std::move(client));
 }
 
-unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(HTTPInput &input, string url, HTTPHeaders header_map,
                                                      string &buffer_out, char *buffer_in, idx_t buffer_in_len,
                                                      string params) {
-	auto &hfh = handle.Cast<HTTPFileHandle>();
-	auto &http_util = hfh.http_params.http_util;
-	PostRequestInfo post_request(url, header_map, hfh.http_params, const_data_ptr_cast(buffer_in), buffer_in_len);
+	auto &http_util = input.http_params.http_util;
+	PostRequestInfo post_request(url, header_map, input.http_params, const_data_ptr_cast(buffer_in), buffer_in_len);
 	auto result = http_util.Request(post_request);
 	buffer_out = std::move(post_request.buffer_out);
 	return result;
 }
 
-unique_ptr<HTTPResponse> HTTPFileSystem::PutRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+unique_ptr<HTTPResponse> HTTPFileSystem::PutRequest(HTTPInput &input, string url, HTTPHeaders header_map,
                                                     char *buffer_in, idx_t buffer_in_len, string params) {
-	auto &hfh = handle.Cast<HTTPFileHandle>();
-	auto &http_util = hfh.http_params.http_util;
+	auto &http_util = input.http_params.http_util;
 	string content_type = "application/octet-stream";
-	PutRequestInfo put_request(url, header_map, hfh.http_params, (const_data_ptr_t)buffer_in, buffer_in_len,
+	PutRequestInfo put_request(url, header_map, input.http_params, (const_data_ptr_t)buffer_in, buffer_in_len,
 	                           content_type);
 	return http_util.Request(put_request);
 }
@@ -272,10 +270,11 @@ void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
 	result = mktime(&tm);
 }
 
-HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
-                               unique_ptr<HTTPParams> params_p)
-    : FileHandle(fs, file.path, flags), params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()),
-      flags(flags), length(0), force_full_download(false), buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
+HTTPInput::HTTPInput(unique_ptr<HTTPParams> params_p) : params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()) {}
+
+HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, shared_ptr<HTTPInput> input_p)
+	: FileHandle(fs, file.path, flags), http_input(std::move(input_p)), http_params(http_input->http_params),
+	  flags(flags), length(0), force_full_download(false), buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {
@@ -303,6 +302,12 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		}
 	}
 }
+
+HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+                               unique_ptr<HTTPParams> params_p) :
+	HTTPFileHandle(fs, file, flags, make_shared_ptr<HTTPInput>(std::move(params_p))) {
+}
+
 unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                         optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);

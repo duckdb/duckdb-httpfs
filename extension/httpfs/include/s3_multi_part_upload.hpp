@@ -53,7 +53,7 @@ private:
 
 private:
 	S3FileSystem &s3fs;
-	S3FileHandle &file_handle;
+	shared_ptr<HTTPInput> http_input;
 	string path;
 	S3ConfigParams config_params;
 	string multipart_upload_id;

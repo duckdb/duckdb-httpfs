@@ -28,11 +28,32 @@ protected:
 	mutex lock;
 };
 
+class HTTPInput {
+public:
+	HTTPInput(unique_ptr<HTTPParams> params_p);
+	virtual ~HTTPInput() = default;
+
+	unique_ptr<HTTPParams> params;
+	HTTPFSParams &http_params;
+
+	template <class TARGET>
+	TARGET &Cast() {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<TARGET &>(*this);
+	}
+	template <class TARGET>
+	const TARGET &Cast() const {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<const TARGET &>(*this);
+	}
+};
+
 class HTTPFileSystem;
 
 class HTTPFileHandle : public FileHandle {
 public:
 	HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, unique_ptr<HTTPParams> params);
+	HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, shared_ptr<HTTPInput> input);
 	~HTTPFileHandle() override;
 	// This two-phase construction allows subclasses more flexible setup.
 	virtual void Initialize(optional_ptr<FileOpener> opener);
@@ -40,7 +61,7 @@ public:
 	// We keep an http client stored for connection reuse with keep-alive headers
 	HTTPClientCache client_cache;
 
-	unique_ptr<HTTPParams> params;
+	shared_ptr<HTTPInput> http_input;
 	HTTPFSParams &http_params;
 
 	// File handle info
@@ -106,10 +127,10 @@ public:
 	// Get Request without a range (i.e., downloads full file)
 	virtual duckdb::unique_ptr<HTTPResponse> GetRequest(FileHandle &handle, string url, HTTPHeaders header_map);
 	// Post Request that can handle variable sized responses without a content-length header (needed for s3 multipart)
-	virtual duckdb::unique_ptr<HTTPResponse> PostRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+	virtual duckdb::unique_ptr<HTTPResponse> PostRequest(HTTPInput &input, string url, HTTPHeaders header_map,
 	                                                     string &result, char *buffer_in, idx_t buffer_in_len,
 	                                                     string params = "");
-	virtual duckdb::unique_ptr<HTTPResponse> PutRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+	virtual duckdb::unique_ptr<HTTPResponse> PutRequest(HTTPInput &input, string url, HTTPHeaders header_map,
 	                                                    char *buffer_in, idx_t buffer_in_len, string params = "");
 
 	virtual duckdb::unique_ptr<HTTPResponse> DeleteRequest(FileHandle &handle, string url, HTTPHeaders header_map);
