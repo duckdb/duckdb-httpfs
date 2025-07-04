@@ -43,6 +43,7 @@ struct AWSEnvironmentCredentialsProvider {
 	static constexpr const char *DUCKDB_ENDPOINT_ENV_VAR = "DUCKDB_S3_ENDPOINT";
 	static constexpr const char *DUCKDB_USE_SSL_ENV_VAR = "DUCKDB_S3_USE_SSL";
 	static constexpr const char *DUCKDB_KMS_KEY_ID_ENV_VAR = "DUCKDB_S3_KMS_KEY_ID";
+	static constexpr const char *DUCKDB_URL_STYLE_ENV_VAR = "DUCKDB_S3_URL_STYLE";
 
 	explicit AWSEnvironmentCredentialsProvider(DBConfig &config) : config(config) {};
 
