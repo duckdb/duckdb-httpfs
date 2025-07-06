@@ -49,7 +49,7 @@ endif()
 find_package(OpenSSL REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 if(EMSCRIPTEN)
-
+  target_link_libraries(httpfs_loadable_extension duckdb_mbedtls)
 else()
   target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
                         ${OPENSSL_LIBRARIES})
