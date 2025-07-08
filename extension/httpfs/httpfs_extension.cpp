@@ -12,6 +12,25 @@
 
 namespace duckdb {
 
+static void SetHttpfsClientImplementation(DBConfig &config, const string &value) {
+		if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+			if (value == "wasm" || value == "default") {
+				// Already handled, do not override
+				return;
+			}
+			throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
+			                            "`default` are currently supported for duckdb-wasm");
+		}
+		if (value == "httplib" || value == "default") {
+			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
+				config.http_util = make_shared_ptr<HTTPFSUtil>();
+			}
+			return;
+		}
+		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
+		                            "`default` are currently supported");
+	}
+
 static void LoadInternal(DatabaseInstance &instance) {
 	auto &fs = instance.GetFileSystem();
 
@@ -64,11 +83,16 @@ static void LoadInternal(DatabaseInstance &instance) {
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
-	if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
-		// Already handled, do not override
-	} else {
-		config.http_util = make_shared_ptr<HTTPFSUtil>();
-	}
+	auto callback_httpfs_client_implementation = [](ClientContext &context, SetScope scope, Value &parameter) {
+		auto &config = DBConfig::GetConfig(context);
+		string value = StringValue::Get(parameter);
+		SetHttpfsClientImplementation(config, value);
+	};
+
+	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
+	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
+
+	SetHttpfsClientImplementation(config, "default");
 
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	provider->SetAll();
