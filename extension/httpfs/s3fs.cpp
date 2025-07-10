@@ -196,8 +196,10 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 		}
 	}
 
-	if (result.endpoint.empty()) {
-		result.endpoint = "s3.amazonaws.com";
+	if (!result.region.empty() && (result.endpoint.empty() || result.endpoint == "s3.amazonaws.com")) {
+	    result.endpoint = StringUtil::Format("s3.%s.amazonaws.com", result.region);
+	} else if (result.endpoint.empty()) {
+	    result.endpoint = "s3.amazonaws.com";
 	}
 
 	return result;
