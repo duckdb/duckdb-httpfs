@@ -62,7 +62,12 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 		res["x-amz-server-side-encryption-aws-kms-key-id"] = auth_params.kms_key_id;
 	}
 
-	string signed_headers = "";
+	bool use_requester_pays = auth_params.requester_pays;
+	if (use_requester_pays) {
+		res["x-amz-request-payer"] = "requester";
+	}
+
+    string signed_headers = "";
 	hash_bytes canonical_request_hash;
 	hash_str canonical_request_hash_str;
 	if (content_type.length() > 0) {
@@ -75,7 +80,10 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 	if (use_sse_kms) {
 		signed_headers += ";x-amz-server-side-encryption;x-amz-server-side-encryption-aws-kms-key-id";
 	}
-	auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
+	if (use_requester_pays) {
+		signed_headers += ";x-amz-request-payer";
+	}
+    auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
 	if (content_type.length() > 0) {
 		canonical_request += "\ncontent-type:" + content_type;
 	}
@@ -86,6 +94,9 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 	if (use_sse_kms) {
 		canonical_request += "\nx-amz-server-side-encryption:aws:kms";
 		canonical_request += "\nx-amz-server-side-encryption-aws-kms-key-id:" + auth_params.kms_key_id;
+	}
+	if (use_requester_pays) {
+		canonical_request += "\nx-amz-request-payer:requester";
 	}
 
 	canonical_request += "\n\n" + signed_headers + "\n" + payload_hash;
@@ -143,6 +154,7 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 	this->SetExtensionOptionValue("s3_endpoint", DUCKDB_ENDPOINT_ENV_VAR);
 	this->SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR);
 	this->SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR);
+	this->SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR);
 }
 
 S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
@@ -156,6 +168,7 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 	params.endpoint = DUCKDB_ENDPOINT_ENV_VAR;
 	params.kms_key_id = DUCKDB_KMS_KEY_ID_ENV_VAR;
 	params.use_ssl = DUCKDB_USE_SSL_ENV_VAR;
+    params.requester_pays = DUCKDB_REQUESTER_PAYS_ENV_VAR;
 
 	return params;
 }
@@ -181,6 +194,8 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", result.kms_key_id);
 	secret_reader.TryGetSecretKeyOrSetting("s3_url_compatibility_mode", "s3_url_compatibility_mode",
 	                                       result.s3_url_compatibility_mode);
+	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays",
+										   result.requester_pays);
 
 	// Endpoint and url style are slightly more complex and require special handling for gcs and r2
 	auto endpoint_result = secret_reader.TryGetSecretKeyOrSetting("endpoint", "s3_endpoint", result.endpoint);
@@ -219,6 +234,7 @@ unique_ptr<KeyValueSecret> CreateSecret(vector<string> &prefix_paths_p, string &
 	return_value->secret_map["use_ssl"] = params.use_ssl;
 	return_value->secret_map["kms_key_id"] = params.kms_key_id;
 	return_value->secret_map["s3_url_compatibility_mode"] = params.s3_url_compatibility_mode;
+	return_value->secret_map["requester_pays"] = params.requester_pays;
 
 	//! Set redact keys
 	return_value->redact_keys = {"secret", "session_token"};
@@ -531,9 +547,21 @@ void S3FileSystem::ReadQueryParams(const string &url_query_param, S3AuthParams &
 		}
 		query_params.erase(found_param);
 	}
+	auto found_requester_pays_param = query_params.find("s3_requester_pays");
+	if (found_requester_pays_param != query_params.end()) {
+		if (found_requester_pays_param->second == "true") {
+			params.requester_pays = true;
+		} else if (found_requester_pays_param->second == "false") {
+			params.requester_pays = false;
+		} else {
+			throw IOException("Incorrect setting found for s3_requester_pays, allowed values are: 'true' or 'false'");
+		}
+		query_params.erase(found_requester_pays_param);
+	}
 	if (!query_params.empty()) {
 		throw IOException("Invalid query parameters found. Supported parameters are:\n's3_region', 's3_access_key_id', "
-		                  "'s3_secret_access_key', 's3_session_token',\n's3_endpoint', 's3_url_style', 's3_use_ssl'");
+		                  "'s3_secret_access_key', 's3_session_token',\n's3_endpoint', 's3_url_style', 's3_use_ssl', "
+                          "'s3_requester_pays'");
 	}
 }
 
