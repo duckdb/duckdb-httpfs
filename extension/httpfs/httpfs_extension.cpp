@@ -13,6 +13,25 @@
 
 namespace duckdb {
 
+static void SetHttpfsClientImplementation(DBConfig &config, const string &value) {
+		if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+			if (value == "wasm" || value == "default") {
+				// Already handled, do not override
+				return;
+			}
+			throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
+			                            "`default` are currently supported for duckdb-wasm");
+		}
+		if (value == "httplib" || value == "default") {
+			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
+				config.http_util = make_shared_ptr<HTTPFSUtil>();
+			}
+			return;
+		}
+		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
+		                            "`default` are currently supported");
+	}
+
 static void LoadInternal(DatabaseInstance &instance) {
 	auto &fs = instance.GetFileSystem();
 
@@ -52,6 +71,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	config.AddExtensionOption("s3_kms_key_id", "S3 KMS Key ID", LogicalType::VARCHAR);
 	config.AddExtensionOption("s3_url_compatibility_mode", "Disable Globs and Query Parameters on S3 URLs",
 	                          LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false));
 
 	// S3 Uploader config
 	config.AddExtensionOption("s3_uploader_max_filesize", "S3 Uploader max filesize (between 50GB and 5TB)",
@@ -80,7 +100,8 @@ static void LoadInternal(DatabaseInstance &instance) {
 				config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
 			}
 			return;
-		} else if (value == "httplib" || value == "default") {
+		}
+		if (value == "httplib" || value == "default") {
 			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
 				config.http_util = make_shared_ptr<HTTPFSUtil>();
 			}

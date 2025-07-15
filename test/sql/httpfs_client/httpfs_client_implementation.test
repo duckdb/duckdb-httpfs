@@ -1,0 +1,16 @@
+# name: test/sql/htpfs_client/httpfs_client_implementation.test
+# description: Tests basic valus for httpfs_client_implementation
+# group: [httpfs_client]
+
+require httpfs
+
+statement ok
+set httpfs_client_implementation = 'default';
+
+statement ok
+set httpfs_client_implementation = 'httplib';
+
+statement error
+set httpfs_client_implementation = 'something else';
+----
+Unsupported option for httpfs_client_implementation
