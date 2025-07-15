@@ -12,6 +12,11 @@ PRAGMA enable_verification
 statement ok
 pragma enable_logging('HTTP');
 
+foreach httpfs_implementation curl httplib
+
+statement ok
+SET httpfs_client_implementation='${httpfs_implementation}';
+
 query II
 select * from 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_role_type.parquet' order by all;
 ----
@@ -298,6 +303,12 @@ select * from read_csv_auto('https://csvbase.com/meripaterson/stock-exchanges');
 250	Africa	Zimbabwe	Victoria Falls Stock Exchange	NULL	2020-11-01
 251	Asia	China	Beijing Stock Exchange	NULL	2021-12-27
 
+endloop
+
+statement error
+SET httpfs_client_implementation='unkown';
+----
+<REGEX>:.*Unsupported option for httpfs_client_implementation.*
 
 #FIXME this test fails: file is nonexistent
 mode skip

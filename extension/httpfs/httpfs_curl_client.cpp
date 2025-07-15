@@ -77,8 +77,7 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 
 		header_collection->header_collection.back().Insert(part1, part2);
 	}
-	// TODO: some headers may not follow standard response header formats.
-	//  what to do in this case? Invalid does not mean we should abort.
+	// TODO: log headers that don't follow the header format
 
 	return totalSize;
 }
@@ -141,11 +140,6 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYPEER, 1L);   // Verify the cert
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYHOST, 2L);   // Verify that the cert matches the hostname
 		}
-
-		// TODO: no global write timeout option, but you could put customize a timeout in the write functions
-		//  or handle use CURLOPT_XFERINFOFUNCTION (progress callback) with CURLOPT_TIMEOUT_MS
-		//  we could also set CURLOPT_LOW_SPEED_LIMIT and timeout if the speed is too low for
-		//  too long.
 
 		// set read timeout
 		curl_easy_setopt(*curl, CURLOPT_TIMEOUT, http_params.timeout);
