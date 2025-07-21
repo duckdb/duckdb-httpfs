@@ -92,7 +92,9 @@ public:
 		req.method = "POST";
 		req.path = info.path;
 		req.headers = TransformHeaders(info.headers, info.params);
-		req.headers.emplace("Content-Type", "application/octet-stream");
+		if (req.headers.find("Content-Type") == req.headers.end()) {
+			req.headers.emplace("Content-Type", "application/octet-stream");
+		}
 		req.content_receiver = [&](const char *data, size_t data_length, uint64_t /*offset*/,
 		                           uint64_t /*total_length*/) {
 			if (state) {
