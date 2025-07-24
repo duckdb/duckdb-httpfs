@@ -7,6 +7,7 @@
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/common/types/hash.hpp"
+#include "duckdb/common/types/time.hpp"
 #include "duckdb/function/scalar/strftime_format.hpp"
 #include "duckdb/logging/file_system_logger.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -259,19 +260,6 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	return response;
 }
 
-void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
-	auto components = Timestamp::GetComponents(timestamp);
-	struct tm tm {};
-	tm.tm_year = components.year - 1900;
-	tm.tm_mon = components.month - 1;
-	tm.tm_mday = components.day;
-	tm.tm_hour = components.hour;
-	tm.tm_min = components.minute;
-	tm.tm_sec = components.second;
-	tm.tm_isdst = 0;
-	result = mktime(&tm);
-}
-
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
                                unique_ptr<HTTPParams> params_p)
     : FileHandle(fs, file.path, flags), params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()),
@@ -282,7 +270,7 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		auto &info = file.extended_info->options;
 		auto lm_entry = info.find("last_modified");
 		if (lm_entry != info.end()) {
-			TimestampToTimeT(lm_entry->second.GetValue<timestamp_t>(), last_modified);
+			last_modified = lm_entry->second.GetValue<timestamp_t>();
 		}
 		auto etag_entry = info.find("etag");
 		if (etag_entry != info.end()) {
@@ -462,7 +450,7 @@ int64_t HTTPFileSystem::GetFileSize(FileHandle &handle) {
 	return sfh.length;
 }
 
-time_t HTTPFileSystem::GetLastModifiedTime(FileHandle &handle) {
+timestamp_t HTTPFileSystem::GetLastModifiedTime(FileHandle &handle) {
 	auto &sfh = handle.Cast<HTTPFileHandle>();
 	return sfh.last_modified;
 }
@@ -545,20 +533,14 @@ void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache)
 	}
 }
 
-bool HTTPFileSystem::TryParseLastModifiedTime(const string &timestamp, time_t &result) {
+bool HTTPFileSystem::TryParseLastModifiedTime(const string &timestamp, timestamp_t &result) {
 	StrpTimeFormat::ParseResult parse_result;
 	if (!StrpTimeFormat::TryParse("%a, %d %h %Y %T %Z", timestamp, parse_result)) {
 		return false;
 	}
-	struct tm tm {};
-	tm.tm_year = parse_result.data[0] - 1900;
-	tm.tm_mon = parse_result.data[1] - 1;
-	tm.tm_mday = parse_result.data[2];
-	tm.tm_hour = parse_result.data[3];
-	tm.tm_min = parse_result.data[4];
-	tm.tm_sec = parse_result.data[5];
-	tm.tm_isdst = 0;
-	result = mktime(&tm);
+	if (!parse_result.TryToTimestamp(result)) {
+		return false;
+	}
 	return true;
 }
 
