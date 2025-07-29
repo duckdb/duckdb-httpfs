@@ -344,8 +344,8 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders
 	auto res = GetRangeRequest(handle, url, header_map, file_offset, buffer_out, buffer_out_len);
 
 	if (res) {
-		// Request succeeded
-		if (res->Success()) {
+		// Request succeeded TODO: fix upstream that 206 is not considered success
+		if (res->Success() || res->status == HTTPStatusCode::PartialContent_206 || res->status == HTTPStatusCode::Accepted_202) {
 			return true;
 		}
 
