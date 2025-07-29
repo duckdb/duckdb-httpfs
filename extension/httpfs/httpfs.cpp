@@ -44,6 +44,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	// Setting lookups
 	FileOpener::TryGetCurrentSetting(opener, "http_timeout", result->timeout, info);
 	FileOpener::TryGetCurrentSetting(opener, "force_download", result->force_download, info);
+	FileOpener::TryGetCurrentSetting(opener, "auto_fallback_to_full_download", result->auto_fallback_to_full_download, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retries", result->retries, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_wait_ms", result->retry_wait_ms, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_backoff", result->retry_backoff, info);
@@ -230,8 +231,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 			    if (response.HasHeader("Content-Length")) {
 				    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
 				    if ((idx_t)content_length != buffer_out_len) {
-					    throw HTTPException("HTTP GET error: Content-Length from server mismatches requested "
-					                        "range, server may not support range requests.");
+				    	RangeRequestNotSupportedException::Throw();
 				    }
 			    }
 		    }
@@ -253,6 +253,8 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 		    }
 		    return true;
 	    });
+
+	get_request.try_request = true;
 
 	auto response = http_util.Request(get_request, http_client);
 
@@ -338,9 +340,36 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	return std::move(handle);
 }
 
-// Buffered read from http file.
-// Note that buffering is disabled when FileFlags::FILE_FLAGS_DIRECT_IO is set
-void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out, idx_t buffer_out_len) {
+	auto res = GetRangeRequest(handle, url, header_map, file_offset, buffer_out, buffer_out_len);
+
+	if (res) {
+		// Request succeeded
+		if (res->Success()) {
+			return true;
+		}
+
+		// Request failed and we have a request error
+		if (res->HasRequestError()) {
+			ErrorData error (res->GetRequestError());
+
+			// Special case: we can do a retry with a full file download
+			if (error.Type() == RangeRequestNotSupportedException::TYPE && error.RawMessage() == RangeRequestNotSupportedException::MESSAGE) {
+				auto &hfh = handle.Cast<HTTPFileHandle>();
+				if (hfh.http_params.auto_fallback_to_full_download) {
+					return false;
+				}
+
+				error.Throw();
+			}
+		}
+		throw HTTPException(*res, "Request returned HTTP %d for HTTP %s to '%s'",
+									static_cast<int>(res->status), EnumUtil::ToString(RequestType::GET_REQUEST), res->url);
+	}
+	throw IOException("Unknown error for HTTP %s to '%s'", EnumUtil::ToString(RequestType::GET_REQUEST), url);
+}
+
+bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 
 	D_ASSERT(hfh.http_params.state);
@@ -351,7 +380,7 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 		memcpy(buffer, hfh.cached_file_handle->GetData() + location, nr_bytes);
 		DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
 		hfh.file_offset = location + nr_bytes;
-		return;
+		return true;
 	}
 
 	idx_t to_read = nr_bytes;
@@ -360,7 +389,9 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	// Don't buffer when DirectIO is set or when we are doing parallel reads
 	bool skip_buffer = hfh.flags.DirectIO() || hfh.flags.RequireParallelAccess();
 	if (skip_buffer && to_read > 0) {
-		GetRangeRequest(hfh, hfh.path, {}, location, (char *)buffer, to_read);
+		if (!TryRangeRequest(hfh, hfh.path, {}, location, (char *)buffer, to_read)) {
+			return false;
+		}
 		DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
 		// Update handle status within critical section for parallel access.
 		if (hfh.flags.RequireParallelAccess()) {
@@ -368,13 +399,13 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 			hfh.buffer_available = 0;
 			hfh.buffer_idx = 0;
 			hfh.file_offset = location + nr_bytes;
-			return;
+			return true;
 		}
 
 		hfh.buffer_available = 0;
 		hfh.buffer_idx = 0;
 		hfh.file_offset = location + nr_bytes;
-		return;
+		return true;
 	}
 
 	if (location >= hfh.buffer_start && location < hfh.buffer_end) {
@@ -406,13 +437,17 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 
 			// Bypass buffer if we read more than buffer size
 			if (to_read > new_buffer_available) {
-				GetRangeRequest(hfh, hfh.path, {}, location + buffer_offset, (char *)buffer + buffer_offset, to_read);
+				if (!TryRangeRequest(hfh, hfh.path, {}, location + buffer_offset, (char *)buffer + buffer_offset, to_read)) {
+					return false;
+				}
 				hfh.buffer_available = 0;
 				hfh.buffer_idx = 0;
 				start_offset += to_read;
 				break;
 			} else {
-				GetRangeRequest(hfh, hfh.path, {}, start_offset, (char *)hfh.read_buffer.get(), new_buffer_available);
+				if (!TryRangeRequest(hfh, hfh.path, {}, start_offset, (char *)hfh.read_buffer.get(), new_buffer_available)) {
+					return false;
+				}
 				hfh.buffer_available = new_buffer_available;
 				hfh.buffer_idx = 0;
 				hfh.buffer_start = start_offset;
@@ -422,6 +457,32 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	}
 	hfh.file_offset = location + nr_bytes;
 	DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
+	return true;
+}
+
+// Buffered read from http file.
+// Note that buffering is disabled when FileFlags::FILE_FLAGS_DIRECT_IO is set
+void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+	auto success = ReadInternal(handle, buffer, nr_bytes, location);
+	if (success) {
+		return;
+	}
+
+	// ReadInternal returned false. This means the regular path of querying the file with range requests failed. We will
+	// attempt to download the full file and retry.
+
+	if (handle.logger) {
+		DUCKDB_LOG_WARN(handle.logger, "Falling back to full file download for file '%s': the server does not support HTTP range requests. Performance and memory usage are potentially degraded.", handle.path);
+	}
+
+	auto &hfh = handle.Cast<HTTPFileHandle>();
+
+	bool should_write_cache = false;
+	hfh.FullDownload(*this, should_write_cache);
+
+	if (!ReadInternal(handle, buffer, nr_bytes, location)) {
+		throw HTTPException("Failed to read from HTTP file after automatically retrying a full file download.");
+	}
 }
 
 int64_t HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
@@ -625,6 +686,19 @@ void HTTPFileHandle::LoadFileInfo() {
 		etag = res->headers.GetHeaderValue("ETag");
 	}
 	initialized = true;
+}
+
+
+void HTTPFileHandle::TryAddLogger(FileOpener &opener) {
+	auto context = opener.TryGetClientContext();
+	if (context) {
+		logger = context->logger;
+		return;
+	}
+	auto database = opener.TryGetDatabase();
+	if (database) {
+		logger = database->GetLogManager().GlobalLoggerReference();
+	}
 }
 
 void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {

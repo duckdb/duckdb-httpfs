@@ -14,6 +14,19 @@
 
 namespace duckdb {
 
+class RangeRequestNotSupportedException {
+public:
+	// Call static Throw instead: if thrown as exception DuckDB can't catch it.
+	explicit RangeRequestNotSupportedException() = delete;
+
+	static constexpr ExceptionType TYPE = ExceptionType::HTTP;
+	static constexpr const char *MESSAGE = "Content-Length from server mismatches requested range, server may not support range requests. You can try to resolve this by enabling `SET force_download=true`";
+
+	static void Throw() {
+		throw HTTPException(MESSAGE);
+	}
+};
+
 class HTTPClientCache {
 public:
 	//! Get a client from the client cache
@@ -50,6 +63,8 @@ public:
 	string etag;
 	bool force_full_download;
 	bool initialized = false;
+	
+	bool auto_fallback_to_full_file_download = true;
 
 	// When using full file download, the full file will be written to a cached file handle
 	unique_ptr<CachedFileHandle> cached_file_handle;
@@ -85,7 +100,10 @@ protected:
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
 
-private:
+	//! TODO: make base function virtual?
+	void TryAddLogger(FileOpener &opener);
+
+public:
 	//! Fully downloads a file
 	void FullDownload(HTTPFileSystem &hfs, bool &should_write_cache);
 };
@@ -154,6 +172,8 @@ protected:
 	}
 
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
+	bool TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out, idx_t buffer_out_len);
+	bool ReadInternal(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location);
 
 protected:
 	virtual duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
