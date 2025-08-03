@@ -114,6 +114,10 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 											lower_name, named_param.second.type().ToString());
 			}
 			secret->secret_map["requester_pays"] = Value::BOOLEAN(named_param.second.GetValue<bool>());
+		} else if (lower_name == "bearer_token" && input.type == "gcs") {
+			secret->secret_map["bearer_token"] = named_param.second.ToString();
+			// Mark it as sensitive
+			secret->redact_keys.insert("bearer_token");
 		} else {
 			throw InvalidInputException("Unknown named parameter passed to CreateSecretFunctionInternal: " +
 			                            lower_name);
@@ -209,6 +213,10 @@ void CreateS3SecretFunctions::SetBaseNamedParams(CreateSecretFunction &function,
 
 	if (type == "r2") {
 		function.named_parameters["account_id"] = LogicalType::VARCHAR;
+	}
+	
+	if (type == "gcs") {
+		function.named_parameters["bearer_token"] = LogicalType::VARCHAR;
 	}
 }
 
