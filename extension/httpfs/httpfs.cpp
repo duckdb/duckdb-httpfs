@@ -21,6 +21,53 @@
 
 namespace duckdb {
 
+namespace {
+void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
+	auto components = Timestamp::GetComponents(timestamp);
+	struct tm tm {};
+	tm.tm_year = components.year - 1900;
+	tm.tm_mon = components.month - 1;
+	tm.tm_mday = components.day;
+	tm.tm_hour = components.hour;
+	tm.tm_min = components.minute;
+	tm.tm_sec = components.second;
+	tm.tm_isdst = 0;
+	result = mktime(&tm);
+}
+
+optional_idx TryParseContentRange(const HTTPHeaders &headers) {
+	if (!headers.HasHeader("Content-Range")) {
+		return optional_idx();
+	}
+	string content_range = headers.GetHeaderValue("Content-Range");
+	auto range_find = content_range.find("/");
+	if (range_find == std::string::npos || content_range.size() < range_find + 1) {
+		return optional_idx();
+	}
+	string range_length = content_range.substr(range_find + 1);
+	if (range_length == "*") {
+		return optional_idx();
+	}
+	try {
+		return std::stoull(range_length);
+	} catch (...) {
+		return optional_idx();
+	}
+}
+
+optional_idx TryParseContentLength(const HTTPHeaders &headers) {
+	if (!headers.HasHeader("Content-Length")) {
+		return optional_idx();
+	}
+	string content_length = headers.GetHeaderValue("Content-Length");
+	try {
+		return std::stoull(content_length);
+	} catch (...) {
+		return optional_idx();
+	}
+}
+}  // namespace
+
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		return opener->GetHTTPUtil();
@@ -257,19 +304,6 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 
 	hfh.StoreClient(std::move(http_client));
 	return response;
-}
-
-void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
-	auto components = Timestamp::GetComponents(timestamp);
-	struct tm tm {};
-	tm.tm_year = components.year - 1900;
-	tm.tm_mon = components.month - 1;
-	tm.tm_mday = components.day;
-	tm.tm_hour = components.hour;
-	tm.tm_min = components.minute;
-	tm.tm_sec = components.second;
-	tm.tm_isdst = 0;
-	result = mktime(&tm);
 }
 
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
@@ -560,38 +594,6 @@ bool HTTPFileSystem::TryParseLastModifiedTime(const string &timestamp, time_t &r
 	tm.tm_isdst = 0;
 	result = mktime(&tm);
 	return true;
-}
-
-optional_idx TryParseContentRange(const HTTPHeaders &headers) {
-	if (!headers.HasHeader("Content-Range")) {
-		return optional_idx();
-	}
-	string content_range = headers.GetHeaderValue("Content-Range");
-	auto range_find = content_range.find("/");
-	if (range_find == std::string::npos || content_range.size() < range_find + 1) {
-		return optional_idx();
-	}
-	string range_length = content_range.substr(range_find + 1);
-	if (range_length == "*") {
-		return optional_idx();
-	}
-	try {
-		return std::stoull(range_length);
-	} catch (...) {
-		return optional_idx();
-	}
-}
-
-optional_idx TryParseContentLength(const HTTPHeaders &headers) {
-	if (!headers.HasHeader("Content-Length")) {
-		return optional_idx();
-	}
-	string content_length = headers.GetHeaderValue("Content-Length");
-	try {
-		return std::stoull(content_length);
-	} catch (...) {
-		return optional_idx();
-	}
 }
 
 void HTTPFileHandle::LoadFileInfo() {
