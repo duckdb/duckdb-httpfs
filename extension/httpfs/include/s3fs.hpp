@@ -31,6 +31,7 @@ struct S3AuthParams {
 	bool use_ssl = true;
 	bool s3_url_compatibility_mode = false;
     bool requester_pays = false;
+	string oauth2_bearer_token;  // OAuth2 bearer token for GCS
 
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
 };
@@ -228,6 +229,7 @@ public:
 
 	static string GetS3BadRequestError(S3AuthParams &s3_auth_params);
 	static string GetS3AuthError(S3AuthParams &s3_auth_params);
+	static string GetGCSAuthError(S3AuthParams &s3_auth_params);
 	static HTTPException GetS3Error(S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url);
 
 protected:
