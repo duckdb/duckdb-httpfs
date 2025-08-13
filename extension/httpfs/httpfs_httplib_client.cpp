@@ -1,9 +1,6 @@
 #include "httpfs_client.hpp"
 #include "http_state.hpp"
 #define CPPHTTPLIB_OPENSSL_SUPPORT
-#if defined(_WIN32)
-#include "duckdb/common/windows.hpp"
-#endif
 #include "httplib.hpp"
 
 
