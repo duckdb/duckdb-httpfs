@@ -1,5 +1,3 @@
-#define DUCKDB_EXTENSION_MAIN
-
 #include "httpfs_extension.hpp"
 
 #include "httpfs_client.hpp"
@@ -32,7 +30,8 @@ static void SetHttpfsClientImplementation(DBConfig &config, const string &value)
 		                            "`default` are currently supported");
 	}
 
-static void LoadInternal(DatabaseInstance &instance) {
+static void LoadInternal(ExtensionLoader &loader) {
+	auto &instance = loader.GetDatabaseInstance();
 	auto &fs = instance.GetFileSystem();
 
 	fs.RegisterSubSystem(make_uniq<HTTPFileSystem>());
@@ -122,16 +121,16 @@ static void LoadInternal(DatabaseInstance &instance) {
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	provider->SetAll();
 
-	CreateS3SecretFunctions::Register(instance);
-	CreateBearerTokenFunctions::Register(instance);
+	CreateS3SecretFunctions::Register(loader);
+	CreateBearerTokenFunctions::Register(loader);
 
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 	// set pointer to OpenSSL encryption state
 	config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
 #endif // OVERRIDE_ENCRYPTION_UTILS
 }
-void HttpfsExtension::Load(DuckDB &db) {
-	LoadInternal(*db.instance);
+void HttpfsExtension::Load(ExtensionLoader &loader) {
+	LoadInternal(loader);
 }
 std::string HttpfsExtension::Name() {
 	return "httpfs";
@@ -149,15 +148,8 @@ std::string HttpfsExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_EXTENSION_API void httpfs_init(duckdb::DatabaseInstance &db) {
-	LoadInternal(db);
+DUCKDB_CPP_EXTENSION_ENTRY(httpfs, loader) {
+	duckdb::LoadInternal(loader);
 }
 
-DUCKDB_EXTENSION_API const char *httpfs_version() {
-	return duckdb::DuckDB::LibraryVersion();
 }
-}
-
-#ifndef DUCKDB_EXTENSION_MAIN
-#error DUCKDB_EXTENSION_MAIN not defined
-#endif

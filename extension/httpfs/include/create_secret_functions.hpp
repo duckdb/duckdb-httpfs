@@ -8,11 +8,12 @@ struct S3AuthParams;
 class CreateSecretFunction;
 class BaseSecret;
 struct SecretEntry;
+class ExtensionLoader;
 
 struct CreateS3SecretFunctions {
 public:
 	//! Register all CreateSecretFunctions
-	static void Register(DatabaseInstance &instance);
+	static void Register(ExtensionLoader &loader);
 
 	//! Secret refreshing mechanisms
 	static CreateSecretInput GenerateRefreshSecretInfo(const SecretEntry &secret_entry, Value &refresh_info);
@@ -30,7 +31,7 @@ protected:
 	//! Helper function to set named params of secret function
 	static void SetBaseNamedParams(CreateSecretFunction &function, string &type);
 	//! Helper function to create secret types s3/r2/gcs
-	static void RegisterCreateSecretFunction(DatabaseInstance &instance, string type);
+	static void RegisterCreateSecretFunction(ExtensionLoader &loader, string type);
 };
 
 struct CreateBearerTokenFunctions {
@@ -38,7 +39,7 @@ public:
 	static constexpr const char *HUGGINGFACE_TYPE = "huggingface";
 
 	//! Register all CreateSecretFunctions
-	static void Register(DatabaseInstance &instance);
+	static void Register(ExtensionLoader &loader);
 
 protected:
 	//! Internal function to create bearer token

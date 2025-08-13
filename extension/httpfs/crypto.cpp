@@ -30,11 +30,11 @@ AESStateSSL::~AESStateSSL() {
 	EVP_CIPHER_CTX_free(context);
 }
 
-const EVP_CIPHER *AESStateSSL::GetCipher(const string &key) {
+const EVP_CIPHER *AESStateSSL::GetCipher(idx_t key_len) {
 
 	switch (cipher) {
 	case GCM:
-		switch (key.size()) {
+		switch (key_len) {
 		case 16:
 			return EVP_aes_128_gcm();
 		case 24:
@@ -45,7 +45,7 @@ const EVP_CIPHER *AESStateSSL::GetCipher(const string &key) {
 			throw InternalException("Invalid AES key length");
 		}
 	case CTR:
-		switch (key.size()) {
+		switch (key_len) {
 		case 16:
 			return EVP_aes_128_ctr();
 		case 24:
@@ -66,19 +66,33 @@ void AESStateSSL::GenerateRandomData(data_ptr_t data, idx_t len) {
 	RAND_bytes(data, len);
 }
 
-void AESStateSSL::InitializeEncryption(const_data_ptr_t iv, idx_t iv_len, const string *key) {
+void AESStateSSL::InitializeEncryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len, const_data_ptr_t aad, idx_t aad_len) {
 	mode = ENCRYPT;
 
-	if (1 != EVP_EncryptInit_ex(context, GetCipher(*key), NULL, const_data_ptr_cast(key->data()), iv)) {
+	if (1 != EVP_EncryptInit_ex(context, GetCipher(key_len), NULL, key, iv)) {
 		throw InternalException("EncryptInit failed");
+	}
+
+	int len;
+	if (aad_len > 0){
+		if (!EVP_DecryptUpdate(context, NULL, &len, aad, aad_len)) {
+			throw InternalException("Setting Additional Authenticated Data  failed");
+		}
 	}
 }
 
-void AESStateSSL::InitializeDecryption(const_data_ptr_t iv, idx_t iv_len, const string *key) {
+void AESStateSSL::InitializeDecryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len, const_data_ptr_t aad, idx_t aad_len) {
 	mode = DECRYPT;
 
-	if (1 != EVP_DecryptInit_ex(context, GetCipher(*key), NULL, const_data_ptr_cast(key->data()), iv)) {
+	if (1 != EVP_DecryptInit_ex(context, GetCipher(key_len), NULL, key, iv)) {
 		throw InternalException("DecryptInit failed");
+	}
+
+	int len;
+	if (aad_len > 0){
+		if (!EVP_DecryptUpdate(context, NULL, &len, aad, aad_len)) {
+			throw InternalException("Setting Additional Authenticated Data  failed");
+		}
 	}
 }
 
