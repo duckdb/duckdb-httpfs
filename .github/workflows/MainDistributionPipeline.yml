@@ -17,6 +17,8 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
       extension_name: httpfs
+      override_repository: Tmonster/duckdb
+      override_ref: 8a495cef3c25f3d48223018f6b6f95b0bf83299e
       duckdb_version: main
       ci_tools_version: main
 
