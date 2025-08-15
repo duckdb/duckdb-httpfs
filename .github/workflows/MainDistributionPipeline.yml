@@ -17,8 +17,7 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
       extension_name: httpfs
-      override_duckdb_repository: https://github.com/tmonster/duckdb.git
-      duckdb_version: 981f07e87f132eb3d46841e19d30a8b7e28c34b9
+      duckdb_version: v1.3.2
       ci_tools_version: main
 
 
@@ -29,6 +28,6 @@ jobs:
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: main
+      duckdb_version: v1.3.2
       ci_tools_version: main
       deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
