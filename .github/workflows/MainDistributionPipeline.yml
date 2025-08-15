@@ -19,7 +19,7 @@ jobs:
       extension_name: httpfs
       override_duckdb_repository: tmonster/duckdb-httpfs
       set_caller_as_duckdb: true
-      duckdb_version: d53321d994af5a6c9e26908faf60e82cd6c5410a
+      duckdb_version: 981f07e87f132eb3d46841e19d30a8b7e28c34b9
       ci_tools_version: main
 
 
