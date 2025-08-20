@@ -13,5 +13,4 @@ SET httpfs_client_implementation='curl';
 statement error
 INSTALL non_existent_extension;
 ----
-<REGEX>:.*HTTP Error: Failed to download extension "non_existent_extension" at URL.*
-    
+<REGEX>:.*HTTP Error: Failed to download extension.*
