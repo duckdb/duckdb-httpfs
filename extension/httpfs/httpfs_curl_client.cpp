@@ -206,7 +206,10 @@ public:
 		}
 
 		const char* data = request_info->body.c_str();
-		info.content_handler(const_data_ptr_cast(data), bytes_received);
+		if (info.content_handler) {
+			 info.content_handler(const_data_ptr_cast(data), bytes_received);
+		}
+
 		return TransformResponseCurl(res);
 	}
 
