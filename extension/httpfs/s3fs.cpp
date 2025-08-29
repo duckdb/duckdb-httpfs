@@ -70,7 +70,7 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 		res["x-amz-request-payer"] = "requester";
 	}
 
-    string signed_headers = "";
+	string signed_headers = "";
 	hash_bytes canonical_request_hash;
 	hash_str canonical_request_hash_str;
 	if (content_type.length() > 0) {
@@ -87,7 +87,7 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 	if (use_requester_pays) {
 		signed_headers += ";x-amz-request-payer";
 	}
-    auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
+	auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
 	if (content_type.length() > 0) {
 		canonical_request += "\ncontent-type:" + content_type;
 	}
@@ -136,8 +136,7 @@ string S3FileSystem::UrlEncode(const string &input, bool encode_slash) {
 }
 
 static bool IsGCSRequest(const string &url) {
-	return StringUtil::StartsWith(url, "gcs://") || 
-	       StringUtil::StartsWith(url, "gs://");
+	return StringUtil::StartsWith(url, "gcs://") || StringUtil::StartsWith(url, "gs://");
 }
 
 void AWSEnvironmentCredentialsProvider::SetExtensionOptionValue(string key, const char *env_var_name) {
@@ -177,7 +176,7 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 	params.endpoint = DUCKDB_ENDPOINT_ENV_VAR;
 	params.kms_key_id = DUCKDB_KMS_KEY_ID_ENV_VAR;
 	params.use_ssl = DUCKDB_USE_SSL_ENV_VAR;
-    params.requester_pays = DUCKDB_REQUESTER_PAYS_ENV_VAR;
+	params.requester_pays = DUCKDB_REQUESTER_PAYS_ENV_VAR;
 
 	return params;
 }
@@ -203,8 +202,7 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", result.kms_key_id);
 	secret_reader.TryGetSecretKeyOrSetting("s3_url_compatibility_mode", "s3_url_compatibility_mode",
 	                                       result.s3_url_compatibility_mode);
-	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays",
-										   result.requester_pays);
+	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays", result.requester_pays);
 
 	// Endpoint and url style are slightly more complex and require special handling for gcs and r2
 	auto endpoint_result = secret_reader.TryGetSecretKeyOrSetting("endpoint", "s3_endpoint", result.endpoint);
@@ -223,9 +221,9 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	}
 
 	if (!result.region.empty() && (result.endpoint.empty() || result.endpoint == "s3.amazonaws.com")) {
-	    result.endpoint = StringUtil::Format("s3.%s.amazonaws.com", result.region);
+		result.endpoint = StringUtil::Format("s3.%s.amazonaws.com", result.region);
 	} else if (result.endpoint.empty()) {
-	    result.endpoint = "s3.amazonaws.com";
+		result.endpoint = "s3.amazonaws.com";
 	}
 
 	return result;
@@ -592,7 +590,7 @@ void S3FileSystem::ReadQueryParams(const string &url_query_param, S3AuthParams &
 	if (!query_params.empty()) {
 		throw IOException("Invalid query parameters found. Supported parameters are:\n's3_region', 's3_access_key_id', "
 		                  "'s3_secret_access_key', 's3_session_token',\n's3_endpoint', 's3_url_style', 's3_use_ssl', "
-                          "'s3_requester_pays'");
+		                  "'s3_requester_pays'");
 	}
 }
 
@@ -703,7 +701,7 @@ unique_ptr<HTTPResponse> S3FileSystem::PostRequest(FileHandle &handle, string ur
 	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
 	auto parsed_s3_url = S3UrlParse(url, auth_params);
 	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, http_params);
-	
+
 	HTTPHeaders headers;
 	if (IsGCSRequest(url) && !auth_params.oauth2_bearer_token.empty()) {
 		// Use bearer token for GCS
@@ -714,7 +712,7 @@ unique_ptr<HTTPResponse> S3FileSystem::PostRequest(FileHandle &handle, string ur
 		// Use existing S3 authentication
 		auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
 		headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "POST", auth_params, "",
-		                          "", payload_hash, "application/octet-stream");
+		                           "", payload_hash, "application/octet-stream");
 	}
 
 	return HTTPFileSystem::PostRequest(handle, http_url, headers, result, buffer_in, buffer_in_len);
@@ -726,7 +724,7 @@ unique_ptr<HTTPResponse> S3FileSystem::PutRequest(FileHandle &handle, string url
 	auto parsed_s3_url = S3UrlParse(url, auth_params);
 	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, http_params);
 	auto content_type = "application/octet-stream";
-	
+
 	HTTPHeaders headers;
 	if (IsGCSRequest(url) && !auth_params.oauth2_bearer_token.empty()) {
 		// Use bearer token for GCS
@@ -737,9 +735,9 @@ unique_ptr<HTTPResponse> S3FileSystem::PutRequest(FileHandle &handle, string url
 		// Use existing S3 authentication
 		auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
 		headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", auth_params, "",
-		                          "", payload_hash, content_type);
+		                           "", payload_hash, content_type);
 	}
-	
+
 	return HTTPFileSystem::PutRequest(handle, http_url, headers, buffer_in, buffer_in_len);
 }
 
@@ -747,7 +745,7 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, string s3
 	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
 	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
 	string http_url = parsed_s3_url.GetHTTPUrl(auth_params);
-	
+
 	HTTPHeaders headers;
 	if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
 		// Use bearer token for GCS
@@ -755,10 +753,10 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, string s3
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
-		headers = create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, 
-		                          "s3", "HEAD", auth_params, "", "", "", "");
+		headers =
+		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "HEAD", auth_params, "", "", "", "");
 	}
-	
+
 	return HTTPFileSystem::HeadRequest(handle, http_url, headers);
 }
 
@@ -766,7 +764,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
 	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
 	string http_url = parsed_s3_url.GetHTTPUrl(auth_params);
-	
+
 	HTTPHeaders headers;
 	if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
 		// Use bearer token for GCS
@@ -774,10 +772,10 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
-		headers = create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, 
-		                          "s3", "GET", auth_params, "", "", "", "");
+		headers =
+		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
-	
+
 	return HTTPFileSystem::GetRequest(handle, http_url, headers);
 }
 
@@ -786,7 +784,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
 	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
 	string http_url = parsed_s3_url.GetHTTPUrl(auth_params);
-	
+
 	HTTPHeaders headers;
 	if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
 		// Use bearer token for GCS
@@ -794,10 +792,10 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
-		headers = create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, 
-		                          "s3", "GET", auth_params, "", "", "", "");
+		headers =
+		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
-	
+
 	return HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);
 }
 
@@ -805,7 +803,7 @@ unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, string 
 	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
 	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
 	string http_url = parsed_s3_url.GetHTTPUrl(auth_params);
-	
+
 	HTTPHeaders headers;
 	if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
 		// Use bearer token for GCS
@@ -813,10 +811,10 @@ unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, string 
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
-		headers = create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, 
-		                          "s3", "DELETE", auth_params, "", "", "", "");
+		headers =
+		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "DELETE", auth_params, "", "", "", "");
 	}
-	
+
 	return HTTPFileSystem::DeleteRequest(handle, http_url, headers);
 }
 
@@ -1134,8 +1132,7 @@ string S3FileSystem::GetS3AuthError(S3AuthParams &s3_auth_params) {
 
 string S3FileSystem::GetGCSAuthError(S3AuthParams &s3_auth_params) {
 	string extra_text = "\n\nAuthentication Failure - GCS authentication failed.";
-	if (s3_auth_params.oauth2_bearer_token.empty() && 
-	    s3_auth_params.secret_access_key.empty() && 
+	if (s3_auth_params.oauth2_bearer_token.empty() && s3_auth_params.secret_access_key.empty() &&
 	    s3_auth_params.access_key_id.empty()) {
 		extra_text += "\n* No credentials provided.";
 		extra_text += "\n* For OAuth2: CREATE SECRET (TYPE GCS, bearer_token 'your-token')";
@@ -1165,15 +1162,15 @@ HTTPException S3FileSystem::GetS3Error(S3AuthParams &s3_auth_params, const HTTPR
 
 HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &response, const string &url) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	
+
 	// Use GCS-specific error for GCS URLs
 	if (IsGCSRequest(url) && response.status == HTTPStatusCode::Forbidden_403) {
 		string extra_text = GetGCSAuthError(s3_handle.auth_params);
 		auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
-		throw HTTPException(response, "HTTP error on '%s' (HTTP %d %s)%s", url,
-		                    response.status, status_message, extra_text);
+		throw HTTPException(response, "HTTP error on '%s' (HTTP %d %s)%s", url, response.status, status_message,
+		                    extra_text);
 	}
-	
+
 	return GetS3Error(s3_handle.auth_params, response, url);
 }
 string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
