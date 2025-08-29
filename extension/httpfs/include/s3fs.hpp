@@ -30,8 +30,8 @@ struct S3AuthParams {
 	string url_style;
 	bool use_ssl = true;
 	bool s3_url_compatibility_mode = false;
-    bool requester_pays = false;
-	string oauth2_bearer_token;  // OAuth2 bearer token for GCS
+	bool requester_pays = false;
+	string oauth2_bearer_token; // OAuth2 bearer token for GCS
 
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
 };
@@ -46,7 +46,6 @@ struct AWSEnvironmentCredentialsProvider {
 	static constexpr const char *DUCKDB_USE_SSL_ENV_VAR = "DUCKDB_S3_USE_SSL";
 	static constexpr const char *DUCKDB_KMS_KEY_ID_ENV_VAR = "DUCKDB_S3_KMS_KEY_ID";
 	static constexpr const char *DUCKDB_REQUESTER_PAYS_ENV_VAR = "DUCKDB_S3_REQUESTER_PAYS";
-
 
 	explicit AWSEnvironmentCredentialsProvider(DBConfig &config) : config(config) {};
 

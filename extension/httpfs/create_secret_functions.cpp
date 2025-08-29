@@ -111,7 +111,7 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 		} else if (lower_name == "requester_pays") {
 			if (named_param.second.type() != LogicalType::BOOLEAN) {
 				throw InvalidInputException("Invalid type past to secret option: '%s', found '%s', expected: 'BOOLEAN'",
-											lower_name, named_param.second.type().ToString());
+				                            lower_name, named_param.second.type().ToString());
 			}
 			secret->secret_map["requester_pays"] = Value::BOOLEAN(named_param.second.GetValue<bool>());
 		} else if (lower_name == "bearer_token" && input.type == "gcs") {
@@ -195,7 +195,7 @@ void CreateS3SecretFunctions::SetBaseNamedParams(CreateSecretFunction &function,
 	function.named_parameters["use_ssl"] = LogicalType::BOOLEAN;
 	function.named_parameters["kms_key_id"] = LogicalType::VARCHAR;
 	function.named_parameters["url_compatibility_mode"] = LogicalType::BOOLEAN;
-    function.named_parameters["requester_pays"] = LogicalType::BOOLEAN;
+	function.named_parameters["requester_pays"] = LogicalType::BOOLEAN;
 
 	// Whether a secret refresh attempt should be made when the secret appears to be incorrect
 	function.named_parameters["refresh"] = LogicalType::VARCHAR;
@@ -214,7 +214,7 @@ void CreateS3SecretFunctions::SetBaseNamedParams(CreateSecretFunction &function,
 	if (type == "r2") {
 		function.named_parameters["account_id"] = LogicalType::VARCHAR;
 	}
-	
+
 	if (type == "gcs") {
 		function.named_parameters["bearer_token"] = LogicalType::VARCHAR;
 	}
