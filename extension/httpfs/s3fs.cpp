@@ -369,10 +369,15 @@ void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuf
 			                    static_cast<int>(res->status));
 		}
 
-		if (!res->headers.HasHeader("ETag")) {
+		if (!res->headers.HasHeader("ETag") && !res->headers.HasHeader("etag")) {
 			throw IOException("Unexpected response when uploading part to S3");
 		}
-		etag = res->headers.GetHeaderValue("ETag");
+
+		if (res->headers.HasHeader("ETag")) {
+			etag = res->headers.GetHeaderValue("ETag");
+		} else if (res->headers.HasHeader("etag")) {
+			etag = res->headers.GetHeaderValue("etag");
+		}
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		if (error.Type() != ExceptionType::IO && error.Type() != ExceptionType::HTTP) {
