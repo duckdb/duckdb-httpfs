@@ -22,6 +22,9 @@
 
 #include <iostream>
 #include <thread>
+#ifdef EMSCRIPTEN
+#define SAME_THREAD_UPLOAD
+#endif
 
 namespace duckdb {
 
@@ -72,6 +75,7 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 	hash_str canonical_request_hash_str;
 	if (content_type.length() > 0) {
 		signed_headers += "content-type;";
+		res["content-type"] = content_type;
 	}
 	signed_headers += "host;x-amz-content-sha256;x-amz-date";
 	if (auth_params.session_token.length() > 0) {
@@ -342,8 +346,10 @@ void S3FileSystem::NotifyUploadsInProgress(S3FileHandle &file_handle) {
 	}
 	// Note that there are 2 cv's because otherwise we might deadlock when the final flushing thread is notified while
 	// another thread is still waiting for an upload thread
+#ifndef SAME_THREAD_UPLOAD
 	file_handle.uploads_in_progress_cv.notify_one();
 	file_handle.final_flush_cv.notify_one();
+#endif
 }
 
 void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
@@ -363,10 +369,15 @@ void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuf
 			                    static_cast<int>(res->status));
 		}
 
-		if (!res->headers.HasHeader("ETag")) {
+		if (!res->headers.HasHeader("ETag") && !res->headers.HasHeader("etag")) {
 			throw IOException("Unexpected response when uploading part to S3");
 		}
-		etag = res->headers.GetHeaderValue("ETag");
+
+		if (res->headers.HasHeader("ETag")) {
+			etag = res->headers.GetHeaderValue("ETag");
+		} else if (res->headers.HasHeader("etag")) {
+			etag = res->headers.GetHeaderValue("etag");
+		}
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		if (error.Type() != ExceptionType::IO && error.Type() != ExceptionType::HTTP) {
@@ -420,18 +431,25 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 
 	{
 		unique_lock<mutex> lck(file_handle.uploads_in_progress_lock);
-		// check if there are upload threads available
+		// check if there are upload threads available	
+#ifndef SAME_THREAD_UPLOAD
 		if (file_handle.uploads_in_progress >= file_handle.config_params.max_upload_threads) {
 			// there are not - wait for one to become available
 			file_handle.uploads_in_progress_cv.wait(lck, [&file_handle] {
 				return file_handle.uploads_in_progress < file_handle.config_params.max_upload_threads;
 			});
 		}
+#endif
 		file_handle.uploads_in_progress++;
 	}
 
-	thread upload_thread(UploadBuffer, std::ref(file_handle), write_buffer);
-	upload_thread.detach();
+#ifdef SAME_THREAD_UPLOAD
+	UploadBuffer(file_handle, write_buffer);
+	return;
+#endif
+
+       thread upload_thread(UploadBuffer, std::ref(file_handle), write_buffer);
+       upload_thread.detach();
 }
 
 // Note that FlushAll currently does not allow to continue writing afterwards. Therefore, FinalizeMultipartUpload should
@@ -453,7 +471,9 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 		}
 	}
 	unique_lock<mutex> lck(file_handle.uploads_in_progress_lock);
+#ifndef SAME_THREAD_UPLOAD
 	file_handle.final_flush_cv.wait(lck, [&file_handle] { return file_handle.uploads_in_progress == 0; });
+#endif
 
 	file_handle.RethrowIOError();
 }
