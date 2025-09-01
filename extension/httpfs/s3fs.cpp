@@ -299,8 +299,8 @@ S3ConfigParams S3ConfigParams::ReadFrom(optional_ptr<FileOpener> opener) {
 void S3FileHandle::Close() {
 	auto &s3fs = (S3FileSystem &)file_system;
 	if (flags.OpenForWriting() && !upload_finalized) {
-		s3fs.FlushAllBuffers(*this);
-		if (parts_uploaded) {
+		bool did_upload = s3fs.FlushAllBuffers(*this);
+		if (parts_uploaded && did_upload) {
 			s3fs.FinalizeMultipartUpload(*this);
 		}
 	}
@@ -336,6 +336,8 @@ string S3FileSystem::InitializeMultipartUpload(S3FileHandle &file_handle) {
 
 	open_tag_pos += 10; // Skip open tag
 
+	file_handle.initialized_multipart_upload = true;
+
 	return result.substr(open_tag_pos, close_tag_pos - open_tag_pos);
 }
 
@@ -353,10 +355,21 @@ void S3FileSystem::NotifyUploadsInProgress(S3FileHandle &file_handle) {
 }
 
 void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
-	auto &s3fs = (S3FileSystem &)file_handle.file_system;
-
 	string query_param = "partNumber=" + to_string(write_buffer->part_no + 1) + "&" +
 	                     "uploadId=" + S3FileSystem::UrlEncode(file_handle.multipart_upload_id, true);
+	
+	UploadBufferImplementation(file_handle, write_buffer, query_param);
+
+	NotifyUploadsInProgress(file_handle);
+}
+
+void S3FileSystem::UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
+	UploadBufferImplementation(file_handle, write_buffer, "");
+}
+
+void S3FileSystem::UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer, string query_param) {
+	auto &s3fs = (S3FileSystem &)file_handle.file_system;
+
 	unique_ptr<HTTPResponse> res;
 	string etag;
 
@@ -405,7 +418,7 @@ void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuf
 	// Free up space for another thread to acquire an S3WriteBuffer
 	write_buffer.reset();
 
-	NotifyUploadsInProgress(file_handle);
+	//NotifyUploadsInProgress(file_handle);
 }
 
 void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
@@ -442,6 +455,9 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 #endif
 		file_handle.uploads_in_progress++;
 	}
+	if (file_handle.initialized_multipart_upload == false) {
+		file_handle.multipart_upload_id = InitializeMultipartUpload(file_handle);
+	}
 
 #ifdef SAME_THREAD_UPLOAD
 	UploadBuffer(file_handle, write_buffer);
@@ -455,7 +471,9 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 // Note that FlushAll currently does not allow to continue writing afterwards. Therefore, FinalizeMultipartUpload should
 // be called right after it!
 // TODO: we can fix this by keeping the last partially written buffer in memory and allow reuploading it with new data.
-void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
+bool S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
+
+
 	//  Collect references to all buffers to check
 	vector<shared_ptr<S3WriteBuffer>> to_flush;
 	file_handle.write_buffers_lock.lock();
@@ -464,6 +482,16 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 	}
 	file_handle.write_buffers_lock.unlock();
 
+	if (file_handle.initialized_multipart_upload == false) {
+
+		if (to_flush.size() == 1) {
+			UploadSingleBuffer(file_handle, to_flush[0]);
+			file_handle.upload_finalized= true;
+			return false;
+		} else {
+			file_handle.multipart_upload_id = InitializeMultipartUpload(file_handle);
+		}
+	}
 	// Flush all buffers that aren't already uploading
 	for (auto &write_buffer : to_flush) {
 		if (!write_buffer->uploading) {
@@ -476,6 +504,7 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 #endif
 
 	file_handle.RethrowIOError();
+	return true;
 }
 
 void S3FileSystem::FinalizeMultipartUpload(S3FileHandle &file_handle) {
@@ -895,7 +924,8 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		            Storage::DEFAULT_BLOCK_SIZE;
 		D_ASSERT(part_size * max_part_count >= config_params.max_file_size);
 
-		multipart_upload_id = s3fs.InitializeMultipartUpload(*this);
+		initialized_multipart_upload = false;
+		//multipart_upload_id = s3fs.InitializeMultipartUpload(*this);
 	}
 }
 
@@ -940,8 +970,9 @@ void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> 
 void S3FileSystem::FileSync(FileHandle &handle) {
 	auto &s3fh = handle.Cast<S3FileHandle>();
 	if (!s3fh.upload_finalized) {
-		FlushAllBuffers(s3fh);
-		FinalizeMultipartUpload(s3fh);
+		if (FlushAllBuffers(s3fh)) {
+			FinalizeMultipartUpload(s3fh);
+		}
 	}
 }
 
