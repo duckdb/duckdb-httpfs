@@ -278,7 +278,7 @@ unique_ptr<KeyValueSecret> CreateSecret(vector<string> &prefix_paths_p, string &
 	return_value->secret_map["bearer_token"] = params.oauth2_bearer_token;
 
 	//! Set redact keys
-	return_value->redact_keys = {"secret", "session_token"};
+	return_value->redact_keys = {"secret", "session_token", "sse_c_key", "sse_c_key_md5"};
 	if (!params.oauth2_bearer_token.empty()) {
 		return_value->redact_keys.insert("bearer_token");
 	}

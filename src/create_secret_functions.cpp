@@ -48,7 +48,7 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 	}
 
 	auto secret = make_uniq<KeyValueSecret>(scope, input.type, input.provider, input.name);
-	secret->redact_keys = {"secret", "session_token"};
+	secret->redact_keys = {"secret", "session_token", "sse_c_key", "sse_c_key_md5"};
 
 	// for r2 we can set the endpoint using the account id
 	if (input.type == "r2" && input.options.find("account_id") != input.options.end()) {
