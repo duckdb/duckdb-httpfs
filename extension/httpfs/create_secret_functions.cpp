@@ -82,6 +82,10 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 			secret->secret_map["use_ssl"] = Value::BOOLEAN(named_param.second.GetValue<bool>());
 		} else if (lower_name == "kms_key_id") {
 			secret->secret_map["kms_key_id"] = named_param.second.ToString();
+		} else if (lower_name == "sse_c_key") {
+			secret->secret_map["sse_c_key"] = named_param.second.ToString();
+		} else if (lower_name == "sse_c_key_md5") {
+			secret->secret_map["sse_c_key_md5"] = named_param.second.ToString();
 		} else if (lower_name == "url_compatibility_mode") {
 			if (named_param.second.type() != LogicalType::BOOLEAN) {
 				throw InvalidInputException("Invalid type past to secret option: '%s', found '%s', expected: 'BOOLEAN'",
@@ -122,6 +126,16 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 			throw InvalidInputException("Unknown named parameter passed to CreateSecretFunctionInternal: " +
 			                            lower_name);
 		}
+	}
+
+	bool has_sse_c_key = secret->secret_map.find("sse_c_key") != secret->secret_map.end();
+	bool has_sse_c_key_md5 = secret->secret_map.find("sse_c_key_md5") != secret->secret_map.end();
+	if (has_sse_c_key != has_sse_c_key_md5) {
+		throw InvalidInputException("Both `sse_c_key` and `sse_c_key_md5` must be set together, or neither should be set");
+	}
+	bool has_kms_key_id = secret->secret_map.find("kms_key_id") != secret->secret_map.end();
+	if (has_kms_key_id && has_sse_c_key) {
+		throw InvalidInputException("Cannot set `kms_key_id` and `sse_c_key` at the same time");
 	}
 
 	return std::move(secret);
@@ -194,6 +208,8 @@ void CreateS3SecretFunctions::SetBaseNamedParams(CreateSecretFunction &function,
 	function.named_parameters["url_style"] = LogicalType::VARCHAR;
 	function.named_parameters["use_ssl"] = LogicalType::BOOLEAN;
 	function.named_parameters["kms_key_id"] = LogicalType::VARCHAR;
+	function.named_parameters["sse_c_key"] = LogicalType::VARCHAR;
+	function.named_parameters["sse_c_key_md5"] = LogicalType::VARCHAR;
 	function.named_parameters["url_compatibility_mode"] = LogicalType::BOOLEAN;
 	function.named_parameters["requester_pays"] = LogicalType::BOOLEAN;
 
