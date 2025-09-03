@@ -10,7 +10,7 @@ statement ok
 PRAGMA enable_verification
 
 statement ok
-pragma enable_logging('HTTP');
+CALL enable_logging('HTTP');
 
 foreach httpfs_implementation curl httplib
 
