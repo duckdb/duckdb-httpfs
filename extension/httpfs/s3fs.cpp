@@ -75,7 +75,9 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 	hash_str canonical_request_hash_str;
 	if (content_type.length() > 0) {
 		signed_headers += "content-type;";
+#ifdef EMSCRIPTEN
 		res["content-type"] = content_type;
+#endif
 	}
 	signed_headers += "host;x-amz-content-sha256;x-amz-date";
 	if (auth_params.session_token.length() > 0) {
