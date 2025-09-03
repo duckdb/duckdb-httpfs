@@ -9,7 +9,7 @@ unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, con
 
 unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
 	unordered_map<string, string> result;
-	//TODO: HTTPFSUtil::ParseGetParameters is currently not implemented
+	// TODO: HTTPFSUtil::ParseGetParameters is currently not implemented
 	return result;
 }
 
