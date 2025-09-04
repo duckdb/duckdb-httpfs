@@ -7,6 +7,10 @@
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
+#include "include/crypto.hpp"
+
+#include "re2/re2.h"
+
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
@@ -19,7 +23,7 @@
 
 namespace duckdb {
 
-AESStateSSL::AESStateSSL(const std::string *key) : context(EVP_CIPHER_CTX_new()) {
+AESStateSSL::AESStateSSL(EncryptionTypes::CipherType  cipher_p, const std::string *key) : EncryptionState(cipher_p), context(EVP_CIPHER_CTX_new()), cipher(cipher_p) {
 	if (!(context)) {
 		throw InternalException("AES GCM failed with initializing context");
 	}
@@ -33,7 +37,7 @@ AESStateSSL::~AESStateSSL() {
 const EVP_CIPHER *AESStateSSL::GetCipher(idx_t key_len) {
 
 	switch (cipher) {
-	case GCM:
+	case EncryptionTypes::GCM:
 		switch (key_len) {
 		case 16:
 			return EVP_aes_128_gcm();
@@ -44,18 +48,18 @@ const EVP_CIPHER *AESStateSSL::GetCipher(idx_t key_len) {
 		default:
 			throw InternalException("Invalid AES key length");
 		}
-	case CTR:
+	case EncryptionTypes::CBC: {
 		switch (key_len) {
 		case 16:
-			return EVP_aes_128_ctr();
+			return EVP_aes_128_cbc();
 		case 24:
-			return EVP_aes_192_ctr();
+			return EVP_aes_192_cbc();
 		case 32:
-			return EVP_aes_256_ctr();
+			return EVP_aes_256_cbc();
 		default:
 			throw InternalException("Invalid AES key length");
 		}
-
+	}
 	default:
 		throw duckdb::InternalException("Invalid Encryption/Decryption Cipher: %d", static_cast<int>(cipher));
 	}
@@ -67,7 +71,7 @@ void AESStateSSL::GenerateRandomData(data_ptr_t data, idx_t len) {
 }
 
 void AESStateSSL::InitializeEncryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len, const_data_ptr_t aad, idx_t aad_len) {
-	mode = ENCRYPT;
+	mode = EncryptionTypes::ENCRYPT;
 
 	if (1 != EVP_EncryptInit_ex(context, GetCipher(key_len), NULL, key, iv)) {
 		throw InternalException("EncryptInit failed");
@@ -82,7 +86,7 @@ void AESStateSSL::InitializeEncryption(const_data_ptr_t iv, idx_t iv_len, const_
 }
 
 void AESStateSSL::InitializeDecryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len, const_data_ptr_t aad, idx_t aad_len) {
-	mode = DECRYPT;
+	mode = EncryptionTypes::DECRYPT;
 
 	if (1 != EVP_DecryptInit_ex(context, GetCipher(key_len), NULL, key, iv)) {
 		throw InternalException("DecryptInit failed");
@@ -99,14 +103,14 @@ void AESStateSSL::InitializeDecryption(const_data_ptr_t iv, idx_t iv_len, const_
 size_t AESStateSSL::Process(const_data_ptr_t in, idx_t in_len, data_ptr_t out, idx_t out_len) {
 
 	switch (mode) {
-	case ENCRYPT:
+	case EncryptionTypes::ENCRYPT:
 		if (1 != EVP_EncryptUpdate(context, data_ptr_cast(out), reinterpret_cast<int *>(&out_len),
 		                           const_data_ptr_cast(in), (int)in_len)) {
 			throw InternalException("EncryptUpdate failed");
 		}
 		break;
 
-	case DECRYPT:
+	case EncryptionTypes::DECRYPT:
 		if (1 != EVP_DecryptUpdate(context, data_ptr_cast(out), reinterpret_cast<int *>(&out_len),
 		                           const_data_ptr_cast(in), (int)in_len)) {
 
@@ -126,7 +130,7 @@ size_t AESStateSSL::FinalizeGCM(data_ptr_t out, idx_t out_len, data_ptr_t tag, i
 	auto text_len = out_len;
 
 	switch (mode) {
-	case ENCRYPT: {
+	case EncryptionTypes::ENCRYPT: {
 		if (1 != EVP_EncryptFinal_ex(context, data_ptr_cast(out) + out_len, reinterpret_cast<int *>(&out_len))) {
 			throw InternalException("EncryptFinal failed");
 		}
@@ -138,7 +142,7 @@ size_t AESStateSSL::FinalizeGCM(data_ptr_t out, idx_t out_len, data_ptr_t tag, i
 		}
 		return text_len;
 	}
-	case DECRYPT: {
+	case EncryptionTypes::DECRYPT: {
 		// Set expected tag value
 		if (!EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_SET_TAG, tag_len, tag)) {
 			throw InternalException("Finalizing tag failed");
@@ -161,14 +165,14 @@ size_t AESStateSSL::FinalizeGCM(data_ptr_t out, idx_t out_len, data_ptr_t tag, i
 
 size_t AESStateSSL::Finalize(data_ptr_t out, idx_t out_len, data_ptr_t tag, idx_t tag_len) {
 
-	if (cipher == GCM) {
+	if (cipher == EncryptionTypes::GCM) {
 		return FinalizeGCM(out, out_len, tag, tag_len);
 	}
 
 	auto text_len = out_len;
 	switch (mode) {
 
-	case ENCRYPT: {
+	case EncryptionTypes::ENCRYPT: {
 		if (1 != EVP_EncryptFinal_ex(context, data_ptr_cast(out) + out_len, reinterpret_cast<int *>(&out_len))) {
 			throw InternalException("EncryptFinal failed");
 		}
@@ -176,7 +180,7 @@ size_t AESStateSSL::Finalize(data_ptr_t out, idx_t out_len, data_ptr_t tag, idx_
 		return text_len += out_len;
 	}
 
-	case DECRYPT: {
+	case EncryptionTypes::DECRYPT: {
 		// EVP_DecryptFinal() will return an error code if final block is not correctly formatted.
 		int ret = EVP_DecryptFinal_ex(context, data_ptr_cast(out) + out_len, reinterpret_cast<int *>(&out_len));
 		text_len += out_len;

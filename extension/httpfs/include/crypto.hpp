@@ -25,7 +25,7 @@ void hex256(hash_bytes &in, hash_str &out);
 class DUCKDB_EXTENSION_API AESStateSSL : public duckdb::EncryptionState {
 
 public:
-	explicit AESStateSSL(const std::string *key = nullptr);
+	explicit AESStateSSL(duckdb::EncryptionTypes::CipherType cipher_p, const std::string *key = nullptr);
 	~AESStateSSL() override;
 
 public:
@@ -40,8 +40,8 @@ public:
 
 private:
 	EVP_CIPHER_CTX *context;
-	Mode mode;
-	Cipher cipher = GCM;
+	duckdb::EncryptionTypes::Mode mode;
+	duckdb::EncryptionTypes::CipherType cipher;
 };
 
 } // namespace duckdb
@@ -53,8 +53,8 @@ public:
 	explicit AESStateSSLFactory() {
 	}
 
-	duckdb::shared_ptr<duckdb::EncryptionState> CreateEncryptionState(duckdb::const_data_ptr_t key = nullptr, duckdb::idx_t key_len = 0) const override {
-		return duckdb::make_shared_ptr<duckdb::AESStateSSL>();
+	duckdb::shared_ptr<duckdb::EncryptionState> CreateEncryptionState(duckdb::EncryptionTypes::CipherType cipher_p, duckdb::const_data_ptr_t key = nullptr, duckdb::idx_t key_len = 0) const override {
+		return duckdb::make_shared_ptr<duckdb::AESStateSSL>(cipher_p);
 	}
 
 	~AESStateSSLFactory() override {
