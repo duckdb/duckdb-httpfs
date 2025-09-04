@@ -226,6 +226,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 		    }
 		    if (static_cast<int>(response.status) < 300) { // done redirecting
 			    out_offset = 0;
+
+				if (response.HasHeader("ETag") && !hfh.etag.empty() && response.GetHeaderValue("ETag") != hfh.etag) {
+					throw HTTPException(response, "ETag was initially %s and now it returned %s, this likely means the remote file has changed.\nTry restart the read / close file-handle and restart (e.g. `DETACH` in case of database file).", hfh.etag, response.GetHeaderValue("ETag"));
+				}
+
 			    if (response.HasHeader("Content-Length")) {
 				    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
 				    if ((idx_t)content_length != buffer_out_len) {
