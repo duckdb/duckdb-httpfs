@@ -52,7 +52,7 @@ const EVP_CIPHER *AESStateSSL::GetCipher(idx_t key_len) {
 	case EncryptionTypes::CTR: {
 		switch (key_len) {
 		case 16:
-			return EVP_aes_128_ctr()();
+			return EVP_aes_128_ctr();
 		case 24:
 			return EVP_aes_192_ctr();
 		case 32:
