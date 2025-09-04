@@ -126,6 +126,7 @@ public:
 
 	S3AuthParams auth_params;
 	const S3ConfigParams config_params;
+	bool initialized_multipart_upload;
 
 public:
 	void Close() override;
@@ -202,7 +203,7 @@ public:
 	string InitializeMultipartUpload(S3FileHandle &file_handle);
 	void FinalizeMultipartUpload(S3FileHandle &file_handle);
 
-	void FlushAllBuffers(S3FileHandle &handle);
+	bool FlushAllBuffers(S3FileHandle &handle);
 
 	void ReadQueryParams(const string &url_query_param, S3AuthParams &params);
 	static ParsedS3Url S3UrlParse(string url, S3AuthParams &params);
@@ -213,6 +214,8 @@ public:
 	// Uploads the contents of write_buffer to S3.
 	// Note: caller is responsible to not call this method twice on the same buffer
 	static void UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
+	static void UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
+	static void UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer, string query_param);
 
 	vector<OpenFileInfo> Glob(const string &glob_pattern, FileOpener *opener = nullptr) override;
 	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
