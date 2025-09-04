@@ -17,7 +17,7 @@ namespace duckdb {
 
 struct HTTPMetadataCacheEntry {
 	idx_t length;
-	time_t last_modified;
+	timestamp_t last_modified;
 	string etag;
 };
 

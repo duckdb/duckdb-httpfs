@@ -46,7 +46,7 @@ public:
 	// File handle info
 	FileOpenFlags flags;
 	idx_t length;
-	time_t last_modified;
+	timestamp_t last_modified;
 	string etag;
 	bool force_full_download;
 	bool initialized = false;
@@ -92,7 +92,7 @@ private:
 
 class HTTPFileSystem : public FileSystem {
 public:
-	static bool TryParseLastModifiedTime(const string &timestamp, time_t &result);
+	static bool TryParseLastModifiedTime(const string &timestamp, timestamp_t &result);
 
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override {
 		return {path}; // FIXME
@@ -121,7 +121,7 @@ public:
 	int64_t Write(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
 	void FileSync(FileHandle &handle) override;
 	int64_t GetFileSize(FileHandle &handle) override;
-	time_t GetLastModifiedTime(FileHandle &handle) override;
+	timestamp_t GetLastModifiedTime(FileHandle &handle) override;
 	string GetVersionTag(FileHandle &handle) override;
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener) override;
 	void Seek(FileHandle &handle, idx_t location) override;

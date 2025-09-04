@@ -1,0 +1,16 @@
+# name: test/sql/curl_client/test_load_other_extensions.test
+# description: when using the curl client, test loading other extensions
+# group: [httpfs_client]
+
+require httpfs
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+statement error
+INSTALL non_existent_extension;
+----
+<REGEX>:.*HTTP Error: Failed to download extension.*
