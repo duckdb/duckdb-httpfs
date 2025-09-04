@@ -37,7 +37,7 @@ AESStateSSL::~AESStateSSL() {
 const EVP_CIPHER *AESStateSSL::GetCipher(idx_t key_len) {
 
 	switch (cipher) {
-	case EncryptionTypes::GCM:
+	case EncryptionTypes::GCM: {
 		switch (key_len) {
 		case 16:
 			return EVP_aes_128_gcm();
@@ -48,6 +48,19 @@ const EVP_CIPHER *AESStateSSL::GetCipher(idx_t key_len) {
 		default:
 			throw InternalException("Invalid AES key length");
 		}
+	}
+	case EncryptionTypes::CTR: {
+		switch (key_len) {
+		case 16:
+			return EVP_aes_128_cbc();
+		case 24:
+			return EVP_aes_192_cbc();
+		case 32:
+			return EVP_aes_256_cbc();
+		default:
+			throw InternalException("Invalid AES key length");
+		}
+	}
 	case EncryptionTypes::CBC: {
 		switch (key_len) {
 		case 16:
