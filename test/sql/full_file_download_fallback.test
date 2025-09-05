@@ -1,0 +1,46 @@
+# name: test/sql/full_file_download_fallback.test
+# group: [full_file_download]
+
+require parquet
+
+require httpfs
+
+require tpch
+
+require-env PYTHON_HTTP_SERVER_URL
+
+require-env PYTHON_HTTP_SERVER_DIR
+
+statement ok
+CALL enable_logging();
+
+statement ok
+call dbgen(sf=1);
+
+statement ok
+copy lineitem to '${PYTHON_HTTP_SERVER_DIR}/lineitem.csv'
+
+statement ok
+drop table lineitem;
+
+statement ok
+CREATE view lineitem AS FROM '${PYTHON_HTTP_SERVER_URL}/lineitem.csv';
+
+query I
+pragma tpch(6);
+----
+123141078.22829981
+
+query I
+select count(*) from duckdb_logs where log_level='WARN' and message like '%Falling back to full%'
+----
+2
+
+statement ok
+set auto_fallback_to_full_download=false
+
+statement error
+pragma tpch(6);
+----
+HTTP Error: Content-Length from server mismatches requested range, server may not support range requests. You can try to resolve this by enabling `SET force_download=true`
+

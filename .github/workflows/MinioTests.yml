@@ -22,6 +22,8 @@ jobs:
       GEN: ninja
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: x64-linux
+      PYTHON_HTTP_SERVER_URL: http://localhost:8008
+      PYTHON_HTTP_SERVER_DIR: /tmp/python_test_server
 
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +52,9 @@ jobs:
 
       - name: Build
         shell: bash
-        run: make
+        run: |
+          echo -e "\nduckdb_extension_load(tpch)\n" >> extension_config.cmake
+          make
 
       - name: Start S3/HTTP test server
         shell: bash
@@ -61,6 +65,13 @@ jobs:
           sudo ./scripts/install_s3_test_server.sh
           source ./scripts/run_s3_test_server.sh
           sleep 30
+
+      - name: Run & Populate test server
+        shell: bash
+        run: |
+          mkdir -p $PYTHON_HTTP_SERVER_DIR
+          cd $PYTHON_HTTP_SERVER_DIR
+          python3 -m http.server 8008 &
 
       - name: Test
         shell: bash
