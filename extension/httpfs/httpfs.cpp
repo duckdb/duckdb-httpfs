@@ -232,9 +232,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
                                 string responseEtag = response.GetHeaderValue("ETag");
 
                                 if (!responseEtag.empty() && responseEtag != hfh.etag) {
-                                    throw HTTPException(response, "ETag was initially %s and now it returned %s, this likely means the remote file has changed.\nTry restart the read / close file-handle and restart (e.g. `DETACH` in case of database file).\nYou can disable this behaviour via `SET unsafe_disable_etag_checks = true;`", hfh.etag, response.GetHeaderValue("ETag"));
+                                    throw HTTPException(response, "ETag was initially %s and now it returned %s, this likely means the remote file has changed.\nTry to restart the read or close the file-handle and read the file again (e.g. `DETACH` in the file is a database file).\nYou can disable checking etags via `SET unsafe_disable_etag_checks = true;`", hfh.etag, response.GetHeaderValue("ETag"));
 				}
                             }
+
+
 
 			    if (response.HasHeader("Content-Length")) {
 				    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
