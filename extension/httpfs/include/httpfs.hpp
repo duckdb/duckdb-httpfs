@@ -51,6 +51,9 @@ public:
 	bool force_full_download;
 	bool initialized = false;
 
+	// In write overwrite mode, we are not interested in the current state of the file: we're overwriting it.
+	bool write_overwrite_mode = false;
+
 	// When using full file download, the full file will be written to a cached file handle
 	unique_ptr<CachedFileHandle> cached_file_handle;
 

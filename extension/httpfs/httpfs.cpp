@@ -331,6 +331,11 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	}
 
 	auto handle = CreateHandle(file, flags, opener);
+
+	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
+		handle->write_overwrite_mode = true;
+	}
+
 	handle->Initialize(opener);
 
 	DUCKDB_LOG_FILE_SYSTEM_OPEN((*handle));
@@ -582,6 +587,14 @@ void HTTPFileHandle::LoadFileInfo() {
 		// already initialized or we specifically do not want to perform a head request and just run a direct download
 		return;
 	}
+
+	// In write_overwrite_mode we dgaf about the size, so no head request is needed
+	if (write_overwrite_mode) {
+		length = 0;
+		initialized = true;
+		return;
+	}
+
 	auto &hfs = file_system.Cast<HTTPFileSystem>();
 	auto res = hfs.HeadRequest(*this, path, {});
 	if (res->status != HTTPStatusCode::OK_200) {
