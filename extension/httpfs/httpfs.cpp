@@ -51,6 +51,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);
 	FileOpener::TryGetCurrentSetting(opener, "hf_max_per_page", result->hf_max_per_page, info);
+	FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks, info);
 
 	// HTTP Secret lookups
 	KeyValueSecretReader settings_reader(*opener, info, "http");
@@ -227,9 +228,13 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 		    if (static_cast<int>(response.status) < 300) { // done redirecting
 			    out_offset = 0;
 
-				if (response.HasHeader("ETag") && !hfh.etag.empty() && response.GetHeaderValue("ETag") != hfh.etag) {
-					throw HTTPException(response, "ETag was initially %s and now it returned %s, this likely means the remote file has changed.\nTry restart the read / close file-handle and restart (e.g. `DETACH` in case of database file).", hfh.etag, response.GetHeaderValue("ETag"));
+			    if (!hfh.http_params.unsafe_disable_etag_checks && hfh.etag.empty() && response.HasHeader("ETag")) {
+                                string responseEtag = response.GetHeaderValue("ETag");
+
+                                if (!responseEtag.empty() && responseEtag != hfh.etag) {
+                                    throw HTTPException(response, "ETag was initially %s and now it returned %s, this likely means the remote file has changed.\nTry restart the read / close file-handle and restart (e.g. `DETACH` in case of database file).\nYou can disable this behaviour via `SET unsafe_disable_etag_checks = true;`", hfh.etag, response.GetHeaderValue("ETag"));
 				}
+                            }
 
 			    if (response.HasHeader("Content-Length")) {
 				    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
