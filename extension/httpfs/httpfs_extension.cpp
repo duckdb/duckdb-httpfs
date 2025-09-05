@@ -79,6 +79,8 @@ static void LoadInternal(DatabaseInstance &instance) {
 	                          LogicalType::UBIGINT, Value(10000));
 	config.AddExtensionOption("s3_uploader_thread_limit", "S3 Uploader global thread limit", LogicalType::UBIGINT,
 	                          Value(50));
+	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency",
+	                          LogicalType::BOOLEAN, Value(false));
 
 	// HuggingFace options
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",

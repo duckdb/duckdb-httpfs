@@ -21,6 +21,7 @@ struct HTTPFSParams : public HTTPParams {
 	idx_t hf_max_per_page = DEFAULT_HF_MAX_PER_PAGE;
 	string ca_cert_file;
 	string bearer_token;
+	bool unsafe_disable_etag_checks {false};
 	shared_ptr<HTTPState> state;
 };
 
