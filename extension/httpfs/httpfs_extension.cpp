@@ -55,6 +55,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "http_keep_alive",
 	    "Keep alive connections. Setting this to false can help when running into connection failures",
 	    LogicalType::BOOLEAN, Value(true));
+	config.AddExtensionOption("enable_curl_server_cert_verification", "Enable server side certificate verification for CURL backend.", LogicalType::BOOLEAN, Value(true));
 	config.AddExtensionOption("enable_server_cert_verification", "Enable server side certificate verification.",
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("ca_cert_file", "Path to a custom certificate file for self-signed certificates.",

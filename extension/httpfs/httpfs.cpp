@@ -48,6 +48,8 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_wait_ms", result->retry_wait_ms, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_backoff", result->retry_backoff, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_keep_alive", result->keep_alive, info);
+	FileOpener::TryGetCurrentSetting(opener, "enable_curl_server_cert_verification", result->enable_curl_server_cert_verification,
+	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "enable_server_cert_verification", result->enable_server_cert_verification,
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);

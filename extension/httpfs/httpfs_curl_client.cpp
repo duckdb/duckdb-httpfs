@@ -135,10 +135,12 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_FORBID_REUSE, 1L);
 		}
 
-		// client->enable_server_certificate_verification(http_params.enable_server_cert_verification);
-		if (http_params.enable_server_cert_verification) {
+		if (http_params.enable_curl_server_cert_verification) {
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYPEER, 1L);   // Verify the cert
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYHOST, 2L);   // Verify that the cert matches the hostname
+		} else {
+			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYPEER, 0L);   // Override default, don't verify the cert
+			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYHOST, 0L);   // Override default, don't verify that the cert matches the hostname
 		}
 
 		// set read timeout
