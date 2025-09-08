@@ -51,6 +51,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);
 	FileOpener::TryGetCurrentSetting(opener, "hf_max_per_page", result->hf_max_per_page, info);
+	FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks, info);
 
 	// HTTP Secret lookups
 	KeyValueSecretReader settings_reader(*opener, info, "http");
@@ -226,6 +227,17 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 		    }
 		    if (static_cast<int>(response.status) < 300) { // done redirecting
 			    out_offset = 0;
+
+			    if (!hfh.http_params.unsafe_disable_etag_checks && hfh.etag.empty() && response.HasHeader("ETag")) {
+                                string responseEtag = response.GetHeaderValue("ETag");
+
+                                if (!responseEtag.empty() && responseEtag != hfh.etag) {
+                                    throw HTTPException(response, "ETag was initially %s and now it returned %s, this likely means the remote file has changed.\nTry to restart the read or close the file-handle and read the file again (e.g. `DETACH` in the file is a database file).\nYou can disable checking etags via `SET unsafe_disable_etag_checks = true;`", hfh.etag, response.GetHeaderValue("ETag"));
+				}
+                            }
+
+
+
 			    if (response.HasHeader("Content-Length")) {
 				    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
 				    if ((idx_t)content_length != buffer_out_len) {
@@ -275,7 +287,8 @@ void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
                                unique_ptr<HTTPParams> params_p)
     : FileHandle(fs, file.path, flags), params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()),
-      flags(flags), length(0), force_full_download(false), buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0) {
+      flags(flags), length(0), force_full_download(false), buffer_available(0), buffer_idx(0), file_offset(0),
+      buffer_start(0), buffer_end(0) {
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {

@@ -13,23 +13,23 @@
 namespace duckdb {
 
 static void SetHttpfsClientImplementation(DBConfig &config, const string &value) {
-		if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
-			if (value == "wasm" || value == "default") {
-				// Already handled, do not override
-				return;
-			}
-			throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
-			                            "`default` are currently supported for duckdb-wasm");
-		}
-		if (value == "httplib" || value == "default") {
-			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
-				config.http_util = make_shared_ptr<HTTPFSUtil>();
-			}
+	if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+		if (value == "wasm" || value == "default") {
+			// Already handled, do not override
 			return;
 		}
-		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
-		                            "`default` are currently supported");
+		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
+		                            "`default` are currently supported for duckdb-wasm");
 	}
+	if (value == "httplib" || value == "default") {
+		if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
+			config.http_util = make_shared_ptr<HTTPFSUtil>();
+		}
+		return;
+	}
+	throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
+	                            "`default` are currently supported");
+}
 
 static void LoadInternal(DatabaseInstance &instance) {
 	auto &fs = instance.GetFileSystem();
@@ -79,6 +79,8 @@ static void LoadInternal(DatabaseInstance &instance) {
 	                          LogicalType::UBIGINT, Value(10000));
 	config.AddExtensionOption("s3_uploader_thread_limit", "S3 Uploader global thread limit", LogicalType::UBIGINT,
 	                          Value(50));
+	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency",
+	                          LogicalType::BOOLEAN, Value(false));
 
 	// HuggingFace options
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
