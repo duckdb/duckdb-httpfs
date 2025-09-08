@@ -254,7 +254,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 		    return true;
 	    });
 
-	get_request.try_request = true;
+	get_request.try_request = hfh.auto_fallback_to_full_file_download;
 
 	auto response = http_util.Request(get_request, http_client);
 
@@ -360,8 +360,8 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders
 					return false;
 				}
 
-				error.Throw();
 			}
+			error.Throw();
 		}
 		throw HTTPException(*res, "Request returned HTTP %d for HTTP %s to '%s'",
 									static_cast<int>(res->status), EnumUtil::ToString(RequestType::GET_REQUEST), res->url);

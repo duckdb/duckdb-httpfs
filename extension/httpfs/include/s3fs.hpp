@@ -116,6 +116,7 @@ public:
 	    : HTTPFileHandle(fs, file, flags, std::move(http_params_p)), auth_params(auth_params_p),
 	      config_params(config_params_p), uploads_in_progress(0), parts_uploaded(0), upload_finalized(false),
 	      uploader_has_error(false), upload_exception(nullptr) {
+		auto_fallback_to_full_file_download = false;
 		if (flags.OpenForReading() && flags.OpenForWriting()) {
 			throw NotImplementedException("Cannot open an HTTP file for both reading and writing");
 		} else if (flags.OpenForAppending()) {
