@@ -1281,6 +1281,7 @@ void AWSListObjectV2::ParseFileList(string &aws_response, vector<OpenFileInfo> &
 		auto etag_pos = FindTagContents(contents, "ETag", 0, etag);
 		if (etag_pos.IsValid()) {
 			etag = StringUtil::Replace(etag, "&quot;", "\"");
+			etag = StringUtil::Replace(etag, "&#34;", "\"");
 			extra_info->options["etag"] = Value(std::move(etag));
 		}
 		auto size_pos = FindTagContents(contents, "Size", 0, size);
