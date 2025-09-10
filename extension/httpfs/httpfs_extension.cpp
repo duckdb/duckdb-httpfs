@@ -98,6 +98,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
 			                            "`default` are currently supported for duckdb-wasm");
 		}
+#ifndef EMSCRIPTEN
 		if (value == "curl") {
 			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil-Curl") {
 				config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
@@ -110,6 +111,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			}
 			return;
 		}
+#endif
 		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
 		                            "`default` are currently supported");
 	};
