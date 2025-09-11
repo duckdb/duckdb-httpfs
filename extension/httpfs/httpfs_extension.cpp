@@ -9,6 +9,10 @@
 #include "crypto.hpp"
 #endif // OVERRIDE_ENCRYPTION_UTILS
 
+#ifndef EMSCRIPTEN
+#include "httpfs_curl_client.hpp"
+#endif
+
 namespace duckdb {
 
 static void SetHttpfsClientImplementation(DBConfig &config, const string &value) {
