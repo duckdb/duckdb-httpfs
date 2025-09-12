@@ -57,6 +57,11 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	FileOpener::TryGetCurrentSetting(opener, "hf_max_per_page", result->hf_max_per_page, info);
 	FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks, info);
 
+	{
+		auto db = FileOpener::TryGetDatabase(opener);
+		result->user_agent = StringUtil::Format("%s %s", db->config.UserAgent(), DuckDB::SourceID());
+	}
+
 	// HTTP Secret lookups
 	KeyValueSecretReader settings_reader(*opener, info, "http");
 
@@ -106,6 +111,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(FileHandle &handle, string 
                                                      string params) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto &http_util = hfh.http_params.http_util;
+
+	if (!hfh.http_params.user_agent.empty()) {
+		header_map.Insert("User-Agent", hfh.http_params.user_agent);
+	}
+
 	PostRequestInfo post_request(url, header_map, hfh.http_params, const_data_ptr_cast(buffer_in), buffer_in_len);
 	auto result = http_util.Request(post_request);
 	buffer_out = std::move(post_request.buffer_out);
@@ -116,6 +126,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::PutRequest(FileHandle &handle, string u
                                                     char *buffer_in, idx_t buffer_in_len, string params) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto &http_util = hfh.http_params.http_util;
+
+	if (!hfh.http_params.user_agent.empty()) {
+		header_map.Insert("User-Agent", hfh.http_params.user_agent);
+	}
+
 	string content_type = "application/octet-stream";
 	PutRequestInfo put_request(url, header_map, hfh.http_params, (const_data_ptr_t)buffer_in, buffer_in_len,
 	                           content_type);
@@ -125,6 +140,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::PutRequest(FileHandle &handle, string u
 unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, string url, HTTPHeaders header_map) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto &http_util = hfh.http_params.http_util;
+
+	if (!hfh.http_params.user_agent.empty()) {
+		header_map.Insert("User-Agent", hfh.http_params.user_agent);
+	}
+
 	auto http_client = hfh.GetClient();
 
 	HeadRequestInfo head_request(url, header_map, hfh.http_params);
@@ -137,6 +157,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, string 
 unique_ptr<HTTPResponse> HTTPFileSystem::DeleteRequest(FileHandle &handle, string url, HTTPHeaders header_map) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto &http_util = hfh.http_params.http_util;
+
+	if (!hfh.http_params.user_agent.empty()) {
+		header_map.Insert("User-Agent", hfh.http_params.user_agent);
+	}
+
 	auto http_client = hfh.GetClient();
 	DeleteRequestInfo delete_request(url, header_map, hfh.http_params);
 	auto response = http_util.Request(delete_request, http_client);
@@ -159,6 +184,10 @@ HTTPException HTTPFileSystem::GetHTTPError(FileHandle &, const HTTPResponse &res
 unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string url, HTTPHeaders header_map) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto &http_util = hfh.http_params.http_util;
+
+	if (!hfh.http_params.user_agent.empty()) {
+		header_map.Insert("User-Agent", hfh.http_params.user_agent);
+	}
 
 	D_ASSERT(hfh.cached_file_handle);
 
@@ -208,6 +237,10 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
                                                          idx_t file_offset, char *buffer_out, idx_t buffer_out_len) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto &http_util = hfh.http_params.http_util;
+
+	if (!hfh.http_params.user_agent.empty()) {
+		header_map.Insert("User-Agent", hfh.http_params.user_agent);
+	}
 
 	// send the Range header to read only subset of file
 	string range_expr = "bytes=" + to_string(file_offset) + "-" + to_string(file_offset + buffer_out_len - 1);
