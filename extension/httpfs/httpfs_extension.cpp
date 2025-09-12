@@ -1,7 +1,6 @@
-#define DUCKDB_EXTENSION_MAIN
-
 #include "httpfs_extension.hpp"
 
+#include "httpfs_client.hpp"
 #include "create_secret_functions.hpp"
 #include "duckdb.hpp"
 #include "s3fs.hpp"
@@ -31,7 +30,8 @@ static void SetHttpfsClientImplementation(DBConfig &config, const string &value)
 	                            "`default` are currently supported");
 }
 
-static void LoadInternal(DatabaseInstance &instance) {
+static void LoadInternal(ExtensionLoader &loader) {
+	auto &instance = loader.GetDatabaseInstance();
 	auto &fs = instance.GetFileSystem();
 
 	fs.RegisterSubSystem(make_uniq<HTTPFileSystem>());
@@ -47,6 +47,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	config.AddExtensionOption("http_retries", "HTTP retries on I/O error", LogicalType::UBIGINT, Value(3));
 	config.AddExtensionOption("http_retry_wait_ms", "Time between retries", LogicalType::UBIGINT, Value(100));
 	config.AddExtensionOption("force_download", "Forces upfront download of file", LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("auto_fallback_to_full_download", "Allows automatically falling back to full file downloads when possible.", LogicalType::BOOLEAN, Value(true));
 	// Reduces the number of requests made while waiting, for example retry_wait_ms of 50 and backoff factor of 2 will
 	// result in wait times of  0 50 100 200 400...etc.
 	config.AddExtensionOption("http_retry_backoff", "Backoff factor for exponentially increasing retry wait time",
@@ -55,6 +56,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	    "http_keep_alive",
 	    "Keep alive connections. Setting this to false can help when running into connection failures",
 	    LogicalType::BOOLEAN, Value(true));
+	config.AddExtensionOption("enable_curl_server_cert_verification", "Enable server side certificate verification for CURL backend.", LogicalType::BOOLEAN, Value(true));
 	config.AddExtensionOption("enable_server_cert_verification", "Enable server side certificate verification.",
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("ca_cert_file", "Path to a custom certificate file for self-signed certificates.",
@@ -89,27 +91,50 @@ static void LoadInternal(DatabaseInstance &instance) {
 	auto callback_httpfs_client_implementation = [](ClientContext &context, SetScope scope, Value &parameter) {
 		auto &config = DBConfig::GetConfig(context);
 		string value = StringValue::Get(parameter);
-		SetHttpfsClientImplementation(config, value);
+		if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+			if (value == "wasm" || value == "default") {
+				return;
+			}
+			throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
+			                            "`default` are currently supported for duckdb-wasm");
+		}
+		if (value == "curl") {
+			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil-Curl") {
+				config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+			}
+			return;
+		}
+		if (value == "httplib" || value == "default") {
+			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
+				config.http_util = make_shared_ptr<HTTPFSUtil>();
+			}
+			return;
+		}
+		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
+		                            "`default` are currently supported");
 	};
-
 	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
 	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
 
-	SetHttpfsClientImplementation(config, "default");
+	if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+		// Already handled, do not override
+	} else {
+		config.http_util = make_shared_ptr<HTTPFSUtil>();
+	}
 
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	provider->SetAll();
 
-	CreateS3SecretFunctions::Register(instance);
-	CreateBearerTokenFunctions::Register(instance);
+	CreateS3SecretFunctions::Register(loader);
+	CreateBearerTokenFunctions::Register(loader);
 
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 	// set pointer to OpenSSL encryption state
 	config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
 #endif // OVERRIDE_ENCRYPTION_UTILS
 }
-void HttpfsExtension::Load(DuckDB &db) {
-	LoadInternal(*db.instance);
+void HttpfsExtension::Load(ExtensionLoader &loader) {
+	LoadInternal(loader);
 }
 std::string HttpfsExtension::Name() {
 	return "httpfs";
@@ -127,15 +152,8 @@ std::string HttpfsExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_EXTENSION_API void httpfs_init(duckdb::DatabaseInstance &db) {
-	LoadInternal(db);
+DUCKDB_CPP_EXTENSION_ENTRY(httpfs, loader) {
+	duckdb::LoadInternal(loader);
 }
 
-DUCKDB_EXTENSION_API const char *httpfs_version() {
-	return duckdb::DuckDB::LibraryVersion();
 }
-}
-
-#ifndef DUCKDB_EXTENSION_MAIN
-#error DUCKDB_EXTENSION_MAIN not defined
-#endif

@@ -14,6 +14,19 @@
 
 namespace duckdb {
 
+class RangeRequestNotSupportedException {
+public:
+	// Call static Throw instead: if thrown as exception DuckDB can't catch it.
+	explicit RangeRequestNotSupportedException() = delete;
+
+	static constexpr ExceptionType TYPE = ExceptionType::HTTP;
+	static constexpr const char *MESSAGE = "Content-Length from server mismatches requested range, server may not support range requests. You can try to resolve this by enabling `SET force_download=true`";
+
+	static void Throw() {
+		throw HTTPException(MESSAGE);
+	}
+};
+
 class HTTPClientCache {
 public:
 	//! Get a client from the client cache
@@ -46,10 +59,15 @@ public:
 	// File handle info
 	FileOpenFlags flags;
 	idx_t length;
-	time_t last_modified;
+	timestamp_t last_modified;
 	string etag;
 	bool force_full_download;
 	bool initialized = false;
+	
+	bool auto_fallback_to_full_file_download = true;
+
+	// In write overwrite mode, we are not interested in the current state of the file: we're overwriting it.
+	bool write_overwrite_mode = false;
 
 	// When using full file download, the full file will be written to a cached file handle
 	unique_ptr<CachedFileHandle> cached_file_handle;
@@ -85,14 +103,17 @@ protected:
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
 
-private:
+	//! TODO: make base function virtual?
+	void TryAddLogger(FileOpener &opener);
+
+public:
 	//! Fully downloads a file
 	void FullDownload(HTTPFileSystem &hfs, bool &should_write_cache);
 };
 
 class HTTPFileSystem : public FileSystem {
 public:
-	static bool TryParseLastModifiedTime(const string &timestamp, time_t &result);
+	static bool TryParseLastModifiedTime(const string &timestamp, timestamp_t &result);
 
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override {
 		return {path}; // FIXME
@@ -121,7 +142,7 @@ public:
 	int64_t Write(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
 	void FileSync(FileHandle &handle) override;
 	int64_t GetFileSize(FileHandle &handle) override;
-	time_t GetLastModifiedTime(FileHandle &handle) override;
+	timestamp_t GetLastModifiedTime(FileHandle &handle) override;
 	string GetVersionTag(FileHandle &handle) override;
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener) override;
 	void Seek(FileHandle &handle, idx_t location) override;
@@ -154,6 +175,8 @@ protected:
 	}
 
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
+	bool TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out, idx_t buffer_out_len);
+	bool ReadInternal(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location);
 
 protected:
 	virtual duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,

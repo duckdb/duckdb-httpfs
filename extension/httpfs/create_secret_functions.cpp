@@ -1,15 +1,15 @@
 #include "create_secret_functions.hpp"
 #include "s3fs.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
 namespace duckdb {
 
-void CreateS3SecretFunctions::Register(DatabaseInstance &instance) {
-	RegisterCreateSecretFunction(instance, "s3");
-	RegisterCreateSecretFunction(instance, "aws");
-	RegisterCreateSecretFunction(instance, "r2");
-	RegisterCreateSecretFunction(instance, "gcs");
+void CreateS3SecretFunctions::Register(ExtensionLoader &loader) {
+	RegisterCreateSecretFunction(loader, "s3");
+	RegisterCreateSecretFunction(loader, "aws");
+	RegisterCreateSecretFunction(loader, "r2");
+	RegisterCreateSecretFunction(loader, "gcs");
 }
 
 static Value MapToStruct(const Value &map) {
@@ -220,7 +220,7 @@ void CreateS3SecretFunctions::SetBaseNamedParams(CreateSecretFunction &function,
 	}
 }
 
-void CreateS3SecretFunctions::RegisterCreateSecretFunction(DatabaseInstance &instance, string type) {
+void CreateS3SecretFunctions::RegisterCreateSecretFunction(ExtensionLoader &loader, string type) {
 	// Register the new type
 	SecretType secret_type;
 	secret_type.name = type;
@@ -228,31 +228,31 @@ void CreateS3SecretFunctions::RegisterCreateSecretFunction(DatabaseInstance &ins
 	secret_type.default_provider = "config";
 	secret_type.extension = "httpfs";
 
-	ExtensionUtil::RegisterSecretType(instance, secret_type);
+	loader.RegisterSecretType(secret_type);
 
 	CreateSecretFunction from_empty_config_fun2 = {type, "config", CreateS3SecretFromConfig};
 	SetBaseNamedParams(from_empty_config_fun2, type);
-	ExtensionUtil::RegisterFunction(instance, from_empty_config_fun2);
+	loader.RegisterFunction(from_empty_config_fun2);
 }
 
-void CreateBearerTokenFunctions::Register(DatabaseInstance &instance) {
+void CreateBearerTokenFunctions::Register(ExtensionLoader &loader) {
 	// HuggingFace secret
 	SecretType secret_type_hf;
 	secret_type_hf.name = HUGGINGFACE_TYPE;
 	secret_type_hf.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type_hf.default_provider = "config";
 	secret_type_hf.extension = "httpfs";
-	ExtensionUtil::RegisterSecretType(instance, secret_type_hf);
+	loader.RegisterSecretType(secret_type_hf);
 
 	// Huggingface config provider
 	CreateSecretFunction hf_config_fun = {HUGGINGFACE_TYPE, "config", CreateBearerSecretFromConfig};
 	hf_config_fun.named_parameters["token"] = LogicalType::VARCHAR;
-	ExtensionUtil::RegisterFunction(instance, hf_config_fun);
+	loader.RegisterFunction(hf_config_fun);
 
 	// Huggingface credential_chain provider
 	CreateSecretFunction hf_cred_fun = {HUGGINGFACE_TYPE, "credential_chain",
 	                                    CreateHuggingFaceSecretFromCredentialChain};
-	ExtensionUtil::RegisterFunction(instance, hf_cred_fun);
+	loader.RegisterFunction(hf_cred_fun);
 }
 
 unique_ptr<BaseSecret> CreateBearerTokenFunctions::CreateSecretFunctionInternal(ClientContext &context,

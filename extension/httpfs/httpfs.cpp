@@ -7,6 +7,7 @@
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/common/types/hash.hpp"
+#include "duckdb/common/types/time.hpp"
 #include "duckdb/function/scalar/strftime_format.hpp"
 #include "duckdb/logging/file_system_logger.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -43,10 +44,13 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	// Setting lookups
 	FileOpener::TryGetCurrentSetting(opener, "http_timeout", result->timeout, info);
 	FileOpener::TryGetCurrentSetting(opener, "force_download", result->force_download, info);
+	FileOpener::TryGetCurrentSetting(opener, "auto_fallback_to_full_download", result->auto_fallback_to_full_download, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retries", result->retries, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_wait_ms", result->retry_wait_ms, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_backoff", result->retry_backoff, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_keep_alive", result->keep_alive, info);
+	FileOpener::TryGetCurrentSetting(opener, "enable_curl_server_cert_verification", result->enable_curl_server_cert_verification,
+	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "enable_server_cert_verification", result->enable_server_cert_verification,
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);
@@ -228,7 +232,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 		    if (static_cast<int>(response.status) < 300) { // done redirecting
 			    out_offset = 0;
 
-			    if (!hfh.http_params.unsafe_disable_etag_checks && hfh.etag.empty() && response.HasHeader("ETag")) {
+			    if (!hfh.http_params.unsafe_disable_etag_checks && !hfh.etag.empty() && response.HasHeader("ETag")) {
                                 string responseEtag = response.GetHeaderValue("ETag");
 
                                 if (!responseEtag.empty() && responseEtag != hfh.etag) {
@@ -241,8 +245,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 			    if (response.HasHeader("Content-Length")) {
 				    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
 				    if ((idx_t)content_length != buffer_out_len) {
-					    throw HTTPException("HTTP GET error: Content-Length from server mismatches requested "
-					                        "range, server may not support range requests.");
+				    	RangeRequestNotSupportedException::Throw();
 				    }
 			    }
 		    }
@@ -265,23 +268,12 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 		    return true;
 	    });
 
+	get_request.try_request = hfh.auto_fallback_to_full_file_download;
+
 	auto response = http_util.Request(get_request, http_client);
 
 	hfh.StoreClient(std::move(http_client));
 	return response;
-}
-
-void TimestampToTimeT(timestamp_t timestamp, time_t &result) {
-	auto components = Timestamp::GetComponents(timestamp);
-	struct tm tm {};
-	tm.tm_year = components.year - 1900;
-	tm.tm_mon = components.month - 1;
-	tm.tm_mday = components.day;
-	tm.tm_hour = components.hour;
-	tm.tm_min = components.minute;
-	tm.tm_sec = components.second;
-	tm.tm_isdst = 0;
-	result = mktime(&tm);
 }
 
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
@@ -295,7 +287,7 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		auto &info = file.extended_info->options;
 		auto lm_entry = info.find("last_modified");
 		if (lm_entry != info.end()) {
-			TimestampToTimeT(lm_entry->second.GetValue<timestamp_t>(), last_modified);
+			last_modified = lm_entry->second.GetValue<timestamp_t>();
 		}
 		auto etag_entry = info.find("etag");
 		if (etag_entry != info.end()) {
@@ -355,6 +347,11 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	}
 
 	auto handle = CreateHandle(file, flags, opener);
+
+	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
+		handle->write_overwrite_mode = true;
+	}
+
 	handle->Initialize(opener);
 
 	DUCKDB_LOG_FILE_SYSTEM_OPEN((*handle));
@@ -362,9 +359,36 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	return std::move(handle);
 }
 
-// Buffered read from http file.
-// Note that buffering is disabled when FileFlags::FILE_FLAGS_DIRECT_IO is set
-void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out, idx_t buffer_out_len) {
+	auto res = GetRangeRequest(handle, url, header_map, file_offset, buffer_out, buffer_out_len);
+
+	if (res) {
+		// Request succeeded TODO: fix upstream that 206 is not considered success
+		if (res->Success() || res->status == HTTPStatusCode::PartialContent_206 || res->status == HTTPStatusCode::Accepted_202) {
+			return true;
+		}
+
+		// Request failed and we have a request error
+		if (res->HasRequestError()) {
+			ErrorData error (res->GetRequestError());
+
+			// Special case: we can do a retry with a full file download
+			if (error.Type() == RangeRequestNotSupportedException::TYPE && error.RawMessage() == RangeRequestNotSupportedException::MESSAGE) {
+				auto &hfh = handle.Cast<HTTPFileHandle>();
+				if (hfh.http_params.auto_fallback_to_full_download) {
+					return false;
+				}
+
+			}
+			error.Throw();
+		}
+		throw HTTPException(*res, "Request returned HTTP %d for HTTP %s to '%s'",
+									static_cast<int>(res->status), EnumUtil::ToString(RequestType::GET_REQUEST), res->url);
+	}
+	throw IOException("Unknown error for HTTP %s to '%s'", EnumUtil::ToString(RequestType::GET_REQUEST), url);
+}
+
+bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 
 	D_ASSERT(hfh.http_params.state);
@@ -375,7 +399,7 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 		memcpy(buffer, hfh.cached_file_handle->GetData() + location, nr_bytes);
 		DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
 		hfh.file_offset = location + nr_bytes;
-		return;
+		return true;
 	}
 
 	idx_t to_read = nr_bytes;
@@ -384,7 +408,9 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	// Don't buffer when DirectIO is set or when we are doing parallel reads
 	bool skip_buffer = hfh.flags.DirectIO() || hfh.flags.RequireParallelAccess();
 	if (skip_buffer && to_read > 0) {
-		GetRangeRequest(hfh, hfh.path, {}, location, (char *)buffer, to_read);
+		if (!TryRangeRequest(hfh, hfh.path, {}, location, (char *)buffer, to_read)) {
+			return false;
+		}
 		DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
 		// Update handle status within critical section for parallel access.
 		if (hfh.flags.RequireParallelAccess()) {
@@ -392,13 +418,13 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 			hfh.buffer_available = 0;
 			hfh.buffer_idx = 0;
 			hfh.file_offset = location + nr_bytes;
-			return;
+			return true;
 		}
 
 		hfh.buffer_available = 0;
 		hfh.buffer_idx = 0;
 		hfh.file_offset = location + nr_bytes;
-		return;
+		return true;
 	}
 
 	if (location >= hfh.buffer_start && location < hfh.buffer_end) {
@@ -430,13 +456,17 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 
 			// Bypass buffer if we read more than buffer size
 			if (to_read > new_buffer_available) {
-				GetRangeRequest(hfh, hfh.path, {}, location + buffer_offset, (char *)buffer + buffer_offset, to_read);
+				if (!TryRangeRequest(hfh, hfh.path, {}, location + buffer_offset, (char *)buffer + buffer_offset, to_read)) {
+					return false;
+				}
 				hfh.buffer_available = 0;
 				hfh.buffer_idx = 0;
 				start_offset += to_read;
 				break;
 			} else {
-				GetRangeRequest(hfh, hfh.path, {}, start_offset, (char *)hfh.read_buffer.get(), new_buffer_available);
+				if (!TryRangeRequest(hfh, hfh.path, {}, start_offset, (char *)hfh.read_buffer.get(), new_buffer_available)) {
+					return false;
+				}
 				hfh.buffer_available = new_buffer_available;
 				hfh.buffer_idx = 0;
 				hfh.buffer_start = start_offset;
@@ -446,6 +476,32 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	}
 	hfh.file_offset = location + nr_bytes;
 	DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
+	return true;
+}
+
+// Buffered read from http file.
+// Note that buffering is disabled when FileFlags::FILE_FLAGS_DIRECT_IO is set
+void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+	auto success = ReadInternal(handle, buffer, nr_bytes, location);
+	if (success) {
+		return;
+	}
+
+	// ReadInternal returned false. This means the regular path of querying the file with range requests failed. We will
+	// attempt to download the full file and retry.
+
+	if (handle.logger) {
+		DUCKDB_LOG_WARN(handle.logger, "Falling back to full file download for file '%s': the server does not support HTTP range requests. Performance and memory usage are potentially degraded.", handle.path);
+	}
+
+	auto &hfh = handle.Cast<HTTPFileHandle>();
+
+	bool should_write_cache = false;
+	hfh.FullDownload(*this, should_write_cache);
+
+	if (!ReadInternal(handle, buffer, nr_bytes, location)) {
+		throw HTTPException("Failed to read from HTTP file after automatically retrying a full file download.");
+	}
 }
 
 int64_t HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
@@ -475,7 +531,7 @@ int64_t HTTPFileSystem::GetFileSize(FileHandle &handle) {
 	return sfh.length;
 }
 
-time_t HTTPFileSystem::GetLastModifiedTime(FileHandle &handle) {
+timestamp_t HTTPFileSystem::GetLastModifiedTime(FileHandle &handle) {
 	auto &sfh = handle.Cast<HTTPFileHandle>();
 	return sfh.last_modified;
 }
@@ -558,20 +614,14 @@ void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache)
 	}
 }
 
-bool HTTPFileSystem::TryParseLastModifiedTime(const string &timestamp, time_t &result) {
+bool HTTPFileSystem::TryParseLastModifiedTime(const string &timestamp, timestamp_t &result) {
 	StrpTimeFormat::ParseResult parse_result;
 	if (!StrpTimeFormat::TryParse("%a, %d %h %Y %T %Z", timestamp, parse_result)) {
 		return false;
 	}
-	struct tm tm {};
-	tm.tm_year = parse_result.data[0] - 1900;
-	tm.tm_mon = parse_result.data[1] - 1;
-	tm.tm_mday = parse_result.data[2];
-	tm.tm_hour = parse_result.data[3];
-	tm.tm_min = parse_result.data[4];
-	tm.tm_sec = parse_result.data[5];
-	tm.tm_isdst = 0;
-	result = mktime(&tm);
+	if (!parse_result.TryToTimestamp(result)) {
+		return false;
+	}
 	return true;
 }
 
@@ -612,6 +662,14 @@ void HTTPFileHandle::LoadFileInfo() {
 		// already initialized or we specifically do not want to perform a head request and just run a direct download
 		return;
 	}
+
+	// In write_overwrite_mode we dgaf about the size, so no head request is needed
+	if (write_overwrite_mode) {
+		length = 0;
+		initialized = true;
+		return;
+	}
+
 	auto &hfs = file_system.Cast<HTTPFileSystem>();
 	auto res = hfs.HeadRequest(*this, path, {});
 	if (res->status != HTTPStatusCode::OK_200) {
@@ -655,6 +713,19 @@ void HTTPFileHandle::LoadFileInfo() {
 		etag = res->headers.GetHeaderValue("ETag");
 	}
 	initialized = true;
+}
+
+
+void HTTPFileHandle::TryAddLogger(FileOpener &opener) {
+	auto context = opener.TryGetClientContext();
+	if (context) {
+		logger = context->logger;
+		return;
+	}
+	auto database = opener.TryGetDatabase();
+	if (database) {
+		logger = database->GetLogManager().GlobalLoggerReference();
+	}
 }
 
 void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
