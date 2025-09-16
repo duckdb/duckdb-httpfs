@@ -336,6 +336,8 @@ string S3FileSystem::InitializeMultipartUpload(S3FileHandle &file_handle) {
 
 	open_tag_pos += 10; // Skip open tag
 
+	file_handle.initialized_multipart_upload = true;
+
 	return result.substr(open_tag_pos, close_tag_pos - open_tag_pos);
 }
 
@@ -437,6 +439,9 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 #endif
 		file_handle.uploads_in_progress++;
 	}
+	if (file_handle.initialized_multipart_upload == false) {
+		file_handle.multipart_upload_id = InitializeMultipartUpload(file_handle);
+	}
 
 #ifdef SAME_THREAD_UPLOAD
 	UploadBuffer(file_handle, write_buffer);
@@ -459,6 +464,9 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 	}
 	file_handle.write_buffers_lock.unlock();
 
+	if (file_handle.initialized_multipart_upload == false) {
+		file_handle.multipart_upload_id = InitializeMultipartUpload(file_handle);
+	}
 	// Flush all buffers that aren't already uploading
 	for (auto &write_buffer : to_flush) {
 		if (!write_buffer->uploading) {
@@ -889,8 +897,6 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		part_size = ((minimum_part_size + Storage::DEFAULT_BLOCK_SIZE - 1) / Storage::DEFAULT_BLOCK_SIZE) *
 		            Storage::DEFAULT_BLOCK_SIZE;
 		D_ASSERT(part_size * max_part_count >= config_params.max_file_size);
-
-		multipart_upload_id = s3fs.InitializeMultipartUpload(*this);
 	}
 }
 

@@ -127,6 +127,7 @@ public:
 
 	S3AuthParams auth_params;
 	const S3ConfigParams config_params;
+	bool initialized_multipart_upload {false};
 
 public:
 	void Close() override;
