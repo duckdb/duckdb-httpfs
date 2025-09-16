@@ -868,6 +868,12 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 					}
 					throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
 				}
+			} else if (error.Message().find("Unknown error for HTTP HEAD to") != string::npos) {
+				// FIXME: Potentially a request to a bucket with an incorrect region. This returns a 301 Permanently Moved
+				//        http_util thinks this is a failed request, and ignores all response information
+				//        see: duckdblabs/duckdb-internal/issues/5905
+				auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params);
+				throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
 			}
 			throw;
 		}

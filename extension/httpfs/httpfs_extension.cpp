@@ -62,7 +62,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("ca_cert_file", "Path to a custom certificate file for self-signed certificates.",
 	                          LogicalType::VARCHAR, Value(""));
 	// Global S3 config
-	config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR, Value("us-east-1"));
+	config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR);
 	config.AddExtensionOption("s3_access_key_id", "S3 Access Key ID", LogicalType::VARCHAR);
 	config.AddExtensionOption("s3_secret_access_key", "S3 Access Key", LogicalType::VARCHAR);
 	config.AddExtensionOption("s3_session_token", "S3 Session Token", LogicalType::VARCHAR);

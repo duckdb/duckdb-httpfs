@@ -1,0 +1,35 @@
+
+
+require httpfs
+
+require parquet
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+set ignore_error_messages
+
+statement ok
+CREATE or replace SECRET s1 (
+    TYPE AWS,
+    KEY_ID '${AWS_ACCESS_KEY_ID}',
+    SECRET '${AWS_SECRET_ACCESS_KEY}'
+)
+
+# no region set, no error
+statement error
+select * from 's3://clickhouse-public-datasets/hits_compatible/hits.parquet' limit 1;
+----
+<REGEX>:.*HTTP Error.*Bad Request.*this can be caused by the S3 region being set incorrectly.*No region is provided.*
+
+
+statement ok
+set s3_region='us-east-1';
+
+# incorrect region set, error suggesting incorrect region
+statement error
+select * from 's3://clickhouse-public-datasets/hits_compatible/hits.parquet' limit 1;
+----
+<REGEX>:.*Bad Request - this can be caused by the S3 region being set incorrectly.*Provided region is "us-east-1".*
+
