@@ -478,7 +478,8 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 	file_handle.write_buffers_lock.unlock();
 
 	if (file_handle.initialized_multipart_upload == false) {
-		if (to_flush.size() == 1) {
+		// TODO (carlo): unclear how to handle kms_key_id, but given currently they are custom, leave the multiupload codepath in that case
+		if (to_flush.size() == 1 && file_handle.auth_params.kms_key_id.empty()) {
 			UploadSingleBuffer(file_handle, to_flush[0]);
 			file_handle.upload_finalized= true;
 			return;
