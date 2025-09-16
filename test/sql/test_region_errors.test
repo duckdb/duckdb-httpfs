@@ -1,4 +1,6 @@
-
+# name: test/sql/test_region_errors.test
+# description: This test triggers the http prefetch mechanism.
+# group: [csv]
 
 require httpfs
 
