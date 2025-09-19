@@ -22,6 +22,7 @@ struct HTTPFSParams : public HTTPParams {
 	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
 	bool enable_curl_server_cert_verification = true;
 	idx_t hf_max_per_page = DEFAULT_HF_MAX_PER_PAGE;
+	string user_agent = {""};
 	string ca_cert_file;
 	string bearer_token;
 	bool unsafe_disable_etag_checks {false};
