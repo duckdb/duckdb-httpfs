@@ -11,6 +11,12 @@
         "test/sql/secrets/secret_autoloading_errors.test",
         "test/sql/copy/csv/zstd_crash.test"
       ]
+    },
+    {
+      "reason": "Improved from 1 PUT + 2 POST to 1 PUT",
+      "paths": [
+        "test/sql/copy/s3/metadata_cache.test"
+      ]
     }
   ]
 }

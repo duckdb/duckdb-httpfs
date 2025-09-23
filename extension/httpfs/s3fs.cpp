@@ -336,6 +336,8 @@ string S3FileSystem::InitializeMultipartUpload(S3FileHandle &file_handle) {
 
 	open_tag_pos += 10; // Skip open tag
 
+	file_handle.initialized_multipart_upload = true;
+
 	return result.substr(open_tag_pos, close_tag_pos - open_tag_pos);
 }
 
@@ -353,10 +355,21 @@ void S3FileSystem::NotifyUploadsInProgress(S3FileHandle &file_handle) {
 }
 
 void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
-	auto &s3fs = (S3FileSystem &)file_handle.file_system;
-
 	string query_param = "partNumber=" + to_string(write_buffer->part_no + 1) + "&" +
 	                     "uploadId=" + S3FileSystem::UrlEncode(file_handle.multipart_upload_id, true);
+
+	UploadBufferImplementation(file_handle, write_buffer, query_param, false);
+
+	NotifyUploadsInProgress(file_handle);
+}
+
+void S3FileSystem::UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
+	UploadBufferImplementation(file_handle, write_buffer, "", true);
+}
+
+void S3FileSystem::UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer, string query_param, bool single_upload) {
+	auto &s3fs = (S3FileSystem &)file_handle.file_system;
+
 	unique_ptr<HTTPResponse> res;
 	string etag;
 
@@ -374,6 +387,9 @@ void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuf
 		}
 		etag = res->headers.GetHeaderValue("ETag");
 	} catch (std::exception &ex) {
+		if (single_upload) {
+			throw;
+		}
 		ErrorData error(ex);
 		if (error.Type() != ExceptionType::IO && error.Type() != ExceptionType::HTTP) {
 			throw;
@@ -385,6 +401,7 @@ void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuf
 			file_handle.upload_exception = std::current_exception();
 		}
 
+		D_ASSERT(!single_upload); // If we are here we are in the multi-buffer situation
 		NotifyUploadsInProgress(file_handle);
 		return;
 	}
@@ -399,8 +416,6 @@ void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuf
 
 	// Free up space for another thread to acquire an S3WriteBuffer
 	write_buffer.reset();
-
-	NotifyUploadsInProgress(file_handle);
 }
 
 void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
@@ -437,6 +452,9 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 #endif
 		file_handle.uploads_in_progress++;
 	}
+	if (file_handle.initialized_multipart_upload == false) {
+		file_handle.multipart_upload_id = InitializeMultipartUpload(file_handle);
+	}
 
 #ifdef SAME_THREAD_UPLOAD
 	UploadBuffer(file_handle, write_buffer);
@@ -459,6 +477,16 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 	}
 	file_handle.write_buffers_lock.unlock();
 
+	if (file_handle.initialized_multipart_upload == false) {
+		// TODO (carlo): unclear how to handle kms_key_id, but given currently they are custom, leave the multiupload codepath in that case
+		if (to_flush.size() == 1 && file_handle.auth_params.kms_key_id.empty()) {
+			UploadSingleBuffer(file_handle, to_flush[0]);
+			file_handle.upload_finalized= true;
+			return;
+		} else {
+			file_handle.multipart_upload_id = InitializeMultipartUpload(file_handle);
+		}
+	}
 	// Flush all buffers that aren't already uploading
 	for (auto &write_buffer : to_flush) {
 		if (!write_buffer->uploading) {
@@ -475,6 +503,10 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 
 void S3FileSystem::FinalizeMultipartUpload(S3FileHandle &file_handle) {
 	auto &s3fs = (S3FileSystem &)file_handle.file_system;
+	if (file_handle.upload_finalized) {
+		return;
+	}
+
 	file_handle.upload_finalized = true;
 
 	std::stringstream ss;
@@ -889,8 +921,6 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		part_size = ((minimum_part_size + Storage::DEFAULT_BLOCK_SIZE - 1) / Storage::DEFAULT_BLOCK_SIZE) *
 		            Storage::DEFAULT_BLOCK_SIZE;
 		D_ASSERT(part_size * max_part_count >= config_params.max_file_size);
-
-		multipart_upload_id = s3fs.InitializeMultipartUpload(*this);
 	}
 }
 
