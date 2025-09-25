@@ -1,6 +1,6 @@
 # name: test/sql/copy/no_head_on_write.test
 # description: Confirm that we don't send head requests for writes
-# group: [secret]
+# group: [copy]
 
 require-env S3_TEST_SERVER_AVAILABLE 1
 
@@ -48,19 +48,18 @@ copy (select 1 as a) to 's3://test-bucket/test-file.parquet'
 query I
 select request.type FROM duckdb_logs_parsed('HTTP')
 ----
-POST
 PUT
-POST
 
 statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-copy (select 1 as a) to 's3://test-bucket/test-file.csv'
+copy (select random() as a FROM range(8000000)) to 's3://test-bucket/test-file2.csv'
 
 query I
 select request.type FROM duckdb_logs_parsed('HTTP')
 ----
 POST
+PUT
 PUT
 POST

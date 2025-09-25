@@ -1,6 +1,6 @@
-# name: test/sql/copy/csv/test_headers_parsed.test
+# name: test/sql/test_headers_parsed.test
 # description: This test triggers the http prefetch mechanism.
-# group: [csv]
+# group: [sql]
 
 require httpfs
 
