@@ -14,17 +14,12 @@ else
   container_name=$(docker ps -a --format '{{.Names}}' | grep -m 1 "duckdb-minio")
   echo $container_name
 
-  echo "Wait for Docker to start"
   for i in $(seq 1 360);
   do
-    echo $i
     docker_finish_logs=$(docker logs $container_name 2>/dev/null | grep -m 1 'FINISHED SETTING UP MINIO' || echo '')
-    echo $docker_finish_logs
     if [ ! -z "${docker_finish_logs}" ]; then
-      echo "Started! Break"
       break
     fi
-    echo "Sleep 1"
     sleep 1
   done
 
