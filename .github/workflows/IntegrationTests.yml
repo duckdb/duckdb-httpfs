@@ -34,6 +34,7 @@ jobs:
       TEST_PERSISTENT_SECRETS_AVAILABLE: true
       PYTHON_HTTP_SERVER_URL: http://localhost:8008
       PYTHON_HTTP_SERVER_DIR: /tmp/python_test_server
+      CORE_EXTENSIONS: "parquet;json"
       GEN: ninja
 
     steps:
