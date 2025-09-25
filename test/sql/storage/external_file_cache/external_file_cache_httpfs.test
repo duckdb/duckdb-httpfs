@@ -8,11 +8,23 @@ require httpfs
 
 # first query caches the data
 statement ok
-from 's3://duckdb-blobs/data/shakespeare.parquet';
-
+from 'https://blobs.duckdb.org/data/shakespeare.parquet';
 
 # second query should only have a head request, no gets
 query II
-explain analyze from 's3://duckdb-blobs/data/shakespeare.parquet';
+explain analyze from 'https://blobs.duckdb.org/data/shakespeare.parquet';
 ----
 analyzed_plan	<REGEX>:.*GET: 0.*
+
+statement ok
+SET enable_http_metadata_cache = true;
+
+# first query saves the metadata (and data, but that was already there)
+statement ok
+from 'https://blobs.duckdb.org/data/shakespeare.parquet';
+
+# second query should do no HEAD and no GET
+query II
+explain analyze from 'https://blobs.duckdb.org/data/shakespeare.parquet';
+----
+analyzed_plan	<REGEX>:.*HEAD: 0.*
