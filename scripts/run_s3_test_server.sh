@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #Note: DONT run as root
 
-if [ ! -f data/attach_test/attach.db ]; then
-    echo "File data/attach_test/attach.db not found, run ./scripts/generate_presigned_url.sh to generate"
+if [ ! -f test/test_data/attach.db ]; then
+    echo "File test/test_data/attach.db not found, run ./scripts/generate_presigned_url.sh to generate"
 else
   rm -rf /tmp/minio_test_data
   rm -rf /tmp/minio_root_data
