@@ -32,6 +32,8 @@ jobs:
       DUCKDB_S3_USE_SSL: false
       HTTP_PROXY_PUBLIC: localhost:3128
       TEST_PERSISTENT_SECRETS_AVAILABLE: true
+      PYTHON_HTTP_SERVER_URL: http://localhost:8008
+      PYTHON_HTTP_SERVER_DIR: /tmp/python_test_server
       GEN: ninja
 
     steps:
@@ -61,6 +63,13 @@ jobs:
       run: |
         sudo apt-get install squid
         ./scripts/run_squid.sh --port 3128 --log_dir squid_logs &
+
+    - name: Run & Populate Python test server
+      shell: bash
+      run: |
+        mkdir -p $PYTHON_HTTP_SERVER_DIR
+        cd $PYTHON_HTTP_SERVER_DIR
+        python3 -m http.server 8008 &
 
     - name: Build
       shell: bash
