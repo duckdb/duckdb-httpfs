@@ -77,5 +77,6 @@ services:
         /usr/bin/mc share download myminio/test-bucket/presigned/lineitem_large.parquet
         /usr/bin/mc share download myminio/test-bucket/presigned/attach.db
 
+        echo 'FINISHED SETTING UP MINIO'
         exit 0;
       "

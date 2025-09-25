@@ -11,9 +11,18 @@ else
   docker compose -f scripts/minio_s3.yml -p duckdb-minio up -d
 
   # for testing presigned url
-  sleep 10
   container_name=$(docker ps -a --format '{{.Names}}' | grep -m 1 "duckdb-minio")
   echo $container_name
+
+  for i in $(seq 1 360);
+  do
+    logs=$(docker logs $container_name 2>/dev/null | grep 'FINISHED SETTING UP MINIO')
+    if [ ! -z "${logs}" ]; then
+      break
+    fi
+    sleep 1
+  done
+
 
   export S3_SMALL_CSV_PRESIGNED_URL=$(docker logs $container_name 2>/dev/null | grep -m 1 'Share:.*phonenumbers\.csv' | grep -o 'http[s]\?://[^ ]\+')
   echo $S3_SMALL_CSV_PRESIGNED_URL
