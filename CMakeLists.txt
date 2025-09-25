@@ -9,8 +9,17 @@ add_extension_definitions()
 if (NOT EMSCRIPTEN)
   add_definitions(-DOVERRIDE_ENCRYPTION_UTILS=1)
 else()
-  set (DUCKDB_EXTENSION_HTTPFS_LINKED_LIBS "../../third_party/mbedtls/libduckdb_mbedtls.a")
+  set(DUCKDB_EXTENSION_HTTPFS_LINKED_LIBS "../../third_party/mbedtls/libduckdb_mbedtls.a")
 endif()
+
+if(MINGW)
+  set(OPENSSL_USE_STATIC_LIBS TRUE)
+endif()
+
+find_package(OpenSSL REQUIRED)
+find_package(CURL REQUIRED)
+include_directories(${OPENSSL_INCLUDE_DIR})
+include_directories(${CURL_INCLUDE_DIRS})
 
 include_directories(src/include
                     ${DUCKDB_MODULE_BASE_DIR}/third_party/httplib)
@@ -22,14 +31,6 @@ build_static_extension(httpfs ${EXTENSION_SOURCES})
 set(PARAMETERS "-warnings")
 build_loadable_extension(httpfs ${PARAMETERS} ${EXTENSION_SOURCES})
 
-if(MINGW)
-  set(OPENSSL_USE_STATIC_LIBS TRUE)
-endif()
-
-find_package(OpenSSL REQUIRED)
-find_package(CURL REQUIRED)
-include_directories(${OPENSSL_INCLUDE_DIR})
-include_directories(${CURL_INCLUDE_DIRS})
 if(EMSCRIPTEN)
   target_link_libraries(httpfs_loadable_extension duckdb_mbedtls)
 else()
