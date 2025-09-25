@@ -45,7 +45,7 @@ jobs:
         uses: hendrikmuhs/ccache-action@main
         with:
           key: ${{ github.job }}
-          save: ${{ github.ref == 'refs/heads/main' || github.repository != 'duckdb/duckdb' }}
+          save: ${{ github.ref == 'refs/heads/main' || github.repository != 'duckdb/duckdb-httpfs' }}
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11.1
@@ -70,10 +70,6 @@ jobs:
           cd $PYTHON_HTTP_SERVER_DIR
           python3 -m http.server 8008 &
 
-      - name: Build
-        shell: bash
-        run: make
-
       - name: Start test server
         shell: bash
         run: |
@@ -81,7 +77,10 @@ jobs:
           ./scripts/generate_presigned_url.sh
           source ./scripts/run_s3_test_server.sh
           source ./scripts/set_s3_test_server_variables.sh
-          sleep 60
+
+      - name: Build
+        shell: bash
+        run: make
 
       - name: Run tests
         shell: bash
