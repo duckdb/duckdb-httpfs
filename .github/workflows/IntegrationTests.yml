@@ -74,16 +74,16 @@ jobs:
         shell: bash
         run: make
 
-      - name: Start test server
+      - name: Install test server
         shell: bash
         run: |
           sudo ./scripts/install_s3_test_server.sh
           ./scripts/generate_presigned_url.sh
+
+      - name: Start test server & run tests
+        shell: bash
+        run: |
           source ./scripts/run_s3_test_server.sh
           source ./scripts/set_s3_test_server_variables.sh
           sleep 30
-
-      - name: Run tests
-        shell: bash
-        run: |
           make test
