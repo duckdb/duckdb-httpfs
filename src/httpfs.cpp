@@ -44,13 +44,14 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	// Setting lookups
 	FileOpener::TryGetCurrentSetting(opener, "http_timeout", result->timeout, info);
 	FileOpener::TryGetCurrentSetting(opener, "force_download", result->force_download, info);
-	FileOpener::TryGetCurrentSetting(opener, "auto_fallback_to_full_download", result->auto_fallback_to_full_download, info);
+	FileOpener::TryGetCurrentSetting(opener, "auto_fallback_to_full_download", result->auto_fallback_to_full_download,
+	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retries", result->retries, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_wait_ms", result->retry_wait_ms, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_backoff", result->retry_backoff, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_keep_alive", result->keep_alive, info);
-	FileOpener::TryGetCurrentSetting(opener, "enable_curl_server_cert_verification", result->enable_curl_server_cert_verification,
-	                                 info);
+	FileOpener::TryGetCurrentSetting(opener, "enable_curl_server_cert_verification",
+	                                 result->enable_curl_server_cert_verification, info);
 	FileOpener::TryGetCurrentSetting(opener, "enable_server_cert_verification", result->enable_server_cert_verification,
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);
@@ -262,19 +263,23 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 			    out_offset = 0;
 
 			    if (!hfh.http_params.unsafe_disable_etag_checks && !hfh.etag.empty() && response.HasHeader("ETag")) {
-                                string responseEtag = response.GetHeaderValue("ETag");
+				    string responseEtag = response.GetHeaderValue("ETag");
 
-                                if (!responseEtag.empty() && responseEtag != hfh.etag) {
-                                    throw HTTPException(response, "ETag was initially %s and now it returned %s, this likely means the remote file has changed.\nTry to restart the read or close the file-handle and read the file again (e.g. `DETACH` in the file is a database file).\nYou can disable checking etags via `SET unsafe_disable_etag_checks = true;`", hfh.etag, response.GetHeaderValue("ETag"));
-				}
-                            }
-
-
+				    if (!responseEtag.empty() && responseEtag != hfh.etag) {
+					    throw HTTPException(
+					        response,
+					        "ETag was initially %s and now it returned %s, this likely means the remote file has "
+					        "changed.\nTry to restart the read or close the file-handle and read the file again (e.g. "
+					        "`DETACH` in the file is a database file).\nYou can disable checking etags via `SET "
+					        "unsafe_disable_etag_checks = true;`",
+					        hfh.etag, response.GetHeaderValue("ETag"));
+				    }
+			    }
 
 			    if (response.HasHeader("Content-Length")) {
 				    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
 				    if ((idx_t)content_length != buffer_out_len) {
-				    	RangeRequestNotSupportedException::Throw();
+					    RangeRequestNotSupportedException::Throw();
 				    }
 			    }
 		    }
@@ -388,31 +393,33 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	return std::move(handle);
 }
 
-bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out, idx_t buffer_out_len) {
+bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset,
+                                     char *buffer_out, idx_t buffer_out_len) {
 	auto res = GetRangeRequest(handle, url, header_map, file_offset, buffer_out, buffer_out_len);
 
 	if (res) {
 		// Request succeeded TODO: fix upstream that 206 is not considered success
-		if (res->Success() || res->status == HTTPStatusCode::PartialContent_206 || res->status == HTTPStatusCode::Accepted_202) {
+		if (res->Success() || res->status == HTTPStatusCode::PartialContent_206 ||
+		    res->status == HTTPStatusCode::Accepted_202) {
 			return true;
 		}
 
 		// Request failed and we have a request error
 		if (res->HasRequestError()) {
-			ErrorData error (res->GetRequestError());
+			ErrorData error(res->GetRequestError());
 
 			// Special case: we can do a retry with a full file download
-			if (error.Type() == RangeRequestNotSupportedException::TYPE && error.RawMessage() == RangeRequestNotSupportedException::MESSAGE) {
+			if (error.Type() == RangeRequestNotSupportedException::TYPE &&
+			    error.RawMessage() == RangeRequestNotSupportedException::MESSAGE) {
 				auto &hfh = handle.Cast<HTTPFileHandle>();
 				if (hfh.http_params.auto_fallback_to_full_download) {
 					return false;
 				}
-
 			}
 			error.Throw();
 		}
-		throw HTTPException(*res, "Request returned HTTP %d for HTTP %s to '%s'",
-									static_cast<int>(res->status), EnumUtil::ToString(RequestType::GET_REQUEST), res->url);
+		throw HTTPException(*res, "Request returned HTTP %d for HTTP %s to '%s'", static_cast<int>(res->status),
+		                    EnumUtil::ToString(RequestType::GET_REQUEST), res->url);
 	}
 	throw IOException("Unknown error for HTTP %s to '%s'", EnumUtil::ToString(RequestType::GET_REQUEST), url);
 }
@@ -485,7 +492,8 @@ bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_b
 
 			// Bypass buffer if we read more than buffer size
 			if (to_read > new_buffer_available) {
-				if (!TryRangeRequest(hfh, hfh.path, {}, location + buffer_offset, (char *)buffer + buffer_offset, to_read)) {
+				if (!TryRangeRequest(hfh, hfh.path, {}, location + buffer_offset, (char *)buffer + buffer_offset,
+				                     to_read)) {
 					return false;
 				}
 				hfh.buffer_available = 0;
@@ -493,7 +501,8 @@ bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_b
 				start_offset += to_read;
 				break;
 			} else {
-				if (!TryRangeRequest(hfh, hfh.path, {}, start_offset, (char *)hfh.read_buffer.get(), new_buffer_available)) {
+				if (!TryRangeRequest(hfh, hfh.path, {}, start_offset, (char *)hfh.read_buffer.get(),
+				                     new_buffer_available)) {
 					return false;
 				}
 				hfh.buffer_available = new_buffer_available;
@@ -520,7 +529,10 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	// attempt to download the full file and retry.
 
 	if (handle.logger) {
-		DUCKDB_LOG_WARN(handle.logger, "Falling back to full file download for file '%s': the server does not support HTTP range requests. Performance and memory usage are potentially degraded.", handle.path);
+		DUCKDB_LOG_WARN(handle.logger,
+		                "Falling back to full file download for file '%s': the server does not support HTTP range "
+		                "requests. Performance and memory usage are potentially degraded.",
+		                handle.path);
 	}
 
 	auto &hfh = handle.Cast<HTTPFileHandle>();
@@ -743,7 +755,6 @@ void HTTPFileHandle::LoadFileInfo() {
 	}
 	initialized = true;
 }
-
 
 void HTTPFileHandle::TryAddLogger(FileOpener &opener) {
 	auto context = opener.TryGetClientContext();

@@ -33,7 +33,8 @@ public:
 			Add(header);
 		}
 	}
-	CURLRequestHeaders() {}
+	CURLRequestHeaders() {
+	}
 
 	~CURLRequestHeaders() {
 		if (headers) {
@@ -55,4 +56,3 @@ public:
 };
 
 } // namespace duckdb
-

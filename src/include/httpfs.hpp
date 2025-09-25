@@ -20,7 +20,9 @@ public:
 	explicit RangeRequestNotSupportedException() = delete;
 
 	static constexpr ExceptionType TYPE = ExceptionType::HTTP;
-	static constexpr const char *MESSAGE = "Content-Length from server mismatches requested range, server may not support range requests. You can try to resolve this by enabling `SET force_download=true`";
+	static constexpr const char *MESSAGE =
+	    "Content-Length from server mismatches requested range, server may not support range requests. You can try to "
+	    "resolve this by enabling `SET force_download=true`";
 
 	static void Throw() {
 		throw HTTPException(MESSAGE);
@@ -63,7 +65,7 @@ public:
 	string etag;
 	bool force_full_download;
 	bool initialized = false;
-	
+
 	bool auto_fallback_to_full_file_download = true;
 
 	// In write overwrite mode, we are not interested in the current state of the file: we're overwriting it.
@@ -175,7 +177,8 @@ protected:
 	}
 
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
-	bool TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out, idx_t buffer_out_len);
+	bool TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out,
+	                     idx_t buffer_out_len);
 	bool ReadInternal(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location);
 
 protected:

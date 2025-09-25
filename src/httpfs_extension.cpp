@@ -51,7 +51,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("http_retries", "HTTP retries on I/O error", LogicalType::UBIGINT, Value(3));
 	config.AddExtensionOption("http_retry_wait_ms", "Time between retries", LogicalType::UBIGINT, Value(100));
 	config.AddExtensionOption("force_download", "Forces upfront download of file", LogicalType::BOOLEAN, Value(false));
-	config.AddExtensionOption("auto_fallback_to_full_download", "Allows automatically falling back to full file downloads when possible.", LogicalType::BOOLEAN, Value(true));
+	config.AddExtensionOption("auto_fallback_to_full_download",
+	                          "Allows automatically falling back to full file downloads when possible.",
+	                          LogicalType::BOOLEAN, Value(true));
 	// Reduces the number of requests made while waiting, for example retry_wait_ms of 50 and backoff factor of 2 will
 	// result in wait times of  0 50 100 200 400...etc.
 	config.AddExtensionOption("http_retry_backoff", "Backoff factor for exponentially increasing retry wait time",
@@ -60,7 +62,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "http_keep_alive",
 	    "Keep alive connections. Setting this to false can help when running into connection failures",
 	    LogicalType::BOOLEAN, Value(true));
-	config.AddExtensionOption("enable_curl_server_cert_verification", "Enable server side certificate verification for CURL backend.", LogicalType::BOOLEAN, Value(true));
+	config.AddExtensionOption("enable_curl_server_cert_verification",
+	                          "Enable server side certificate verification for CURL backend.", LogicalType::BOOLEAN,
+	                          Value(true));
 	config.AddExtensionOption("enable_server_cert_verification", "Enable server side certificate verification.",
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("ca_cert_file", "Path to a custom certificate file for self-signed certificates.",
@@ -85,8 +89,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value(10000));
 	config.AddExtensionOption("s3_uploader_thread_limit", "S3 Uploader global thread limit", LogicalType::UBIGINT,
 	                          Value(50));
-	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency",
-	                          LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency", LogicalType::BOOLEAN,
+	                          Value(false));
 
 	// HuggingFace options
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
@@ -161,5 +165,4 @@ extern "C" {
 DUCKDB_CPP_EXTENSION_ENTRY(httpfs, loader) {
 	duckdb::LoadInternal(loader);
 }
-
 }
