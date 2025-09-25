@@ -8,7 +8,7 @@ defaults:
     shell: bash
 
 jobs:
-  linux-tests-postgres:
+  linux-tests-httpfs:
     name: Run tests on Linux
     runs-on: ubuntu-latest
     strategy:
