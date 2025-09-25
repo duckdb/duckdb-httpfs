@@ -48,6 +48,12 @@ jobs:
         fetch-depth: 0
         submodules: 'true'
 
+    - name: Setup Ccache
+      uses: hendrikmuhs/ccache-action@main
+      with:
+        key: ${{ github.job }}
+        save: ${{ github.ref == 'refs/heads/main' || github.repository != 'duckdb/duckdb' }}
+
     - name: Checkout DuckDB to version
       if: ${{ matrix.duckdb_version != '<submodule_version>'}}
       run: |
@@ -74,9 +80,9 @@ jobs:
 
     - name: Build
       shell: bash
-      run: make reldebug
+      run: make
 
-    - name: Start test server & run tests
+    - name: Start test server
       shell: bash
       run: |
         sudo ./scripts/install_s3_test_server.sh
@@ -85,4 +91,7 @@ jobs:
         source ./scripts/set_s3_test_server_variables.sh
         sleep 60
 
-        ./build/reldebug/test/unittest '*'
+    - name: Run tests
+      shell: bash
+      run: |
+        make test
