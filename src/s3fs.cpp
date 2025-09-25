@@ -80,29 +80,29 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 #endif
 	}
 	signed_headers += "host;x-amz-content-sha256;x-amz-date";
+	if (use_requester_pays) {
+		signed_headers += ";x-amz-request-payer";
+	}
 	if (auth_params.session_token.length() > 0) {
 		signed_headers += ";x-amz-security-token";
 	}
 	if (use_sse_kms) {
 		signed_headers += ";x-amz-server-side-encryption;x-amz-server-side-encryption-aws-kms-key-id";
 	}
-	if (use_requester_pays) {
-		signed_headers += ";x-amz-request-payer";
-	}
-	auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
+    auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
 	if (content_type.length() > 0) {
 		canonical_request += "\ncontent-type:" + content_type;
 	}
 	canonical_request += "\nhost:" + host + "\nx-amz-content-sha256:" + payload_hash + "\nx-amz-date:" + datetime_now;
+	if (use_requester_pays) {
+		canonical_request += "\nx-amz-request-payer:requester";
+	}
 	if (auth_params.session_token.length() > 0) {
 		canonical_request += "\nx-amz-security-token:" + auth_params.session_token;
 	}
 	if (use_sse_kms) {
 		canonical_request += "\nx-amz-server-side-encryption:aws:kms";
 		canonical_request += "\nx-amz-server-side-encryption-aws-kms-key-id:" + auth_params.kms_key_id;
-	}
-	if (use_requester_pays) {
-		canonical_request += "\nx-amz-request-payer:requester";
 	}
 
 	canonical_request += "\n\n" + signed_headers + "\n" + payload_hash;
