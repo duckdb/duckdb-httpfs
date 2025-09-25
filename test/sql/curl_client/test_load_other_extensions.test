@@ -1,6 +1,6 @@
 # name: test/sql/curl_client/test_load_other_extensions.test
 # description: when using the curl client, test loading other extensions
-# group: [httpfs_client]
+# group: [curl_client]
 
 require httpfs
 

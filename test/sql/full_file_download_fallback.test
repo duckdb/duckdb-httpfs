@@ -1,5 +1,5 @@
 # name: test/sql/full_file_download_fallback.test
-# group: [full_file_download]
+# group: [sql]
 
 require parquet
 

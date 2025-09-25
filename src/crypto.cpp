@@ -23,7 +23,8 @@
 
 namespace duckdb {
 
-AESStateSSL::AESStateSSL(EncryptionTypes::CipherType  cipher_p, idx_t key_len) : EncryptionState(cipher_p, key_len), context(EVP_CIPHER_CTX_new()) {
+AESStateSSL::AESStateSSL(EncryptionTypes::CipherType cipher_p, idx_t key_len)
+    : EncryptionState(cipher_p, key_len), context(EVP_CIPHER_CTX_new()) {
 	if (!(context)) {
 		throw InternalException("OpenSSL AES failed with initializing context");
 	}
@@ -83,7 +84,8 @@ void AESStateSSL::GenerateRandomData(data_ptr_t data, idx_t len) {
 	RAND_bytes(data, len);
 }
 
-void AESStateSSL::InitializeEncryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len_p, const_data_ptr_t aad, idx_t aad_len) {
+void AESStateSSL::InitializeEncryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len_p,
+                                       const_data_ptr_t aad, idx_t aad_len) {
 	mode = EncryptionTypes::ENCRYPT;
 
 	if (key_len_p != key_len) {
@@ -101,14 +103,15 @@ void AESStateSSL::InitializeEncryption(const_data_ptr_t iv, idx_t iv_len, const_
 	}
 
 	int len;
-	if (aad_len > 0){
+	if (aad_len > 0) {
 		if (!EVP_DecryptUpdate(context, NULL, &len, aad, aad_len)) {
 			throw InternalException("Setting Additional Authenticated Data  failed");
 		}
 	}
 }
 
-void AESStateSSL::InitializeDecryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len_p, const_data_ptr_t aad, idx_t aad_len) {
+void AESStateSSL::InitializeDecryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len_p,
+                                       const_data_ptr_t aad, idx_t aad_len) {
 	mode = EncryptionTypes::DECRYPT;
 	if (key_len_p != key_len) {
 		throw InternalException("Invalid encryption key length, expected %llu, got %llu", key_len, key_len_p);
@@ -126,7 +129,7 @@ void AESStateSSL::InitializeDecryption(const_data_ptr_t iv, idx_t iv_len, const_
 		throw InternalException("EVP_DecryptInit_ex failed to set iv/key");
 	}
 	int len;
-	if (aad_len > 0){
+	if (aad_len > 0) {
 		if (!EVP_DecryptUpdate(context, NULL, &len, aad, aad_len)) {
 			throw InternalException("Setting Additional Authenticated Data  failed");
 		}

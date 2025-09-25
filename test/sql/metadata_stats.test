@@ -1,6 +1,6 @@
 # name: test/sql/metadata_stats.test
 # description: Test getting metadata stats
-# group: []
+# group: [sql]
 
 require parquet
 

@@ -56,5 +56,4 @@ struct HeaderCollector {
 	std::vector<HTTPHeaders> header_collection;
 };
 
-
 } // namespace duckdb

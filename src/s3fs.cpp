@@ -367,7 +367,8 @@ void S3FileSystem::UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3Wr
 	UploadBufferImplementation(file_handle, write_buffer, "", true);
 }
 
-void S3FileSystem::UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer, string query_param, bool single_upload) {
+void S3FileSystem::UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
+                                              string query_param, bool single_upload) {
 	auto &s3fs = (S3FileSystem &)file_handle.file_system;
 
 	unique_ptr<HTTPResponse> res;
@@ -441,7 +442,7 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 
 	{
 		unique_lock<mutex> lck(file_handle.uploads_in_progress_lock);
-		// check if there are upload threads available	
+		// check if there are upload threads available
 #ifndef SAME_THREAD_UPLOAD
 		if (file_handle.uploads_in_progress >= file_handle.config_params.max_upload_threads) {
 			// there are not - wait for one to become available
@@ -461,8 +462,8 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 	return;
 #endif
 
-       thread upload_thread(UploadBuffer, std::ref(file_handle), write_buffer);
-       upload_thread.detach();
+	thread upload_thread(UploadBuffer, std::ref(file_handle), write_buffer);
+	upload_thread.detach();
 }
 
 // Note that FlushAll currently does not allow to continue writing afterwards. Therefore, FinalizeMultipartUpload should
@@ -478,10 +479,11 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 	file_handle.write_buffers_lock.unlock();
 
 	if (file_handle.initialized_multipart_upload == false) {
-		// TODO (carlo): unclear how to handle kms_key_id, but given currently they are custom, leave the multiupload codepath in that case
+		// TODO (carlo): unclear how to handle kms_key_id, but given currently they are custom, leave the multiupload
+		// codepath in that case
 		if (to_flush.size() == 1 && file_handle.auth_params.kms_key_id.empty()) {
 			UploadSingleBuffer(file_handle, to_flush[0]);
-			file_handle.upload_finalized= true;
+			file_handle.upload_finalized = true;
 			return;
 		} else {
 			file_handle.multipart_upload_id = InitializeMultipartUpload(file_handle);

@@ -3,8 +3,6 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
-
-
 namespace duckdb {
 
 class HTTPFSClient : public HTTPClient {
