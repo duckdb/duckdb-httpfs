@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 2.8.12...3.29)
 
-set(HTTPFS_BASE_FOLDER "src")
-
 project(HTTPFsExtension)
 
 add_extension_definitions()
