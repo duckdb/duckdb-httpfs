@@ -1,0 +1,27 @@
+# name: test/sql/json/table/read_json_objects.test
+# description: Read ndjson files
+# group: [table]
+
+require json
+
+require httpfs
+
+# same file but hosted on github
+query I
+select * from read_json_objects('https://github.com/duckdb/duckdb-data/releases/download/v1.0/example_rn.ndjson', format='nd')
+----
+{"id":1,"name":"O Brother, Where Art Thou?"}
+{"id":2,"name":"Home for the Holidays"}
+{"id":3,"name":"The Firm"}
+{"id":4,"name":"Broadcast News"}
+{"id":5,"name":"Raising Arizona"}
+
+query I
+select * from read_ndjson_objects('https://github.com/duckdb/duckdb-data/releases/download/v1.0/example_rn.ndjson')
+----
+{"id":1,"name":"O Brother, Where Art Thou?"}
+{"id":2,"name":"Home for the Holidays"}
+{"id":3,"name":"The Firm"}
+{"id":4,"name":"Broadcast News"}
+{"id":5,"name":"Raising Arizona"}
+
