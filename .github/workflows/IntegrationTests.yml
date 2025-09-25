@@ -9,7 +9,7 @@ defaults:
 
 jobs:
   linux-tests-httpfs:
-    name: Run tests on Linux
+    name: MinIO Tests
     runs-on: ubuntu-latest
     env:
       S3_TEST_SERVER_AVAILABLE: 1
@@ -20,7 +20,7 @@ jobs:
       DUCKDB_S3_USE_SSL: false
       HTTP_PROXY_PUBLIC: localhost:3128
       TEST_PERSISTENT_SECRETS_AVAILABLE: true
-      CORE_EXTENSIONS: "parquet;json"
+      CORE_EXTENSIONS: "parquet;json;tpch"
       GEN: ninja
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       VCPKG_TARGET_TRIPLET: x64-linux
