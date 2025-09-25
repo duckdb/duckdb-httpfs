@@ -16,7 +16,7 @@ else
 
   for i in $(seq 1 360);
   do
-    logs=$(docker logs $container_name 2>/dev/null | grep 'FINISHED SETTING UP MINIO')
+    logs=$(docker logs $container_name 2>/dev/null | grep -m 1 'FINISHED SETTING UP MINIO')
     if [ ! -z "${logs}" ]; then
       break
     fi
