@@ -85,4 +85,4 @@ jobs:
         run: |
           source ./scripts/run_s3_test_server.sh
           source ./scripts/set_s3_test_server_variables.sh
-          make test
+          ./build/release/test/unittest "*" --skip-error-messages "[]"
