@@ -2,13 +2,13 @@
 
 #include "duckdb/common/http_util.hpp"
 
+#include <curl/curl.h>
 namespace duckdb {
 class HTTPLogger;
 class FileOpener;
 struct FileOpenerInfo;
 class HTTPState;
 
-#include <curl/curl.h>
 class CURLHandle {
 public:
 	CURLHandle(const string &token, const string &cert_path);

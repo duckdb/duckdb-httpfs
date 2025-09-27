@@ -7,6 +7,10 @@
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
 
+#ifndef EMSCRIPTEN
+#include "httpfs_curl_client.hpp"
+#endif
+
 #define CHECK_CURL_OK(expr) D_ASSERT((expr) == CURLE_OK)
 
 namespace duckdb {
