@@ -729,7 +729,7 @@ void HTTPFileHandle::LoadFileInfo() {
 			return;
 		} else {
 			// HEAD request fail, use Range request for another try (read only one byte)
-			if (flags.OpenForReading() && res->status != HTTPStatusCode::NotFound_404) {
+			if (flags.OpenForReading() && res->status != HTTPStatusCode::NotFound_404 && res->status != HTTPStatusCode::MovedPermanently_301) {
 				auto range_res = hfs.GetRangeRequest(*this, path, {}, 0, nullptr, 2);
 				if (range_res->status != HTTPStatusCode::PartialContent_206 &&
 				    range_res->status != HTTPStatusCode::Accepted_202 && range_res->status != HTTPStatusCode::OK_200) {
