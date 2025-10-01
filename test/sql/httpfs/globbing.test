@@ -1,0 +1,28 @@
+# name: test/sql/httpfs/globbing.test
+# description: Ensure the HuggingFace filesystem works as expected
+# group: [httpfs]
+
+require parquet
+
+require httpfs
+
+statement error
+select parse_path(filename), size, part, date from read_parquet('https://raw.githubusercontent.com/duckdb/duckdb/main/data/parquet-testing/hive-partitioning/simple/*/*/test.parquet') order by filename;
+----
+Invalid Input Error: Globs (`*`) for generic HTTP file is are not supported.
+
+statement ok
+SET allow_asterisks_in_http_paths = true;
+
+statement error
+select parse_path(filename), size, part, date from read_parquet('https://raw.githubusercontent.com/duckdb/duckdb/main/data/parquet-testing/hive-partitioning/simple/*/*/test.parquet') order by filename;
+----
+HTTP Error: Unable to connect to URL
+
+statement ok
+SET allow_asterisks_in_http_paths = false;
+
+statement error
+select parse_path(filename), size, part, date from read_parquet('https://raw.githubusercontent.com/duckdb/duckdb/main/data/parquet-testing/hive-partitioning/simple/*/*/test.parquet') order by filename;
+----
+Invalid Input Error: Globs (`*`) for generic HTTP file is are not supported.
