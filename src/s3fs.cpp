@@ -872,6 +872,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		ErrorData error(ex);
 		bool refreshed_secret = false;
 		if (error.Type() == ExceptionType::IO || error.Type() == ExceptionType::HTTP) {
+			// legacy endpoint (no region) returns 400
 			auto context = opener->TryGetClientContext();
 			if (context) {
 				auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*context);
@@ -887,9 +888,13 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			auto &extra_info = error.ExtraInfo();
 			auto entry = extra_info.find("status_code");
 			if (entry != extra_info.end()) {
-				if (entry->second == "400") {
-					// 400: BAD REQUEST
-					auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params);
+				if (entry->second == "301" || entry->second == "400") {
+					auto new_region = extra_info.find("header_x-amz-bucket-region");
+					string correct_region = "";
+					if (new_region != extra_info.end()) {
+						correct_region = new_region->second;
+					}
+					auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params, correct_region);
 					throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
 				}
 				if (entry->second == "403") {
@@ -1138,12 +1143,15 @@ bool S3FileSystem::ListFiles(const string &directory, const std::function<void(c
 	return true;
 }
 
-string S3FileSystem::GetS3BadRequestError(S3AuthParams &s3_auth_params) {
+string S3FileSystem::GetS3BadRequestError(S3AuthParams &s3_auth_params, string correct_region) {
 	string extra_text = "\n\nBad Request - this can be caused by the S3 region being set incorrectly.";
 	if (s3_auth_params.region.empty()) {
 		extra_text += "\n* No region is provided.";
 	} else {
-		extra_text += "\n* Provided region is \"" + s3_auth_params.region + "\"";
+		extra_text += "\n* Provided region is: \"" + s3_auth_params.region + "\"";
+	}
+	if (!correct_region.empty()) {
+		extra_text += "\n* Correct region is: \"" + correct_region + "\"";
 	}
 	return extra_text;
 }
