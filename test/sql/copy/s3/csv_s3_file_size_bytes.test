@@ -1,0 +1,46 @@
+# name: test/sql/copy/s3/csv_s3_file_size_bytes.test
+# description: Test FILE_SIZE_BYTES parameter for csv copy over s3
+# group: [s3]
+
+require httpfs
+
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+# Require that these environment variables are also set
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
+set ignore_error_messages
+
+# different vector sizes result in different number of files
+require no_vector_verification
+
+statement ok
+CREATE TABLE bigdata AS SELECT i AS col_a, i AS col_b FROM range(0,10000) tbl(i);
+
+statement ok
+set threads=1
+
+# parameter in bytes
+statement ok
+COPY (FROM bigdata) TO 's3://test-bucket/file_size_bytes_csv1' (FORMAT CSV, FILE_SIZE_BYTES 1000);
+
+query I
+SELECT COUNT(*) FROM read_csv_auto('s3://test-bucket/file_size_bytes_csv1/*.csv')
+----
+10000
+
+# should lead to 3 files
+query I
+SELECT count(*) FROM glob('s3://test-bucket/file_size_bytes_csv1/*.csv')
+----
+3
