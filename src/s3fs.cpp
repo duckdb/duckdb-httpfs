@@ -890,7 +890,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 				if (entry->second == "400") {
 					// 400: BAD REQUEST
 					auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params);
-					throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
+					throw Exception(extra_info, error.Type(), error.RawMessage() + extra_text);
 				}
 				if (entry->second == "403") {
 					// 403: FORBIDDEN
