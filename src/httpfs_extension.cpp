@@ -72,6 +72,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          Value(50));
 	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency", LogicalType::BOOLEAN,
 	                          Value(false));
+							  
+	// S3 Access Grants config
+	config.AddExtensionOption("s3_access_grants_enabled", "Enable S3 Access grants", LogicalType::BOOLEAN, Value(false));
 
 	// HuggingFace options
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
