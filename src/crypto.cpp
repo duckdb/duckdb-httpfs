@@ -80,8 +80,10 @@ const EVP_CIPHER *AESStateSSL::GetCipher(idx_t key_len) {
 }
 
 void AESStateSSL::GenerateRandomData(data_ptr_t data, idx_t len) {
-	// generate random bytes for nonce
-	RAND_bytes(data, len);
+	auto res = RAND_bytes(data, len);
+	if (!res == 1) {
+		throw duckdb::InternalException("Failed to generate random data");
+	}
 }
 
 void AESStateSSL::InitializeEncryption(const_data_ptr_t iv, idx_t iv_len, const_data_ptr_t key, idx_t key_len_p,
