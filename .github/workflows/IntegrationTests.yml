@@ -27,6 +27,11 @@ jobs:
       PYTHON_HTTP_SERVER_URL: http://localhost:8008
       PYTHON_HTTP_SERVER_DIR: /tmp/python_test_server
 
+      WEBDAV_TEST_SERVER_AVAILABLE: 1
+      WEBDAV_TEST_USERNAME: duckdb_webdav_user
+      WEBDAV_TEST_PASSWORD: duckdb_webdav_password
+      WEBDAV_TEST_BASE_URL: webdav://localhost:9100
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,6 +88,11 @@ jobs:
       - name: Start test server & run tests
         shell: bash
         run: |
+          # Minio S3 test server
           source ./scripts/run_s3_test_server.sh
           source ./scripts/set_s3_test_server_variables.sh
+
+          # WebDav test server
+          ./scripts/run_webdav_test_server.sh
+
           make test
