@@ -2,6 +2,7 @@ set(HTTPFS_SOURCES
     hffs.cpp
     s3fs.cpp
     httpfs.cpp
+    webdavfs.cpp
     http_state.cpp
     crypto.cpp
     hash_functions.cpp

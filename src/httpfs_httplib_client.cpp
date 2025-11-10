@@ -88,7 +88,16 @@ public:
 		}
 		// We use a custom Request method here, because there is no Post call with a contentreceiver in httplib
 		duckdb_httplib_openssl::Request req;
-		req.method = "POST";
+
+		// Check if a custom HTTP method is specified in extra_headers
+		auto method_it = info.params.extra_headers.find("X-DuckDB-HTTP-Method");
+		if (method_it != info.params.extra_headers.end()) {
+			// Use custom HTTP method (e.g., PROPFIND for WebDAV)
+			req.method = method_it->second;
+		} else {
+			req.method = "POST";
+		}
+
 		req.path = info.path;
 		req.headers = TransformHeaders(info.headers, info.params);
 		if (req.headers.find("Content-Type") == req.headers.end()) {

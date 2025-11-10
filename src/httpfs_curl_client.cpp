@@ -343,7 +343,15 @@ public:
 		CURLcode res;
 		{
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
-			curl_easy_setopt(*curl, CURLOPT_POST, 1L);
+
+			// Check if a custom HTTP method is specified in extra_headers
+			auto method_it = info.params.extra_headers.find("X-DuckDB-HTTP-Method");
+			if (method_it != info.params.extra_headers.end()) {
+				// Use custom HTTP method (e.g., PROPFIND for WebDAV)
+				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, method_it->second.c_str());
+			} else {
+				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
+			}
 
 			// Set POST body
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));

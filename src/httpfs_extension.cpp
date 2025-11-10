@@ -5,6 +5,7 @@
 #include "duckdb.hpp"
 #include "s3fs.hpp"
 #include "hffs.hpp"
+#include "webdavfs.hpp"
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 #include "crypto.hpp"
 #endif // OVERRIDE_ENCRYPTION_UTILS
@@ -41,6 +42,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	fs.RegisterSubSystem(make_uniq<HTTPFileSystem>());
 	fs.RegisterSubSystem(make_uniq<HuggingFaceFileSystem>());
 	fs.RegisterSubSystem(make_uniq<S3FileSystem>(BufferManager::GetBufferManager(instance)));
+	fs.RegisterSubSystem(make_uniq<WebDAVFileSystem>());
 
 	auto &config = DBConfig::GetConfig(instance);
 
@@ -137,6 +139,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	CreateS3SecretFunctions::Register(loader);
 	CreateBearerTokenFunctions::Register(loader);
+	CreateWebDAVSecretFunctions::Register(loader);
 
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 	// set pointer to OpenSSL encryption state
