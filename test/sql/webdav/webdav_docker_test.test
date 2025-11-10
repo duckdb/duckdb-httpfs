@@ -1,0 +1,159 @@
+# name: test/sql/webdav/webdav_docker_test.test
+# description: Test WebDAV filesystem operations with Docker test server
+# group: [webdav]
+
+require httpfs
+
+require-env WEBDAV_TEST_SERVER_AVAILABLE 1
+
+require-env WEBDAV_TEST_USERNAME
+
+require-env WEBDAV_TEST_PASSWORD
+
+require-env WEBDAV_TEST_BASE_URL
+
+# Override default behaviour of skipping HTTP errors
+set ignore_error_messages
+
+# Test 1: Create a WebDAV secret for authentication
+statement ok
+CREATE SECRET webdav_docker_test (
+    TYPE WEBDAV,
+    USERNAME '${WEBDAV_TEST_USERNAME}',
+    PASSWORD '${WEBDAV_TEST_PASSWORD}',
+    SCOPE '${WEBDAV_TEST_BASE_URL}'
+);
+
+# Verify the secret was created
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'webdav_docker_test';
+----
+1
+
+# Test 2: Read a simple text file from WebDAV
+query I
+SELECT content FROM read_text('${WEBDAV_TEST_BASE_URL}/hello.txt');
+----
+Hello from WebDAV
+
+# Test 3: Read CSV file from WebDAV
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/test1.csv');
+----
+1	Alice	100
+2	Bob	200
+
+# Test 4: Read CSV files from subdirectory
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/subdir1/test2.csv');
+----
+3	Charlie	300
+4	Diana	400
+
+# Test 5: Test globbing - read all CSV files in test-dir (non-recursive)
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/*.csv') ORDER BY id;
+----
+1	Alice	100
+2	Bob	200
+
+# Test 6: Test recursive globbing - read all CSV files in test-dir and subdirectories
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/**/*.csv') ORDER BY id;
+----
+1	Alice	100
+2	Bob	200
+3	Charlie	300
+4	Diana	400
+5	Eve	500
+6	Frank	600
+
+# Test 7: Test globbing with hive-style partitioning
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/glob-test/*/*.csv', HIVE_PARTITIONING=1) ORDER BY id;
+----
+1	2023	test2023
+2	2024	test2024
+
+# Test 8: Test globbing with hive-style partitioning and filtering
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/glob-test/*/*.csv', HIVE_PARTITIONING=1) WHERE year=2024;
+----
+2	2024	test2024
+
+# Test 9: Write a new CSV file to WebDAV
+statement ok
+CREATE TABLE test_write AS SELECT 7 as id, 'George' as name, 700 as value;
+
+statement ok
+COPY test_write TO '${WEBDAV_TEST_BASE_URL}/test-dir/test_written.csv' (HEADER, DELIMITER ',');
+
+# Verify the written file can be read back
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/test_written.csv');
+----
+7	George	700
+
+# Test 10: Write multiple files with glob pattern
+statement ok
+CREATE TABLE test_batch1 AS SELECT 10 as id, 'Harry' as name, 1000 as value;
+
+statement ok
+CREATE TABLE test_batch2 AS SELECT 20 as id, 'Iris' as name, 2000 as value;
+
+statement ok
+COPY test_batch1 TO '${WEBDAV_TEST_BASE_URL}/test-dir/upload-dir/batch1.csv' (HEADER, DELIMITER ',');
+
+statement ok
+COPY test_batch2 TO '${WEBDAV_TEST_BASE_URL}/test-dir/upload-dir/batch2.csv' (HEADER, DELIMITER ',');
+
+# Verify both files can be read with glob pattern
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/upload-dir/batch*.csv') ORDER BY id;
+----
+10	Harry	1000
+20	Iris	2000
+
+# Test 11: Test reading from subdirectories with complex glob patterns
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/subdir*/*.csv') ORDER BY id;
+----
+3	Charlie	300
+4	Diana	400
+5	Eve	500
+6	Frank	600
+
+# Test 12: Write to a subdirectory
+statement ok
+CREATE TABLE test_subdir AS SELECT 99 as id, 'Zara' as name, 9900 as value;
+
+statement ok
+COPY test_subdir TO '${WEBDAV_TEST_BASE_URL}/test-dir/subdir1/test_in_subdir.csv' (HEADER, DELIMITER ',');
+
+# Verify the file in subdirectory
+query III
+SELECT * FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/subdir1/test_in_subdir.csv');
+----
+99	Zara	9900
+
+# Test 13: Test glob with all files including the newly written ones
+query I
+SELECT count(*) FROM read_csv_auto('${WEBDAV_TEST_BASE_URL}/test-dir/**/*.csv');
+----
+10
+
+# Cleanup
+statement ok
+DROP TABLE test_write;
+
+statement ok
+DROP TABLE test_batch1;
+
+statement ok
+DROP TABLE test_batch2;
+
+statement ok
+DROP TABLE test_subdir;
+
+statement ok
+DROP SECRET webdav_docker_test;

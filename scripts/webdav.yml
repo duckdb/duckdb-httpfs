@@ -1,0 +1,74 @@
+services:
+  webdav:
+    image: bytemark/webdav
+    hostname: duckdb-webdav-test.local
+    ports:
+      - "9100:80"
+    environment:
+      - AUTH_TYPE=Basic
+      - USERNAME=duckdb_webdav_user
+      - PASSWORD=duckdb_webdav_password
+
+  webdav_setup:
+    image: alpine:latest
+    depends_on:
+      - webdav
+    links:
+      - webdav
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache curl;
+
+        until (
+          curl -u duckdb_webdav_user:duckdb_webdav_password -f http://webdav:80/ >/dev/null 2>&1
+        ) do
+          echo '...waiting for WebDAV server...' && sleep 1;
+        done;
+
+        echo 'WebDAV server is ready, creating test data...';
+
+        # Create directories using WebDAV MKCOL method
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X MKCOL http://webdav:80/test-dir/;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X MKCOL http://webdav:80/test-dir/upload-dir/;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X MKCOL http://webdav:80/test-dir/subdir1/;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X MKCOL http://webdav:80/test-dir/subdir2/;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X MKCOL http://webdav:80/glob-test/;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X MKCOL http://webdav:80/glob-test/year=2023/;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X MKCOL http://webdav:80/glob-test/year=2024/;
+
+        # Create temporary directory for test files
+        mkdir -p /tmp/webdav-test;
+
+        # Create test files
+        printf 'Hello from WebDAV' > /tmp/webdav-test/hello.txt;
+
+        echo 'id,name,value' > /tmp/webdav-test/test1.csv;
+        echo '1,Alice,100' >> /tmp/webdav-test/test1.csv;
+        echo '2,Bob,200' >> /tmp/webdav-test/test1.csv;
+
+        echo 'id,name,value' > /tmp/webdav-test/test2.csv;
+        echo '3,Charlie,300' >> /tmp/webdav-test/test2.csv;
+        echo '4,Diana,400' >> /tmp/webdav-test/test2.csv;
+
+        echo 'id,name,value' > /tmp/webdav-test/test3.csv;
+        echo '5,Eve,500' >> /tmp/webdav-test/test3.csv;
+        echo '6,Frank,600' >> /tmp/webdav-test/test3.csv;
+
+        echo 'id,year,data' > /tmp/webdav-test/data2023.csv;
+        echo '1,2023,test2023' >> /tmp/webdav-test/data2023.csv;
+
+        echo 'id,year,data' > /tmp/webdav-test/data2024.csv;
+        echo '2,2024,test2024' >> /tmp/webdav-test/data2024.csv;
+
+        # Upload test files using WebDAV PUT method
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X PUT http://webdav:80/hello.txt --data-binary @/tmp/webdav-test/hello.txt;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X PUT http://webdav:80/test-dir/test1.csv --data-binary @/tmp/webdav-test/test1.csv;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X PUT http://webdav:80/test-dir/subdir1/test2.csv --data-binary @/tmp/webdav-test/test2.csv;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X PUT http://webdav:80/test-dir/subdir2/test3.csv --data-binary @/tmp/webdav-test/test3.csv;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X PUT http://webdav:80/glob-test/year=2023/data.csv --data-binary @/tmp/webdav-test/data2023.csv;
+        curl -u duckdb_webdav_user:duckdb_webdav_password -X PUT http://webdav:80/glob-test/year=2024/data.csv --data-binary @/tmp/webdav-test/data2024.csv;
+
+        echo 'FINISHED SETTING UP WEBDAV';
+        exit 0;
