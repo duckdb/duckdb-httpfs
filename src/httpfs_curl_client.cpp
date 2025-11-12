@@ -115,6 +115,11 @@ static idx_t httpfs_client_count = 0;
 class HTTPFSCurlClient : public HTTPClient {
 public:
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
+		// FIXME: proto_host_port is not used
+		Initialize(http_params);
+	}
+	void Initialize(HTTPParams &http_p) override {
+		HTTPFSParams &http_params = (HTTPFSParams&)http_p;
 		auto bearer_token = "";
 		if (!http_params.bearer_token.empty()) {
 			bearer_token = http_params.bearer_token.c_str();
