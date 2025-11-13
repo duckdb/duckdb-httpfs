@@ -1,0 +1,16 @@
+# name: test/sql/attach/attach_encryption_fallback_readonly.test
+# description: Test the openssl based crypto util
+# group: [attach]
+
+require httpfs
+
+statement ok
+ATTACH '__TEST_DIR__/test_write_only.db' as enc (ENCRYPTION_KEY 'abcde', ENCRYPTION_CIPHER 'GCM');
+
+statement ok
+CREATE TABLE enc.test AS SELECT 1 as a;
+
+query I
+FROM enc.test
+----
+1

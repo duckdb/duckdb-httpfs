@@ -2,6 +2,9 @@
 # description: settings for extensions
 # group: [extension]
 
+# TODO: move back to duckdb/duckdb
+mode skip
+
 require httpfs
 
 statement ok
