@@ -33,7 +33,15 @@ struct S3AuthParams {
 	bool requester_pays = false;
 	string oauth2_bearer_token; // OAuth2 bearer token for GCS
 
+	// Store FileOpener and path for credential refresh
+	optional_ptr<FileOpener> opener;
+	string path;
+
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
+
+	//! Try to refresh credentials if they've expired
+	//! Returns true if refresh succeeded and credentials were updated
+	bool TryRefreshCredentials();
 };
 
 struct AWSEnvironmentCredentialsProvider {
@@ -236,6 +244,9 @@ public:
 	static string GetGCSAuthError(S3AuthParams &s3_auth_params);
 	static HTTPException GetS3Error(S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url);
 
+	//! Helper method to attempt secret refresh for a given path
+	static bool TryRefreshSecret(const string &path, optional_ptr<FileOpener> opener);
+
 protected:
 	static void NotifyUploadsInProgress(S3FileHandle &file_handle);
 	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
@@ -245,6 +256,24 @@ protected:
 	string GetPayloadHash(char *buffer, idx_t buffer_len);
 
 	HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url) override;
+
+private:
+	template <typename RequestFunc>
+	auto ExecuteWithRefresh(S3AuthParams &auth_params, RequestFunc request_func)
+	    -> decltype(request_func(auth_params)) {
+		try {
+			return request_func(auth_params);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			// Only attempt refresh for HTTP or IO exceptions (same logic as S3FileHandle::Initialize)
+			if (error.Type() == ExceptionType::IO || error.Type() == ExceptionType::HTTP) {
+				if (auth_params.TryRefreshCredentials()) {
+					return request_func(auth_params); // Retry
+				}
+			}
+			throw;
+		}
+	}
 };
 
 // Helper class to do s3 ListObjectV2 api call https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
