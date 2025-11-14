@@ -61,9 +61,16 @@ struct S3AuthParams {
 	bool requester_pays = false;
 	string oauth2_bearer_token; // OAuth2 bearer token for GCS
 
+	// Store FileOpener and path for credential refresh
+	optional_ptr<FileOpener> opener;
+	string path;
+
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
 	static S3AuthParams ReadFrom(S3KeyValueReader &secret_reader, const std::string &file_path);
 	void SetRegion(string region_p);
+	//! Try to refresh credentials if they've expired
+	//! Returns true if refresh succeeded and credentials were updated
+	bool TryRefreshCredentials();
 
 private:
 	void InitializeEndpoint();
@@ -207,6 +214,9 @@ public:
 	static HTTPException GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
 	                                const string &url);
 	HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url) override;
+
+	//! Helper method to attempt secret refresh for a given path
+	static bool TryRefreshSecret(const string &path, optional_ptr<FileOpener> opener);
 
 protected:
 	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
