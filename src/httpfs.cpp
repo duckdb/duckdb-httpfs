@@ -1011,9 +1011,9 @@ unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
 }
 
 unique_ptr<HTTPClient> HTTPFileHandle::CreateClient() {
-	// Create a new client
 	string path_out, proto_host_port;
 	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
+	cached_proto_host_port = proto_host_port;
 	return http_params.http_util.InitializeClient(http_params, proto_host_port);
 }
 
@@ -1023,6 +1023,18 @@ void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
 
 HTTPFileHandle::~HTTPFileHandle() {
 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
+	if (!cached_proto_host_port.empty()) {
+		auto &httpfs_util = static_cast<HTTPFSUtil &>(http_params.http_util);
+		auto client = client_cache.GetClient();
+		while (client) {
+			httpfs_util.CloseClient(cached_proto_host_port, std::move(client));
+			client = client_cache.GetClient();
+		}
+	}
+}
+
+void HTTPFSUtil::CloseClient(const string &, unique_ptr<HTTPClient> &&) {
+	// no-op by default, client destroyed via RAII
 }
 
 string HTTPFSUtil::GetName() const {

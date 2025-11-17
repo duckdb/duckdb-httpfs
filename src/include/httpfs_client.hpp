@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/http_util.hpp"
+#include <mutex>
 
 namespace duckdb {
 class HTTPLogger;
@@ -35,11 +36,19 @@ struct HTTPFSParams : public HTTPParams {
 	// TODO: make this unnecessary
 };
 
+struct CachedHTTPClient {
+	unique_ptr<HTTPClient> cached_client;
+	string proto_host_port;
+};
+
 class HTTPFSUtil : public HTTPUtil {
 public:
 	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+
+	//! Close a client — may cache it for reuse
+	virtual void CloseClient(const string &proto_host_port, unique_ptr<HTTPClient> &&client);
 
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
@@ -56,6 +65,21 @@ public:
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 
 	string GetName() const override;
+};
+
+class HTTPFSCachedUtil : public HTTPFSCurlUtil {
+public:
+	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+	void CloseClient(const string &proto_host_port, unique_ptr<HTTPClient> &&client) override;
+	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override;
+
+	string GetName() const override;
+
+	bool EnableCaching(BaseRequest &request);
+	unique_ptr<HTTPClient> FindCachedCandidate(const string &proto_host_port);
+	void StoreCachedCandidate(const string &proto_host_port, unique_ptr<HTTPClient> &&client);
+	std::mutex cached_httpclients_mutex {};
+	std::vector<CachedHTTPClient> cached_httpclients;
 };
 
 #endif

@@ -230,6 +230,7 @@ public:
 		CURLcode res;
 		{
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
+			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
 			CURLU *url = curl_url_dup(base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);

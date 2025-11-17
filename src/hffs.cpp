@@ -46,6 +46,7 @@ HFFileHandle::~HFFileHandle() {
 }
 
 unique_ptr<HTTPClient> HFFileHandle::CreateClient() {
+	cached_proto_host_port = parsed_url.endpoint;
 	return http_params.http_util.InitializeClient(http_params, parsed_url.endpoint);
 }
 

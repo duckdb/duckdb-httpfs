@@ -77,6 +77,8 @@ public:
 
 	// We keep an http client stored for connection reuse with keep-alive headers
 	HTTPClientCache client_cache;
+	// The resolved proto_host_port for global cache keying
+	string cached_proto_host_port;
 
 	shared_ptr<HTTPInput> http_input;
 	HTTPFSParams &http_params;
