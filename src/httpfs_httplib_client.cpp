@@ -156,11 +156,114 @@ private:
 private:
 	unique_ptr<duckdb_httplib_openssl::Client> client;
 	optional_ptr<HTTPState> state;
+
+public:
+	bool proxy_is_set;
 };
 
 unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
 	auto client = make_uniq<HTTPFSClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
 	return std::move(client);
+}
+
+unique_ptr<HTTPClient> HTTPFSUtil::FindCachedCandidate(const string &proto_host_port) {
+	if (proto_host_port.empty()) {
+		return nullptr;
+	}
+	if (GetName() != "HTTPFS") {
+		return nullptr;
+	}
+	if (auto lock = std::unique_lock<std::mutex>(cached_httpclients_mutex, std::try_to_lock)) {
+		for (int i = 0; i < cached_httpclients.size(); i++) {
+			if (cached_httpclients[i].proto_host_port == proto_host_port && cached_httpclients[i].cached_client) {
+				return std::move(cached_httpclients[i].cached_client);
+			}
+		}
+	}
+	return nullptr;
+}
+
+void HTTPFSUtil::StoreCachedCandidate(const string &proto_host_port, unique_ptr<HTTPClient> &&client) {
+	if (proto_host_port.empty()) {
+		return;
+	}
+	if (GetName() != "HTTPFS") {
+		return;
+	}
+	if (auto lock = std::unique_lock<std::mutex>(cached_httpclients_mutex, std::try_to_lock)) {
+		if (cached_httpclients.empty()) {
+			cached_httpclients.resize(64);
+		}
+		// First prefer an empty slot
+		for (int i = 0; i < cached_httpclients.size(); i++) {
+			if (!cached_httpclients[i].cached_client) {
+				cached_httpclients[i].cached_client = std::move(client);
+				cached_httpclients[i].proto_host_port = proto_host_port;
+				return;
+			}
+		}
+		// Else fit one at random
+		// randomness should avoid bias
+		{
+			RandomEngine engine;
+			size_t index = engine.NextRandomInteger() % cached_httpclients.size();
+
+			cached_httpclients[index].cached_client = std::move(client);
+			cached_httpclients[index].proto_host_port = proto_host_port;
+		}
+	}
+}
+
+unique_ptr<HTTPResponse> HTTPFSUtil::SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) {
+	// This is a copy of the same function in HTTPUtil, adding extra hooks
+	if (!client || !((HTTPFSClient &)(*client)).proxy_is_set) {
+		auto new_client = FindCachedCandidate(request.proto_host_port);
+		if (new_client) {
+			std::cout << "FindCachedCandidate: YES\n";
+			new_client->Initialize(request.params);
+			client = std::move(new_client);
+		} else {
+			std::cout << "FindCachedCandidate: no\n";
+		}
+	}
+	if (!client) {
+		client = InitializeClient(request.params, request.proto_host_port);
+	}
+	std::function<unique_ptr<HTTPResponse>(void)> on_request([&]() {
+		unique_ptr<HTTPResponse> response;
+
+		// When logging is enabled, we collect request timings
+		if (request.params.logger) {
+			request.have_request_timing = request.params.logger->ShouldLog(HTTPLogType::NAME, HTTPLogType::LEVEL);
+		}
+
+		try {
+			if (request.have_request_timing) {
+				request.request_start = Timestamp::GetCurrentTimestamp();
+			}
+			response = client->Request(request);
+		} catch (...) {
+			if (request.have_request_timing) {
+				request.request_end = Timestamp::GetCurrentTimestamp();
+			}
+			LogRequest(request, nullptr);
+			throw;
+		}
+		if (request.have_request_timing) {
+			request.request_end = Timestamp::GetCurrentTimestamp();
+		}
+		LogRequest(request, response ? response.get() : nullptr);
+		return response;
+	});
+
+	// Refresh the client on retries
+	std::function<void(void)> on_retry([&]() { client = InitializeClient(request.params, request.proto_host_port); });
+
+	auto r = RunRequestWithRetry(on_request, request, on_retry);
+	if (!((HTTPFSClient &)(*client)).proxy_is_set) {
+		StoreCachedCandidate(request.proto_host_port, std::move(client));
+	}
+	return std::move(r);
 }
 
 unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
