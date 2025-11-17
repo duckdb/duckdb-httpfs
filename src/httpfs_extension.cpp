@@ -99,6 +99,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			return;
 		}
 		if (value == "httplib" || value == "default") {
+			// FIXME: HTTPFSUtil is wrong as a string, should be HTTPFS. Or maybe we like that re-set means re-initialization?
 			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
 				config.http_util = make_shared_ptr<HTTPFSUtil>();
 			}
