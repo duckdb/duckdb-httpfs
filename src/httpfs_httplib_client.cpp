@@ -17,6 +17,8 @@ public:
 		client->set_keep_alive(http_params.keep_alive);
 		if (!http_params.ca_cert_file.empty()) {
 			client->set_ca_cert_path(http_params.ca_cert_file.c_str());
+		} else {
+			client->set_ca_cert_path("");
 		}
 		client->enable_server_certificate_verification(http_params.enable_server_cert_verification);
 		client->set_write_timeout(http_params.timeout, http_params.timeout_usec);
@@ -25,14 +27,21 @@ public:
 		client->set_decompress(false);
 		if (!http_params.bearer_token.empty()) {
 			client->set_bearer_token_auth(http_params.bearer_token.c_str());
+		} else {
+			client->set_bearer_token_auth("");
 		}
 
 		if (!http_params.http_proxy.empty()) {
+			proxy_is_set = true;
 			client->set_proxy(http_params.http_proxy, http_params.http_proxy_port);
 
 			if (!http_params.http_proxy_username.empty()) {
 				client->set_proxy_basic_auth(http_params.http_proxy_username, http_params.http_proxy_password);
 			}
+		} else {
+			proxy_is_set = false;
+			client->set_proxy("", -1);
+			client->set_proxy_basic_auth("", "");
 		}
 		state = http_params.state;
 	}
