@@ -86,3 +86,4 @@ jobs:
           source ./scripts/run_s3_test_server.sh
           source ./scripts/set_s3_test_server_variables.sh
           ./build/release/test/unittest "*" --skip-error-messages "[]"
+          ./build/release/test/unittest "*" --skip-error-messages "[]" --on-init "SET httpfs_client_implementation = 'httplib-cached';" --statically-loaded-extensions "[core_functions,parquet,httpfs]"
