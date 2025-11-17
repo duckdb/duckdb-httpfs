@@ -219,11 +219,11 @@ unique_ptr<HTTPResponse> HTTPFSCachedUtil::SendRequest(BaseRequest &request, uni
 	if (!client || !((HTTPFSCachedClient &)(*client)).proxy_is_set) {
 		auto new_client = FindCachedCandidate(request.proto_host_port);
 		if (new_client) {
-			std::cout << "FindCachedCandidate: YES\n";
+			// FIXME: Found candiate, log?
 			new_client->Initialize(request.params);
 			client = std::move(new_client);
 		} else {
-			std::cout << "FindCachedCandidate: no\n";
+			// FIXME: Didn't find a candiate, log?
 		}
 	}
 	if (!client) {
