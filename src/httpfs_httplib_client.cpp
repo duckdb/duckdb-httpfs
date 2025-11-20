@@ -106,8 +106,12 @@ public:
 			info.buffer_out += string(data, data_length);
 			return true;
 		};
+		// First assign body, this is the body that will be uploaded
 		req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
-		return TransformResult(client->send(req));
+		auto transformed_req = TransformResult(client->send(req));
+		// Then, after actual re-quest, re-assign body to the response value of the POST request
+		transformed_req->body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
+		return std::move(transformed_req);
 	}
 
 private:
