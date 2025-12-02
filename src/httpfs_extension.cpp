@@ -96,8 +96,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
-	config.AddExtensionOption("merge_http_secret_into_s3_request", "Merges http secret params into S3 requests", LogicalType::BOOLEAN,
-							  Value(true));
+	config.AddExtensionOption("merge_http_secret_into_s3_request", "Merges http secret params into S3 requests",
+	                          LogicalType::BOOLEAN, Value(true));
 
 	auto callback_httpfs_client_implementation = [](ClientContext &context, SetScope scope, Value &parameter) {
 		auto &config = DBConfig::GetConfig(context);

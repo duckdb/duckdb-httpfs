@@ -807,7 +807,6 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
 
-
 	return HTTPFileSystem::GetRequest(handle, http_url, headers);
 }
 

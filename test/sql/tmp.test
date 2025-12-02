@@ -1,0 +1,32 @@
+# name: test/sql/tmp.test
+# group: [sql]
+
+require parquet
+
+require httpfs
+
+require json
+
+mode output_result
+
+statement ok
+CREATE SECRET http_auth (
+    TYPE http,
+    EXTRA_HTTP_HEADERS MAP {
+        'Authorization': 'Bearer <token>'
+    }
+);
+
+statement ok
+call enable_logging('HTTP');
+
+# Should do 4 paginated requests
+query I
+select count(*) FROM read_json_auto('https://api.github.com/orgs/duckdblabs/projectsV2/43/items?per_page=5') limit 20;
+----
+20
+
+mode output_result
+
+statement ok
+SELECT count(*) as count, request.type, request.url FROM duckdb_logs_parsed('HTTP') GROUP BY ALL ORDER BY request.type;

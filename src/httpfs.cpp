@@ -70,7 +70,9 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	idx_t secret_type_count = 5;
 
 	Value merge_http_secret_into_s3_request;
-	if (FileOpener::TryGetCurrentSetting(opener, "merge_http_secret_into_s3_request", merge_http_secret_into_s3_request) && !merge_http_secret_into_s3_request.IsNull() && !merge_http_secret_into_s3_request.GetValue<bool>()) {
+	if (FileOpener::TryGetCurrentSetting(opener, "merge_http_secret_into_s3_request",
+	                                     merge_http_secret_into_s3_request) &&
+	    !merge_http_secret_into_s3_request.IsNull() && !merge_http_secret_into_s3_request.GetValue<bool>()) {
 		// Drop the http secret from the lookup
 		secret_type_count = 4;
 	}
@@ -755,7 +757,8 @@ void HTTPFileHandle::LoadFileInfo() {
 			return;
 		} else {
 			// HEAD request fail, use Range request for another try (read only one byte)
-			if (flags.OpenForReading() && res->status != HTTPStatusCode::NotFound_404 && res->status != HTTPStatusCode::MovedPermanently_301) {
+			if (flags.OpenForReading() && res->status != HTTPStatusCode::NotFound_404 &&
+			    res->status != HTTPStatusCode::MovedPermanently_301) {
 				auto range_res = hfs.GetRangeRequest(*this, path, {}, 0, nullptr, 2);
 				if (range_res->status != HTTPStatusCode::PartialContent_206 &&
 				    range_res->status != HTTPStatusCode::Accepted_202 && range_res->status != HTTPStatusCode::OK_200) {
