@@ -20,6 +20,8 @@
 #include <string>
 #include <thread>
 
+#include "s3fs.hpp"
+
 namespace duckdb {
 
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
@@ -34,7 +36,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	auto result = make_uniq<HTTPFSParams>(*this);
 	result->Initialize(opener);
 
-	// No point in continueing without an opener
+	// No point in continuing without an opener
 	if (!opener) {
 		return std::move(result);
 	}
@@ -65,35 +67,42 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 		}
 	}
 
-	// Secret types to look for HTTP settings in
-	const char *secret_types[] = {"s3", "r2", "gcs", "aws", "http"};
-	idx_t secret_type_count = 5;
+	unique_ptr<KeyValueSecretReader> settings_reader;
+	string s3_prefix = S3FileSystem::TryGetPrefix(info->file_path);
+	if (info && !s3_prefix.empty()) {
+		// This is an S3-type url, we should
+		const char *s3_secret_types[] = {"s3", "r2", "gcs", "aws", "http"};
 
-	Value merge_http_secret_into_s3_request;
-	if (FileOpener::TryGetCurrentSetting(opener, "merge_http_secret_into_s3_request",
-	                                     merge_http_secret_into_s3_request) &&
-	    !merge_http_secret_into_s3_request.IsNull() && !merge_http_secret_into_s3_request.GetValue<bool>()) {
-		// Drop the http secret from the lookup
-		secret_type_count = 4;
+		idx_t secret_type_count = 5;
+		Value merge_http_secret_into_s3_request;
+		FileOpener::TryGetCurrentSetting(opener, "merge_http_secret_into_s3_request",
+		                                 merge_http_secret_into_s3_request);
+
+		if (!merge_http_secret_into_s3_request.IsNull() && !merge_http_secret_into_s3_request.GetValue<bool>()) {
+			// Drop the http secret from the lookup
+			secret_type_count = 4;
+		}
+		settings_reader = make_uniq<KeyValueSecretReader>(*opener, info, s3_secret_types, secret_type_count);
+	} else {
+		settings_reader = make_uniq<KeyValueSecretReader>(*opener, info, "http");
 	}
 
 	// HTTP Secret lookups
-	KeyValueSecretReader settings_reader(*opener, info, secret_types, secret_type_count);
 
 	string proxy_setting;
-	if (settings_reader.TryGetSecretKey<string>("http_proxy", proxy_setting) && !proxy_setting.empty()) {
+	if (settings_reader->TryGetSecretKey<string>("http_proxy", proxy_setting) && !proxy_setting.empty()) {
 		idx_t port;
 		string host;
 		HTTPUtil::ParseHTTPProxyHost(proxy_setting, host, port);
 		result->http_proxy = host;
 		result->http_proxy_port = port;
 	}
-	settings_reader.TryGetSecretKey<string>("http_proxy_username", result->http_proxy_username);
-	settings_reader.TryGetSecretKey<string>("http_proxy_password", result->http_proxy_password);
-	settings_reader.TryGetSecretKey<string>("bearer_token", result->bearer_token);
+	settings_reader->TryGetSecretKey<string>("http_proxy_username", result->http_proxy_username);
+	settings_reader->TryGetSecretKey<string>("http_proxy_password", result->http_proxy_password);
+	settings_reader->TryGetSecretKey<string>("bearer_token", result->bearer_token);
 
 	Value extra_headers;
-	if (settings_reader.TryGetSecretKey("extra_http_headers", extra_headers)) {
+	if (settings_reader->TryGetSecretKey("extra_http_headers", extra_headers)) {
 		auto children = MapValue::GetChildren(extra_headers);
 		for (const auto &child : children) {
 			auto kv = StructValue::GetChildren(child);

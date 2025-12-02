@@ -625,15 +625,22 @@ void S3FileSystem::ReadQueryParams(const string &url_query_param, S3AuthParams &
 	}
 }
 
-static string GetPrefix(string url) {
+string S3FileSystem::TryGetPrefix(const string &url) {
 	const string prefixes[] = {"s3://", "s3a://", "s3n://", "gcs://", "gs://", "r2://"};
 	for (auto &prefix : prefixes) {
-		if (StringUtil::StartsWith(url, prefix)) {
+		if (StringUtil::StartsWith(StringUtil::Lower(url), prefix)) {
 			return prefix;
 		}
 	}
-	throw IOException("URL needs to start with s3://, gcs:// or r2://");
-	return string();
+	return {};
+}
+
+string S3FileSystem::GetPrefix(const string &url) {
+	auto prefix = TryGetPrefix(url);
+	if (prefix.empty()) {
+		throw IOException("URL needs to start with s3://, gcs:// or r2://");
+	}
+	return prefix;
 }
 
 ParsedS3Url S3FileSystem::S3UrlParse(string url, S3AuthParams &params) {
