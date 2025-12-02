@@ -807,6 +807,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
 
+
 	return HTTPFileSystem::GetRequest(handle, http_url, headers);
 }
 
@@ -915,8 +916,6 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		auth_params = S3AuthParams::ReadFrom(opener, info);
 		HTTPFileHandle::Initialize(opener);
 	}
-
-	auto &s3fs = file_system.Cast<S3FileSystem>();
 
 	if (flags.OpenForWriting()) {
 		auto aws_minimum_part_size = 5242880; // 5 MiB https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html

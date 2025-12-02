@@ -65,8 +65,18 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 		}
 	}
 
+	// Secret types to look for HTTP settings in
+	const char *secret_types[] = {"s3", "r2", "gcs", "aws", "http"};
+	idx_t secret_type_count = 5;
+
+	Value merge_http_secret_into_s3_request;
+	if (FileOpener::TryGetCurrentSetting(opener, "merge_http_secret_into_s3_request", merge_http_secret_into_s3_request) && !merge_http_secret_into_s3_request.IsNull() && !merge_http_secret_into_s3_request.GetValue<bool>()) {
+		// Drop the http secret from the lookup
+		secret_type_count = 4;
+	}
+
 	// HTTP Secret lookups
-	KeyValueSecretReader settings_reader(*opener, info, "http");
+	KeyValueSecretReader settings_reader(*opener, info, secret_types, secret_type_count);
 
 	string proxy_setting;
 	if (settings_reader.TryGetSecretKey<string>("http_proxy", proxy_setting) && !proxy_setting.empty()) {
@@ -115,6 +125,13 @@ static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &head
 	}
 }
 
+static void AddHandleHeaders(HTTPFileHandle &handle, HTTPHeaders &header_map) {
+	// Inject headers from the http param extra_headers into the request
+	for (auto &header : handle.http_params.extra_headers) {
+		header_map[header.first] = header.second;
+	}
+}
+
 unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(FileHandle &handle, string url, HTTPHeaders header_map,
                                                      string &buffer_out, char *buffer_in, idx_t buffer_in_len,
                                                      string params) {
@@ -122,6 +139,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(FileHandle &handle, string 
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
+	AddHandleHeaders(hfh, header_map);
 
 	PostRequestInfo post_request(url, header_map, hfh.http_params, const_data_ptr_cast(buffer_in), buffer_in_len);
 	auto result = http_util.Request(post_request);
@@ -135,6 +153,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::PutRequest(FileHandle &handle, string u
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
+	AddHandleHeaders(hfh, header_map);
 
 	string content_type = "application/octet-stream";
 	PutRequestInfo put_request(url, header_map, hfh.http_params, (const_data_ptr_t)buffer_in, buffer_in_len,
@@ -147,6 +166,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, string 
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
+	AddHandleHeaders(hfh, header_map);
 
 	auto http_client = hfh.GetClient();
 
@@ -162,6 +182,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::DeleteRequest(FileHandle &handle, strin
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
+	AddHandleHeaders(hfh, header_map);
 
 	auto http_client = hfh.GetClient();
 	DeleteRequestInfo delete_request(url, header_map, hfh.http_params);
@@ -187,6 +208,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
+	AddHandleHeaders(hfh, header_map);
 
 	D_ASSERT(hfh.cached_file_handle);
 
@@ -238,6 +260,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
+	AddHandleHeaders(hfh, header_map);
 
 	// send the Range header to read only subset of file
 	string range_expr = "bytes=" + to_string(file_offset) + "-" + to_string(file_offset + buffer_out_len - 1);

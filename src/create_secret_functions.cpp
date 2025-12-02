@@ -118,6 +118,14 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 			secret->secret_map["bearer_token"] = named_param.second.ToString();
 			// Mark it as sensitive
 			secret->redact_keys.insert("bearer_token");
+		} else if (lower_name == "http_proxy") {
+			secret->secret_map["http_proxy"] = named_param.second;
+		} else if (lower_name == "http_proxy_password") {
+			secret->secret_map["http_proxy_password"] = named_param.second;
+		} else if (lower_name == "http_proxy_username") {
+			secret->secret_map["http_proxy_username"] = named_param.second;
+		} else if (lower_name == "extra_http_headers") {
+			secret->secret_map["extra_http_headers"] = named_param.second;
 		} else {
 			throw InvalidInputException("Unknown named parameter passed to CreateSecretFunctionInternal: " +
 			                            lower_name);
@@ -199,6 +207,12 @@ void CreateS3SecretFunctions::SetBaseNamedParams(CreateSecretFunction &function,
 
 	// Whether a secret refresh attempt should be made when the secret appears to be incorrect
 	function.named_parameters["refresh"] = LogicalType::VARCHAR;
+
+	// Params for HTTP configuration
+	function.named_parameters["http_proxy"] = LogicalType::VARCHAR;
+	function.named_parameters["http_proxy_password"] = LogicalType::VARCHAR;
+	function.named_parameters["http_proxy_username"] = LogicalType::VARCHAR;
+	function.named_parameters["extra_http_headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
 
 	// Refresh Modes
 	// - auto
