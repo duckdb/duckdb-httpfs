@@ -27,6 +27,8 @@ struct HTTPFSParams : public HTTPParams {
 	bool unsafe_disable_etag_checks {false};
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
+	bool pre_merged_headers = false;
+
 	// Additional fields needs to be appended at the end and need to be propagated to duckdb-wasm
 	// TODO: make this unnecessary
 };

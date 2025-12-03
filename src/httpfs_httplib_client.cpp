@@ -116,9 +116,16 @@ public:
 
 private:
 	duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
+		auto &httpfs_params = params.Cast<HTTPFSParams>();
+
 		duckdb_httplib_openssl::Headers headers;
 		for (auto &entry : header_map) {
 			headers.insert(entry);
+		}
+		if (!httpfs_params.pre_merged_headers) {
+			for (auto &entry : params.extra_headers) {
+				headers.insert(entry);
+			}
 		}
 		return headers;
 	}

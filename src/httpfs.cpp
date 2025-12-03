@@ -141,6 +141,7 @@ static void AddHandleHeaders(HTTPFileHandle &handle, HTTPHeaders &header_map) {
 	for (auto &header : handle.http_params.extra_headers) {
 		header_map[header.first] = header.second;
 	}
+	handle.http_params.pre_merged_headers = true;
 }
 
 unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(FileHandle &handle, string url, HTTPHeaders header_map,
