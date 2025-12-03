@@ -119,7 +119,7 @@ public:
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
-		HTTPFSParams &http_params = (HTTPFSParams&)http_p;
+		HTTPFSParams &http_params = (HTTPFSParams &)http_p;
 		auto bearer_token = "";
 		if (!http_params.bearer_token.empty()) {
 			bearer_token = http_params.bearer_token.c_str();
