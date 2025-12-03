@@ -68,8 +68,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	}
 
 	unique_ptr<KeyValueSecretReader> settings_reader;
-	string s3_prefix = S3FileSystem::TryGetPrefix(info->file_path);
-	if (info && !s3_prefix.empty()) {
+	if (info && !S3FileSystem::TryGetPrefix(info->file_path).empty()) {
 		// This is an S3-type url, we should
 		const char *s3_secret_types[] = {"s3", "r2", "gcs", "aws", "http"};
 
