@@ -468,7 +468,7 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders
 		if (res->Success() || res->status == HTTPStatusCode::PartialContent_206 ||
 		    res->status == HTTPStatusCode::Accepted_202) {
 
-			if (hfh.flags.RequireParallelAccess()) {
+			if (!hfh.flags.RequireParallelAccess()) {
 				// Update range request statistics
 				const auto duration = NumericCast<idx_t>(Timestamp::GetCurrentTimestamp().value - timestamp_before.value);
 				hfh.AddStatistics(file_offset, buffer_out_len, duration);
