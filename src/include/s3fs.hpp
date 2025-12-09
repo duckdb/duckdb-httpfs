@@ -260,7 +260,7 @@ struct AWSListObjectV2 {
 	static string ParseContinuationToken(string &aws_response);
 };
 
-HTTPHeaders create_s3_header(string url, string query, string host, string service, string method,
+HTTPHeaders CreateS3Header(string url, string query, string host, string service, string method,
 									const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
 									string payload_hash = "", string content_type = "");
 } // namespace duckdb
