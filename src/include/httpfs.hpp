@@ -85,8 +85,13 @@ public:
 	std::mutex mu;
 
 	// Read buffer
-	duckdb::unique_ptr<data_t[]> read_buffer;
-	constexpr static idx_t READ_BUFFER_LEN = 1000000;
+	AllocatedData read_buffer;
+	constexpr static idx_t INITIAL_READ_BUFFER_LEN = 1048576;
+	constexpr static idx_t MAXIMUM_READ_BUFFER_LEN = 33554432;
+
+	// Adaptively resizes read_buffer based on range_request_statistics
+	void AddStatistics(idx_t read_offset, idx_t read_length, idx_t read_duration);
+	void AdaptReadBufferSize(idx_t next_read_offset);
 
 	void AddHeaders(HTTPHeaders &map);
 
@@ -94,6 +99,15 @@ public:
 	unique_ptr<HTTPClient> GetClient();
 	// Return the client for re-use
 	void StoreClient(unique_ptr<HTTPClient> client);
+
+private:
+	// Statistics that are used to adaptively grow the read_buffer
+	struct RangeRequestStatistics {
+		idx_t offset;
+		idx_t length;
+		idx_t duration;
+	};
+	vector<RangeRequestStatistics> range_request_statistics;
 
 public:
 	void Close() override {
