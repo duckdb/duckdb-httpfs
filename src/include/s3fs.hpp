@@ -34,6 +34,7 @@ struct S3AuthParams {
 	string oauth2_bearer_token; // OAuth2 bearer token for GCS
 
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
+	static S3AuthParams ReadFrom(KeyValueSecretReader& secret_reader, const std::string& file_path);
 };
 
 struct AWSEnvironmentCredentialsProvider {
@@ -258,4 +259,8 @@ struct AWSListObjectV2 {
 	static vector<string> ParseCommonPrefix(string &aws_response);
 	static string ParseContinuationToken(string &aws_response);
 };
+
+HTTPHeaders create_s3_header(string url, string query, string host, string service, string method,
+									const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
+									string payload_hash = "", string content_type = "");
 } // namespace duckdb

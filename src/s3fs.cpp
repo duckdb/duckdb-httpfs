@@ -28,9 +28,9 @@
 
 namespace duckdb {
 
-static HTTPHeaders create_s3_header(string url, string query, string host, string service, string method,
-                                    const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
-                                    string payload_hash = "", string content_type = "") {
+HTTPHeaders create_s3_header(string url, string query, string host, string service, string method,
+                             const S3AuthParams &auth_params, string date_now, string datetime_now, string payload_hash,
+                             string content_type) {
 
 	HTTPHeaders res;
 	res["Host"] = host;
@@ -184,15 +184,20 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 }
 
 S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
-	auto result = S3AuthParams();
 
 	// Without a FileOpener we can not access settings nor secrets: return empty auth params
 	if (!opener) {
-		return result;
+		return {};
 	}
 
 	const char *secret_types[] = {"s3", "r2", "gcs", "aws"};
 	KeyValueSecretReader secret_reader(*opener, info, secret_types, 3);
+
+	return ReadFrom(secret_reader, info.file_path);
+}
+
+S3AuthParams S3AuthParams::ReadFrom(KeyValueSecretReader &secret_reader, const std::string &file_path) {
+	auto result = S3AuthParams();
 
 	// These settings we just set or leave to their S3AuthParams default value
 	secret_reader.TryGetSecretKeyOrSetting("region", "s3_region", result.region);
@@ -210,7 +215,7 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	auto endpoint_result = secret_reader.TryGetSecretKeyOrSetting("endpoint", "s3_endpoint", result.endpoint);
 	auto url_style_result = secret_reader.TryGetSecretKeyOrSetting("url_style", "s3_url_style", result.url_style);
 
-	if (StringUtil::StartsWith(info.file_path, "gcs://") || StringUtil::StartsWith(info.file_path, "gs://")) {
+	if (StringUtil::StartsWith(file_path, "gcs://") || StringUtil::StartsWith(file_path, "gs://")) {
 		// For GCS urls we force the endpoint and vhost path style, allowing only to be overridden by secrets
 		if (result.endpoint.empty() || endpoint_result.GetScope() != SettingScope::SECRET) {
 			result.endpoint = "storage.googleapis.com";
