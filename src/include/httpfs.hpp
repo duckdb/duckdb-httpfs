@@ -100,7 +100,14 @@ public:
 	// Return the client for re-use
 	void StoreClient(unique_ptr<HTTPClient> client);
 
+	// Whether to bypass the read buffer
+	bool SkipBuffer() const {
+		return flags.DirectIO() || flags.RequireParallelAccess();
+	}
+
 private:
+	void AllocateReadBuffer(optional_ptr<FileOpener> opener);
+
 	// Statistics that are used to adaptively grow the read_buffer
 	struct RangeRequestStatistics {
 		idx_t offset;

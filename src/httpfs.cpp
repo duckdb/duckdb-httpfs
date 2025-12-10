@@ -438,6 +438,7 @@ void HTTPFileHandle::AddStatistics(idx_t read_offset, idx_t read_length, idx_t r
 }
 
 void HTTPFileHandle::AdaptReadBufferSize(idx_t next_read_offset) {
+	D_ASSERT(!SkipBuffer());
 	if (range_request_statistics.empty()) {
 		return; // No requests yet - nothing to do
 	}
@@ -470,7 +471,8 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders
 
 			if (!hfh.flags.RequireParallelAccess()) {
 				// Update range request statistics
-				const auto duration = NumericCast<idx_t>(Timestamp::GetCurrentTimestamp().value - timestamp_before.value);
+				const auto duration =
+				    NumericCast<idx_t>(Timestamp::GetCurrentTimestamp().value - timestamp_before.value);
 				hfh.AddStatistics(file_offset, buffer_out_len, duration);
 			}
 
@@ -518,8 +520,7 @@ bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_b
 	idx_t buffer_offset = 0;
 
 	// Don't buffer when DirectIO is set or when we are doing parallel reads
-	bool skip_buffer = hfh.flags.DirectIO() || hfh.flags.RequireParallelAccess();
-	if (skip_buffer && to_read > 0) {
+	if (hfh.SkipBuffer() && to_read > 0) {
 		if (!TryRangeRequest(hfh, hfh.path, {}, location, (char *)buffer, to_read)) {
 			return false;
 		}
@@ -847,11 +848,12 @@ void HTTPFileHandle::TryAddLogger(FileOpener &opener) {
 	}
 }
 
-static AllocatedData AllocateReadBuffer(optional_ptr<FileOpener> opener) {
-	if (opener && opener->TryGetClientContext()) {
-		return BufferAllocator::Get(*opener->TryGetClientContext()).Allocate(HTTPFileHandle::INITIAL_READ_BUFFER_LEN);
-	}
-	return Allocator::DefaultAllocator().Allocate(HTTPFileHandle::INITIAL_READ_BUFFER_LEN);
+void HTTPFileHandle::AllocateReadBuffer(optional_ptr<FileOpener> opener) {
+	D_ASSERT(!SkipBuffer());
+	D_ASSERT(!read_buffer.IsSet());
+	auto &allocator = opener && opener->TryGetClientContext() ? BufferAllocator::Get(*opener->TryGetClientContext())
+	                                                          : Allocator::DefaultAllocator();
+	read_buffer = allocator.Allocate(INITIAL_READ_BUFFER_LEN);
 }
 
 void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
@@ -883,8 +885,8 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 				length = value.length;
 				etag = value.etag;
 
-				if (flags.OpenForReading()) {
-					read_buffer = AllocateReadBuffer(opener);
+				if (flags.OpenForReading() && !SkipBuffer()) {
+					AllocateReadBuffer(opener);
 				}
 				return;
 			}
@@ -902,8 +904,10 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			current_cache->Insert(path, {length, last_modified, etag});
 		}
 
-		// Initialize the read buffer now that we know the file exists
-		read_buffer = AllocateReadBuffer(opener);
+		if (!SkipBuffer()) {
+			// Initialize the read buffer now that we know the file exists
+			AllocateReadBuffer(opener);
+		}
 	}
 
 	// If we're writing to a file, we might as well remove it from the cache
