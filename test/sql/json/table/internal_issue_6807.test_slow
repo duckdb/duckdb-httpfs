@@ -1,0 +1,18 @@
+# name: test/sql/json/table/internal_issue_6807.test
+# description: Test logarithmic growth of read buffer for sequential reads
+# group: [table]
+
+require json
+
+require httpfs
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+CREATE TABLE T AS FROM 'https://data.gharchive.org/2023-02-08-0.json.gz';
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET' GROUP BY request.type;
+----
+9
