@@ -12,7 +12,7 @@ public:
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
-		HTTPFSParams &http_params = (HTTPFSParams&)http_p;
+		HTTPFSParams &http_params = (HTTPFSParams &)http_p;
 		client->set_follow_location(http_params.follow_location);
 		client->set_keep_alive(http_params.keep_alive);
 		if (!http_params.ca_cert_file.empty()) {
@@ -106,18 +106,26 @@ public:
 			info.buffer_out += string(data, data_length);
 			return true;
 		};
+		// First assign body, this is the body that will be uploaded
 		req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
-		return TransformResult(client->send(req));
+		auto transformed_req = TransformResult(client->send(req));
+		// Then, after actual re-quest, re-assign body to the response value of the POST request
+		transformed_req->body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
+		return std::move(transformed_req);
 	}
 
 private:
 	duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
+		auto &httpfs_params = params.Cast<HTTPFSParams>();
+
 		duckdb_httplib_openssl::Headers headers;
 		for (auto &entry : header_map) {
 			headers.insert(entry);
 		}
-		for (auto &entry : params.extra_headers) {
-			headers.insert(entry);
+		if (!httpfs_params.pre_merged_headers) {
+			for (auto &entry : params.extra_headers) {
+				headers.insert(entry);
+			}
 		}
 		return headers;
 	}
