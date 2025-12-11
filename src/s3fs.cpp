@@ -1013,6 +1013,7 @@ void S3FileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx
 			FlushBuffer(s3fh, write_buffer);
 		}
 		s3fh.file_offset += bytes_to_write;
+		s3fh.length += bytes_to_write;
 		bytes_written += bytes_to_write;
 	}
 
