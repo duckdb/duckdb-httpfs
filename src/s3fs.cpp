@@ -19,6 +19,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 
 #include "create_secret_functions.hpp"
+#include "lru_cache.hpp"
 
 #include <iostream>
 #include <thread>
@@ -28,9 +29,22 @@
 
 namespace duckdb {
 
+struct TemporaryAWSCredential
+{
+	string access_key_id;
+	string secret_access_key;
+	string session_token;
+	timestamp_t expiration;
+};
+
+static LRUCache<string,string> AccountIdCache(1024);
+static LRUCache<string,string> BucketOwnerAccountIdCache(2048);
+static LRUCache<string,TemporaryAWSCredential> AccessGrantsCache(4096);
+static LRUCache<string,timestamp_t> AccessDeniedCache(4096);
+
 static HTTPHeaders create_s3_header(string url, string query, string host, string service, string method,
                                     const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
-                                    string payload_hash = "", string content_type = "") {
+                                    string payload_hash = "", string content_type = "", string account_id = "") {
 
 	HTTPHeaders res;
 	res["Host"] = host;
@@ -70,6 +84,10 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 		res["x-amz-request-payer"] = "requester";
 	}
 
+	if(!account_id.empty()) {
+		res["x-amz-account-id"] = account_id;
+	}
+
 	string signed_headers = "";
 	hash_bytes canonical_request_hash;
 	hash_str canonical_request_hash_str;
@@ -79,7 +97,11 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 		res["content-type"] = content_type;
 #endif
 	}
-	signed_headers += "host;x-amz-content-sha256;x-amz-date";
+	signed_headers += "host";
+	if (!account_id.empty()) {
+		signed_headers += ";x-amz-account-id";
+	}
+	signed_headers += ";x-amz-content-sha256;x-amz-date";
 	if (use_requester_pays) {
 		signed_headers += ";x-amz-request-payer";
 	}
@@ -93,7 +115,11 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 	if (content_type.length() > 0) {
 		canonical_request += "\ncontent-type:" + content_type;
 	}
-	canonical_request += "\nhost:" + host + "\nx-amz-content-sha256:" + payload_hash + "\nx-amz-date:" + datetime_now;
+	canonical_request += "\nhost:" + host;
+	if (!account_id.empty()) {
+		canonical_request += "\nx-amz-account-id:" + account_id;
+	}
+	canonical_request += "\nx-amz-content-sha256:" + payload_hash + "\nx-amz-date:" + datetime_now;
 	if (use_requester_pays) {
 		canonical_request += "\nx-amz-request-payer:requester";
 	}
@@ -127,6 +153,201 @@ static HTTPHeaders create_s3_header(string url, string query, string host, strin
 	                       ", Signature=" + string((char *)signature_str, sizeof(hash_str));
 
 	return res;
+}
+
+optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
+	string open_tag = "<" + tag + ">";
+	string close_tag = "</" + tag + ">";
+	auto open_tag_pos = response.find(open_tag, cur_pos);
+	if (open_tag_pos == string::npos) {
+		// tag not found
+		return optional_idx();
+	}
+	auto close_tag_pos = response.find(close_tag, open_tag_pos + open_tag.size());
+	if (close_tag_pos == string::npos) {
+		throw InternalException("Failed to parse S3 result: found open tag for %s but did not find matching close tag",
+		                        tag);
+	}
+	result = response.substr(open_tag_pos + open_tag.size(), close_tag_pos - open_tag_pos - open_tag.size());
+	return close_tag_pos + close_tag.size();
+}
+
+string get_current_account_id(HTTPParams &http_params, S3AuthParams &auth_params) {
+	string cached_account_id;
+	if (AccountIdCache.Get(auth_params.access_key_id, cached_account_id)) {
+		return cached_account_id;
+	}
+	string query = "Action=GetCallerIdentity&Version=2011-06-15";
+	string host = "sts." + auth_params.region + ".amazonaws.com";
+	auto full_url = "https://" + host + "?" + query;
+	auto headers = create_s3_header("/", query, host, "sts", "GET", auth_params);
+	std::stringstream response;
+	GetRequestInfo get_account("https://" + host, "/?" + query, headers, http_params,
+		[&](const HTTPResponse &response) {
+					if (static_cast<int>(response.status) >= 400) {
+						throw Exception(ExceptionType::INVALID_INPUT, full_url);
+					}
+					return true;
+				},
+				[&](const_data_ptr_t data, idx_t data_length) {
+					response << string(const_char_ptr_cast(data), data_length);
+					return true;
+	    });
+	auto result = http_params.http_util.Request(get_account);
+	if (result->HasRequestError()) {
+		throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), full_url);
+	}
+	string account_id;
+	FindTagContents(response.str(), "Account", 0, account_id);
+	AccountIdCache.Put(auth_params.access_key_id, account_id);
+	return account_id;
+}
+
+string get_account_id_for_s3_object(HTTPParams &http_params, S3AuthParams &auth_params, const string& url) {
+	auto parsed_url = S3FileSystem::S3UrlParse(url, auth_params);
+	string cached_account_id;
+	if (BucketOwnerAccountIdCache.Get(parsed_url.bucket, cached_account_id)) {
+		return cached_account_id;
+	}
+	string caller_account_id = get_current_account_id(http_params, auth_params);
+	string query = "s3prefix=" + StringUtil::URLEncode(url);
+	string access_grants_url = "/v20180820/accessgrantsinstance/prefix";
+	string host = caller_account_id + ".s3-control." + auth_params.region + ".amazonaws.com";
+	auto full_url = "https://" + host + access_grants_url + "?" + query;
+	auto headers = create_s3_header(access_grants_url, query, host, "s3", "GET", auth_params, "", "", "", "", caller_account_id);
+	std::stringstream response;
+	GetRequestInfo get_access_grant_urn(host, access_grants_url + "?" + query, headers, http_params,
+		[&](const HTTPResponse &response) {
+					if (static_cast<int>(response.status) >= 400) {
+						throw Exception(ExceptionType::INVALID_INPUT, full_url);
+					}
+					return true;
+				},
+				[&](const_data_ptr_t data, idx_t data_length) {
+					response << string(const_char_ptr_cast(data), data_length);
+					return true;
+	    });
+	auto result = http_params.http_util.Request(get_access_grant_urn);
+	if (result->HasRequestError()) {
+		throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), full_url);
+	}
+	string access_grants_arn;
+	FindTagContents(response.str(), "AccessGrantsInstanceArn", 0, access_grants_arn);
+	vector<string> parts = StringUtil::Split(access_grants_arn, ':');
+	BucketOwnerAccountIdCache.Put(parsed_url.bucket, parts[4]);
+	return parts[4];
+}
+
+bool get_data_access(HTTPParams &http_params, S3AuthParams &auth_params, const string& operation, const string& url, string& access_key_id, string& secret_access_key, string& session_token) {
+	timestamp_t access_denied_timestamp;
+	string url_fixed_prefix = url;
+	if (StringUtil::StartsWith(url_fixed_prefix, "s3a://")) {
+		url_fixed_prefix = StringUtil::Replace(url_fixed_prefix, "s3a://", "s3://");
+	}
+
+	if (AccessDeniedCache.Get(url_fixed_prefix, access_denied_timestamp)) {
+		// do not try if we find a recent(5 min) access denied
+		if (access_denied_timestamp > Timestamp::GetCurrentTimestamp()) {
+			return false;
+		}
+		AccessDeniedCache.Delete(url_fixed_prefix);
+	}
+	auto account_id = get_account_id_for_s3_object(http_params, auth_params, url_fixed_prefix);
+	int current_pos = url_fixed_prefix.size() - 1;
+	TemporaryAWSCredential creds;
+	while (current_pos > 3) {
+		auto prefix = url_fixed_prefix.substr(0, current_pos) + "/*";
+		auto found = AccessGrantsCache.Get(prefix, creds);
+		if (found) {
+			if (creds.expiration > Timestamp::GetCurrentTimestamp())
+			{
+				access_key_id = creds.access_key_id;
+				secret_access_key = creds.secret_access_key;
+				session_token = creds.session_token;
+				return true;
+			}
+			AccessGrantsCache.Delete(prefix);
+
+		}
+		current_pos = url_fixed_prefix.rfind("/", current_pos - 1);
+	}
+	current_pos = url_fixed_prefix.size() - 1;
+	while (current_pos > 3) {
+		auto prefix = url_fixed_prefix.substr(0, current_pos) + "*";
+		auto found = AccessGrantsCache.Get(prefix, creds);
+		if (found) {
+			if (creds.expiration > Timestamp::GetCurrentTimestamp())
+			{
+				access_key_id = creds.access_key_id;
+				secret_access_key = creds.secret_access_key;
+				session_token = creds.session_token;
+				return true;
+			}
+			AccessGrantsCache.Delete(prefix);
+
+		}
+		current_pos--;
+	}
+	string query = "durationSeconds=3600&permission=" + operation+ "&privilege=Default&target=" + StringUtil::URLEncode(url_fixed_prefix) + "&targetType=Object";
+	string access_grants_url = "/v20180820/accessgrantsinstance/dataaccess";
+	string host = account_id + ".s3-control." + auth_params.region + ".amazonaws.com";
+	auto full_url = "https://" + host + access_grants_url + "/" + query;
+	auto headers = create_s3_header(access_grants_url, query, host, "s3", "GET", auth_params, "", "", "", "", account_id);
+	std::stringstream response;
+	GetRequestInfo get_data_access_creds(host, access_grants_url + "?" + query, headers, http_params,
+		[&](const HTTPResponse &response) {
+					return true;
+				},
+				[&](const_data_ptr_t data, idx_t data_length) {
+					response << string(const_char_ptr_cast(data), data_length);
+					return true;
+	    });
+	auto result = http_params.http_util.Request(get_data_access_creds);
+	// We ignore all errors here as we want to fallback to normal IAM creds
+	if (result->HasRequestError() || (int)result->status >= 400) {
+		// cache access denied for 5 min
+		if ((int)result->status == 403) {
+			AccessDeniedCache.Put(url_fixed_prefix, Timestamp::GetCurrentTimestamp() + 5 * 60 * 100000);
+		}
+		return false;
+	}
+	string response_str = response.str();
+	string expiration;
+	string matched_grant_target;
+	FindTagContents(response_str, "AccessKeyId", 0, access_key_id);
+	FindTagContents(response_str, "SecretAccessKey", 0, secret_access_key);
+	FindTagContents(response_str, "SessionToken", 0, session_token);
+	FindTagContents(response_str, "Expiration", 0, expiration);
+	FindTagContents(response_str, "MatchedGrantTarget", 0, matched_grant_target);
+	timestamp_t expiration_ts;
+	bool has_offset;
+	string_t tz(nullptr, 0);
+	Timestamp::TryConvertTimestampTZ(expiration.c_str(), expiration.size(), expiration_ts, true, has_offset, tz);
+	expiration_ts -= 10 * 60 * 1000000; // 10 min buffer
+	AccessGrantsCache.Put(matched_grant_target, {.access_key_id = access_key_id, .secret_access_key = secret_access_key, .session_token = session_token, .expiration = expiration_ts});
+	return true;
+}
+
+void update_credentials_from_access_grants(HTTPParams &http_params, S3AuthParams &auth_params, const string& method, const string& url) {
+	if (!auth_params.s3_access_grants_enabled) {
+		return;
+	}
+
+	if (auth_params.region.empty()) {
+		throw Exception(ExceptionType::INVALID_CONFIGURATION, "You must specify a region");
+	}
+
+	string operation = "WRITE";
+	if (method == "GET" || method == "HEAD") {
+		operation = "READ";
+	}
+	string access_key_id, secret_access_key, session_token;
+	if (get_data_access(http_params, auth_params, operation, url, access_key_id, secret_access_key, session_token)) {
+		auth_params.access_key_id = access_key_id;
+		auth_params.secret_access_key = secret_access_key;
+		auth_params.session_token = session_token;
+	}
+
 }
 
 string S3FileSystem::UrlDecode(string input) {
@@ -165,6 +386,7 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 	this->SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR);
 	this->SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR);
 	this->SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR);
+	this->SetExtensionOptionValue("s3_access_grants_enabled", DUCKDB_S3_ACCESS_GRANTS_ENABLED_ENV_VAR);
 }
 
 S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
@@ -179,6 +401,7 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 	params.kms_key_id = DUCKDB_KMS_KEY_ID_ENV_VAR;
 	params.use_ssl = DUCKDB_USE_SSL_ENV_VAR;
 	params.requester_pays = DUCKDB_REQUESTER_PAYS_ENV_VAR;
+	params.s3_access_grants_enabled = DUCKDB_S3_ACCESS_GRANTS_ENABLED_ENV_VAR;
 
 	return params;
 }
@@ -226,6 +449,11 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 		result.endpoint = StringUtil::Format("s3.%s.amazonaws.com", result.region);
 	} else if (result.endpoint.empty()) {
 		result.endpoint = "s3.amazonaws.com";
+	}
+
+	Value value;
+	if (FileOpener::TryGetCurrentSetting(opener, "s3_access_grants_enabled", value)) {
+		result.s3_access_grants_enabled = value.GetValue<bool>();
 	}
 
 	return result;
@@ -741,6 +969,7 @@ unique_ptr<HTTPResponse> S3FileSystem::PostRequest(FileHandle &handle, string ur
 		headers["Content-Type"] = "application/octet-stream";
 	} else {
 		// Use existing S3 authentication
+		update_credentials_from_access_grants(handle.Cast<S3FileHandle>().http_params, auth_params, "POST", url);
 		auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
 		headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "POST", auth_params, "",
 		                           "", payload_hash, "application/octet-stream");
@@ -764,6 +993,7 @@ unique_ptr<HTTPResponse> S3FileSystem::PutRequest(FileHandle &handle, string url
 		headers["Content-Type"] = content_type;
 	} else {
 		// Use existing S3 authentication
+		update_credentials_from_access_grants(handle.Cast<S3FileHandle>().http_params, auth_params, "PUT", url);
 		auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
 		headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", auth_params, "",
 		                           "", payload_hash, content_type);
@@ -784,6 +1014,7 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, string s3
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
+		update_credentials_from_access_grants(handle.Cast<S3FileHandle>().http_params, auth_params, "HEAD", s3_url);
 		headers =
 		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "HEAD", auth_params, "", "", "", "");
 	}
@@ -803,6 +1034,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
+		update_credentials_from_access_grants(handle.Cast<S3FileHandle>().http_params, auth_params, "GET", s3_url);
 		headers =
 		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
@@ -823,6 +1055,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
+		update_credentials_from_access_grants(handle.Cast<S3FileHandle>().http_params, auth_params, "GET", s3_url);
 		headers =
 		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
@@ -842,6 +1075,7 @@ unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, string 
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
+		update_credentials_from_access_grants(handle.Cast<S3FileHandle>().http_params, auth_params, "DELETE", s3_url);
 		headers =
 		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "DELETE", auth_params, "", "", "", "");
 	}
@@ -872,7 +1106,6 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		ErrorData error(ex);
 		bool refreshed_secret = false;
 		if (error.Type() == ExceptionType::IO || error.Type() == ExceptionType::HTTP) {
-			// legacy endpoint (no region) returns 400
 			auto context = opener->TryGetClientContext();
 			if (context) {
 				auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*context);
@@ -888,13 +1121,9 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			auto &extra_info = error.ExtraInfo();
 			auto entry = extra_info.find("status_code");
 			if (entry != extra_info.end()) {
-				if (entry->second == "301" || entry->second == "400") {
-					auto new_region = extra_info.find("header_x-amz-bucket-region");
-					string correct_region = "";
-					if (new_region != extra_info.end()) {
-						correct_region = new_region->second;
-					}
-					auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params, correct_region);
+				if (entry->second == "400") {
+					// 400: BAD REQUEST
+					auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params);
 					throw Exception(error.Type(), error.RawMessage() + extra_text, extra_info);
 				}
 				if (entry->second == "403") {
@@ -1008,7 +1237,6 @@ void S3FileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx
 			FlushBuffer(s3fh, write_buffer);
 		}
 		s3fh.file_offset += bytes_to_write;
-		s3fh.length += bytes_to_write;
 		bytes_written += bytes_to_write;
 	}
 
@@ -1144,15 +1372,12 @@ bool S3FileSystem::ListFiles(const string &directory, const std::function<void(c
 	return true;
 }
 
-string S3FileSystem::GetS3BadRequestError(S3AuthParams &s3_auth_params, string correct_region) {
+string S3FileSystem::GetS3BadRequestError(S3AuthParams &s3_auth_params) {
 	string extra_text = "\n\nBad Request - this can be caused by the S3 region being set incorrectly.";
 	if (s3_auth_params.region.empty()) {
 		extra_text += "\n* No region is provided.";
 	} else {
-		extra_text += "\n* Provided region is: \"" + s3_auth_params.region + "\"";
-	}
-	if (!correct_region.empty()) {
-		extra_text += "\n* Correct region is: \"" + correct_region + "\"";
+		extra_text += "\n* Provided region is \"" + s3_auth_params.region + "\"";
 	}
 	return extra_text;
 }
@@ -1211,6 +1436,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 
 	return GetS3Error(s3_handle.auth_params, response, url);
 }
+
 string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
                                 string &continuation_token, optional_ptr<HTTPState> state, bool use_delimiter) {
 	auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
@@ -1259,23 +1485,6 @@ string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthPar
 	}
 
 	return response.str();
-}
-
-optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
-	string open_tag = "<" + tag + ">";
-	string close_tag = "</" + tag + ">";
-	auto open_tag_pos = response.find(open_tag, cur_pos);
-	if (open_tag_pos == string::npos) {
-		// tag not found
-		return optional_idx();
-	}
-	auto close_tag_pos = response.find(close_tag, open_tag_pos + open_tag.size());
-	if (close_tag_pos == string::npos) {
-		throw InternalException("Failed to parse S3 result: found open tag for %s but did not find matching close tag",
-		                        tag);
-	}
-	result = response.substr(open_tag_pos + open_tag.size(), close_tag_pos - open_tag_pos - open_tag.size());
-	return close_tag_pos + close_tag.size();
 }
 
 void AWSListObjectV2::ParseFileList(string &aws_response, vector<OpenFileInfo> &result) {
