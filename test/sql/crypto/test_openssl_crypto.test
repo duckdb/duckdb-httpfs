@@ -1,6 +1,6 @@
-# name: test/sql/attach/attach_encryption_fallback_readonly.test
+# name: test/sql/crypto/test_openssl_crypto.test
 # description: Test the openssl based crypto util
-# group: [attach]
+# group: [crypto]
 
 require httpfs
 
