@@ -145,6 +145,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// set pointer to OpenSSL encryption state
 	config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
 #endif // OVERRIDE_ENCRYPTION_UTILS
+	config.AddExtensionOption("overide_request_method_to_get", "test setting. remove before merging.",
+						  LogicalType::BOOLEAN, Value(false));
 }
 void HttpfsExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);

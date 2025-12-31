@@ -1,0 +1,56 @@
+# name: test/sql/curl_client/test_load_other_extensions.test
+# description: when using the curl client, test loading other extensions
+# group: [curl_client]
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+require httpfs
+
+require parquet
+
+statement ok
+SET enable_logging=true
+
+statement ok
+set s3_use_ssl='${DUCKDB_S3_USE_SSL}'
+
+statement ok
+set s3_endpoint='${DUCKDB_S3_ENDPOINT}'
+
+statement ok
+set s3_region='${AWS_DEFAULT_REGION}'
+
+# Create some test data
+statement ok
+CREATE SECRET s1 (
+    TYPE S3,
+    KEY_ID '${AWS_ACCESS_KEY_ID}',
+    SECRET '${AWS_SECRET_ACCESS_KEY}',
+    REQUESTER_PAYS true
+)
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+SET override_http_request_method=true; # Do I really want to do it like this? Can I not pass HTTPParams?
+
+statement ok
+copy (select random() as a FROM range(8000000)) to 's3://test-bucket/test-file2.csv'
+
+query I
+select request.type FROM duckdb_logs_parsed('HTTP')
+----
+POST
+PUT
+PUT
+POST

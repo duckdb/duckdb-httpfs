@@ -3,6 +3,7 @@
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
+#include "duckdb/common/http_util.hpp"
 #include <curl/curl.h>
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
@@ -348,7 +349,11 @@ public:
 		CURLcode res;
 		{
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
-			curl_easy_setopt(*curl, CURLOPT_POST, 1L);
+			if (info.type == RequestType::POST_REQUEST) {
+				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
+			} else if (info.type == RequestType::GET_REQUEST) {
+				curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "GET");
+			}
 
 			// Set POST body
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
