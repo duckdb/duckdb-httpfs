@@ -42,7 +42,7 @@ statement ok
 CALL enable_logging('HTTP');
 
 statement ok
-SET override_http_request_method=true; # Do I really want to do it like this? Can I not pass HTTPParams?
+SET override_request_method_to_get=true;
 
 statement ok
 copy (select random() as a FROM range(8000000)) to 's3://test-bucket/test-file2.csv'
