@@ -183,32 +183,6 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 	return params;
 }
 
-// SettingLookupResult S3AuthParams::SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
-//                                                   string setting_name, string &result) {
-// 	Value use_env_vars_for_secret_info_setting;
-// 	secret_reader.TryGetSecretKeyOrSetting("auto_fetch_secret_info_from_env", "auto_fetch_secret_info_from_env",
-// 	                                       use_env_vars_for_secret_info_setting);
-// 	auto use_env_vars_for_secrets = use_env_vars_for_secret_info_setting.GetValue<bool>();
-//
-// 	auto option_scope = secret_reader.TryGetSecretKeyOrSetting(secret_option, setting_name, result);
-// 	// if option scope is global, that means it was set in the environment
-// 	if (!result.empty() && option_scope.GetScope() == SettingScope::GLOBAL && !use_env_vars_for_secrets) {
-// 		result = "";
-// 	}
-// 	return option_scope;
-// }
-//
-// SettingLookupResult S3AuthParams::SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
-//                                                   string setting_name, bool &result) {
-// 	Value use_env_vars_for_secret_info_setting;
-// 	secret_reader.TryGetSecretKeyOrSetting("auto_fetch_secret_info_from_env", "auto_fetch_secret_info_from_env",
-// 	                                       use_env_vars_for_secret_info_setting);
-// 	auto use_env_vars_for_secrets = use_env_vars_for_secret_info_setting.GetValue<bool>();
-//
-// 	auto option_scope = secret_reader.TryGetSecretKeyOrSetting(secret_option, setting_name, result);
-// 	return option_scope;
-// }
-
 S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
 	auto result = S3AuthParams();
 
@@ -232,7 +206,7 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays", result.requester_pays);
 	// Endpoint and url style are slightly more complex and require special handling for gcs and r2
 	auto endpoint_result = secret_reader.TryGetSecretKeyOrSetting("endpoint", "s3_endpoint", result.endpoint);
-	auto url_style_result = secret_reader.TryGetSecretKeyOrSetting("url_sxstyle", "s3_url_style", result.url_style);
+	auto url_style_result = secret_reader.TryGetSecretKeyOrSetting("url_style", "s3_url_style", result.url_style);
 
 	if (StringUtil::StartsWith(info.file_path, "gcs://") || StringUtil::StartsWith(info.file_path, "gs://")) {
 		// For GCS urls we force the endpoint and vhost path style, allowing only to be overridden by secrets
