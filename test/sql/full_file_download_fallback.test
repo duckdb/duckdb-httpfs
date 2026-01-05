@@ -32,7 +32,7 @@ pragma tpch(6);
 123141078.22829981
 
 query I
-select count(*) from duckdb_logs where log_level='WARN' and message like '%Falling back to full%'
+select count(*) from duckdb_logs where log_level='WARNING' and message like '%Falling back to full%'
 ----
 2
 
