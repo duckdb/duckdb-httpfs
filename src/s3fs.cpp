@@ -183,31 +183,31 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 	return params;
 }
 
-SettingLookupResult S3AuthParams::SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
-                                                  string setting_name, string &result) {
-	Value use_env_vars_for_secret_info_setting;
-	secret_reader.TryGetSecretKeyOrSetting("auto_fetch_secret_info_from_env", "auto_fetch_secret_info_from_env",
-	                                       use_env_vars_for_secret_info_setting);
-	auto use_env_vars_for_secrets = use_env_vars_for_secret_info_setting.GetValue<bool>();
-
-	auto option_scope = secret_reader.TryGetSecretKeyOrSetting(secret_option, setting_name, result);
-	// if option scope is global, that means it was set in the environment
-	if (!result.empty() && option_scope.GetScope() == SettingScope::GLOBAL && !use_env_vars_for_secrets) {
-		result = "";
-	}
-	return option_scope;
-}
-
-SettingLookupResult S3AuthParams::SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
-                                                  string setting_name, bool &result) {
-	Value use_env_vars_for_secret_info_setting;
-	secret_reader.TryGetSecretKeyOrSetting("auto_fetch_secret_info_from_env", "auto_fetch_secret_info_from_env",
-	                                       use_env_vars_for_secret_info_setting);
-	auto use_env_vars_for_secrets = use_env_vars_for_secret_info_setting.GetValue<bool>();
-
-	auto option_scope = secret_reader.TryGetSecretKeyOrSetting(secret_option, setting_name, result);
-	return option_scope;
-}
+// SettingLookupResult S3AuthParams::SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
+//                                                   string setting_name, string &result) {
+// 	Value use_env_vars_for_secret_info_setting;
+// 	secret_reader.TryGetSecretKeyOrSetting("auto_fetch_secret_info_from_env", "auto_fetch_secret_info_from_env",
+// 	                                       use_env_vars_for_secret_info_setting);
+// 	auto use_env_vars_for_secrets = use_env_vars_for_secret_info_setting.GetValue<bool>();
+//
+// 	auto option_scope = secret_reader.TryGetSecretKeyOrSetting(secret_option, setting_name, result);
+// 	// if option scope is global, that means it was set in the environment
+// 	if (!result.empty() && option_scope.GetScope() == SettingScope::GLOBAL && !use_env_vars_for_secrets) {
+// 		result = "";
+// 	}
+// 	return option_scope;
+// }
+//
+// SettingLookupResult S3AuthParams::SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
+//                                                   string setting_name, bool &result) {
+// 	Value use_env_vars_for_secret_info_setting;
+// 	secret_reader.TryGetSecretKeyOrSetting("auto_fetch_secret_info_from_env", "auto_fetch_secret_info_from_env",
+// 	                                       use_env_vars_for_secret_info_setting);
+// 	auto use_env_vars_for_secrets = use_env_vars_for_secret_info_setting.GetValue<bool>();
+//
+// 	auto option_scope = secret_reader.TryGetSecretKeyOrSetting(secret_option, setting_name, result);
+// 	return option_scope;
+// }
 
 S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
 	auto result = S3AuthParams();
@@ -218,21 +218,21 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	}
 
 	const char *secret_types[] = {"s3", "r2", "gcs", "aws"};
-	KeyValueSecretReader secret_reader(*opener, info, secret_types, 3);
+	HttpfsKeyValueReader secret_reader(*opener, info, secret_types, 3);
 
 	// These settings we just set or leave to their S3AuthParams default value
-	S3AuthParams::SetSecretOption(secret_reader, "key_id", "s3_access_key_id", result.access_key_id);
-	S3AuthParams::SetSecretOption(secret_reader, "secret", "s3_secret_access_key", result.secret_access_key);
-	S3AuthParams::SetSecretOption(secret_reader, "session_token", "s3_session_token", result.session_token);
-	S3AuthParams::SetSecretOption(secret_reader, "region", "s3_region", result.region);
-	S3AuthParams::SetSecretOption(secret_reader, "use_ssl", "s3_use_ssl", result.use_ssl);
-	S3AuthParams::SetSecretOption(secret_reader, "kms_key_id", "s3_kms_key_id", result.kms_key_id);
-	S3AuthParams::SetSecretOption(secret_reader, "s3_url_compatibility_mode", "s3_url_compatibility_mode",
-	                              result.s3_url_compatibility_mode);
-	S3AuthParams::SetSecretOption(secret_reader, "requester_pays", "s3_requester_pays", result.requester_pays);
+	secret_reader.TryGetSecretKeyOrSetting("key_id", "s3_access_key_id", result.access_key_id);
+	secret_reader.TryGetSecretKeyOrSetting("secret", "s3_secret_access_key", result.secret_access_key);
+	secret_reader.TryGetSecretKeyOrSetting("session_token", "s3_session_token", result.session_token);
+	secret_reader.TryGetSecretKeyOrSetting("region", "s3_region", result.region);
+	secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", result.use_ssl);
+	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", result.kms_key_id);
+	secret_reader.TryGetSecretKeyOrSetting("s3_url_compatibility_mode", "s3_url_compatibility_mode",
+	                                       result.s3_url_compatibility_mode);
+	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays", result.requester_pays);
 	// Endpoint and url style are slightly more complex and require special handling for gcs and r2
-	auto endpoint_result = SetSecretOption(secret_reader, "endpoint", "s3_endpoint", result.endpoint);
-	auto url_style_result = SetSecretOption(secret_reader, "url_style", "s3_url_style", result.url_style);
+	auto endpoint_result = secret_reader.TryGetSecretKeyOrSetting("endpoint", "s3_endpoint", result.endpoint);
+	auto url_style_result = secret_reader.TryGetSecretKeyOrSetting("url_sxstyle", "s3_url_style", result.url_style);
 
 	if (StringUtil::StartsWith(info.file_path, "gcs://") || StringUtil::StartsWith(info.file_path, "gs://")) {
 		// For GCS urls we force the endpoint and vhost path style, allowing only to be overridden by secrets

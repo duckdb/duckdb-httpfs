@@ -6,6 +6,10 @@ require parquet
 
 require httpfs
 
+# should only run in CI when the test server is available.
+# then we have access to invalid AWS ACCESS KEYS and SECRET KEYS
+require-env S3_TEST_SERVER_AVAILABLE 1
+
 require-env AWS_ACCESS_KEY_ID
 
 require-env AWS_SECRET_ACCESS_KEY

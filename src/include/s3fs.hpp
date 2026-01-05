@@ -35,10 +35,10 @@ struct S3AuthParams {
 
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
 	//! Helper for creating secrets that should/should not inherit environment variable settings
-	static SettingLookupResult SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
-	                                           string setting_name, string &result);
-	static SettingLookupResult SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
-	                                           string setting_name, bool &result);
+	// static SettingLookupResult SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
+	//                                            string setting_name, string &result);
+	// static SettingLookupResult SetSecretOption(KeyValueSecretReader &secret_reader, string secret_option,
+	//                                            string setting_name, bool &result);
 };
 
 struct AWSEnvironmentCredentialsProvider {
