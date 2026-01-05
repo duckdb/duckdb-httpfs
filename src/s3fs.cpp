@@ -192,7 +192,7 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	}
 
 	const char *secret_types[] = {"s3", "r2", "gcs", "aws"};
-	HttpfsKeyValueReader secret_reader(*opener, info, secret_types, 3);
+	S3KeyValueReader secret_reader(*opener, info, secret_types, 3);
 
 	// These settings we just set or leave to their S3AuthParams default value
 	secret_reader.TryGetSecretKeyOrSetting("key_id", "s3_access_key_id", result.access_key_id);
@@ -1373,6 +1373,15 @@ vector<string> AWSListObjectV2::ParseCommonPrefix(string &aws_response) {
 		}
 	}
 	return s3_prefixes;
+}
+
+S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
+                                   idx_t secret_types_len)
+    : reader(opener_p, info, secret_types, secret_types_len) {
+	Value use_env_vars_for_secret_info_setting;
+	reader.TryGetSecretKeyOrSetting("auto_fetch_secret_info_from_env", "auto_fetch_secret_info_from_env",
+	                                use_env_vars_for_secret_info_setting);
+	use_env_variables_for_secret_settings = use_env_vars_for_secret_info_setting.GetValue<bool>();
 }
 
 } // namespace duckdb
