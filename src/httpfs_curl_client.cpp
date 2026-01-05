@@ -352,7 +352,7 @@ public:
 			if (info.type == RequestType::POST_REQUEST) {
 				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
 			} else if (info.type == RequestType::GET_REQUEST) {
-				curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "GET");
+				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "GET");
 			}
 
 			// Set POST body
