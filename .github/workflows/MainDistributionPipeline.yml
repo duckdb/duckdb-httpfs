@@ -18,7 +18,7 @@ jobs:
     with:
       extension_name: httpfs
       duckdb_version: main
-      ci_tools_version: v1.4.3
+      ci_tools_version: main
 
 
   duckdb-stable-deploy:
@@ -29,6 +29,6 @@ jobs:
     with:
       extension_name: httpfs
       duckdb_version: main
-      ci_tools_version: v1.4.3
+      ci_tools_version: main
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
