@@ -349,10 +349,11 @@ public:
 		CURLcode res;
 		{
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
-			if (info.type == RequestType::POST_REQUEST) {
+			string custom_request_method = info.params.custom_request_method;
+			if (custom_request_method.empty()) {
 				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
-			} else if (info.type == RequestType::GET_REQUEST) {
-				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "GET");
+			} else {
+				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, custom_request_method.c_str());
 			}
 
 			// Set POST body
