@@ -28,9 +28,9 @@
 
 namespace duckdb {
 
-static HTTPHeaders create_s3_header(string url, string query, string host, string service, string method,
-                                    const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
-                                    string payload_hash = "", string content_type = "") {
+HTTPHeaders CreateS3Header(string url, string query, string host, string service, string method,
+                             const S3AuthParams &auth_params, string date_now, string datetime_now, string payload_hash,
+                             string content_type) {
 
 	HTTPHeaders res;
 	res["Host"] = host;
@@ -184,15 +184,20 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 }
 
 S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
-	auto result = S3AuthParams();
 
 	// Without a FileOpener we can not access settings nor secrets: return empty auth params
 	if (!opener) {
-		return result;
+		return {};
 	}
 
 	const char *secret_types[] = {"s3", "r2", "gcs", "aws"};
 	KeyValueSecretReader secret_reader(*opener, info, secret_types, 3);
+
+	return ReadFrom(secret_reader, info.file_path);
+}
+
+S3AuthParams S3AuthParams::ReadFrom(KeyValueSecretReader &secret_reader, const std::string &file_path) {
+	auto result = S3AuthParams();
 
 	// These settings we just set or leave to their S3AuthParams default value
 	secret_reader.TryGetSecretKeyOrSetting("region", "s3_region", result.region);
@@ -210,7 +215,7 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	auto endpoint_result = secret_reader.TryGetSecretKeyOrSetting("endpoint", "s3_endpoint", result.endpoint);
 	auto url_style_result = secret_reader.TryGetSecretKeyOrSetting("url_style", "s3_url_style", result.url_style);
 
-	if (StringUtil::StartsWith(info.file_path, "gcs://") || StringUtil::StartsWith(info.file_path, "gs://")) {
+	if (StringUtil::StartsWith(file_path, "gcs://") || StringUtil::StartsWith(file_path, "gs://")) {
 		// For GCS urls we force the endpoint and vhost path style, allowing only to be overridden by secrets
 		if (result.endpoint.empty() || endpoint_result.GetScope() != SettingScope::SECRET) {
 			result.endpoint = "storage.googleapis.com";
@@ -749,7 +754,7 @@ unique_ptr<HTTPResponse> S3FileSystem::PostRequest(FileHandle &handle, string ur
 	} else {
 		// Use existing S3 authentication
 		auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
-		headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "POST", auth_params, "",
+		headers = CreateS3Header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "POST", auth_params, "",
 		                           "", payload_hash, "application/octet-stream");
 	}
 
@@ -772,7 +777,7 @@ unique_ptr<HTTPResponse> S3FileSystem::PutRequest(FileHandle &handle, string url
 	} else {
 		// Use existing S3 authentication
 		auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
-		headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", auth_params, "",
+		headers = CreateS3Header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", auth_params, "",
 		                           "", payload_hash, content_type);
 	}
 
@@ -792,7 +797,7 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, string s3
 	} else {
 		// Use existing S3 authentication
 		headers =
-		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "HEAD", auth_params, "", "", "", "");
+		    CreateS3Header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "HEAD", auth_params, "", "", "", "");
 	}
 
 	return HTTPFileSystem::HeadRequest(handle, http_url, headers);
@@ -811,7 +816,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 	} else {
 		// Use existing S3 authentication
 		headers =
-		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
+		    CreateS3Header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
 
 	return HTTPFileSystem::GetRequest(handle, http_url, headers);
@@ -831,7 +836,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 	} else {
 		// Use existing S3 authentication
 		headers =
-		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
+		    CreateS3Header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
 
 	return HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);
@@ -850,7 +855,7 @@ unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, string 
 	} else {
 		// Use existing S3 authentication
 		headers =
-		    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "DELETE", auth_params, "", "", "", "");
+		    CreateS3Header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "DELETE", auth_params, "", "", "", "");
 	}
 
 	return HTTPFileSystem::DeleteRequest(handle, http_url, headers);
@@ -1238,7 +1243,7 @@ string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthPar
 	string listobjectv2_url = req_path + "?" + req_params;
 
 	auto header_map =
-	    create_s3_header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
+	    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
 
 	// Get requests use fresh connection
 	string full_host = parsed_url.http_proto + parsed_url.host;
