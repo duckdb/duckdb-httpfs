@@ -100,7 +100,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::BOOLEAN, Value(true));
 
 	config.AddExtensionOption("override_request_method_to_get", "test option",
-	                          LogicalType::BOOLEAN, Value(false));
+	                          LogicalType::VARCHAR, Value(false));
 
 	auto callback_httpfs_client_implementation = [](ClientContext &context, SetScope scope, Value &parameter) {
 		auto &config = DBConfig::GetConfig(context);
@@ -148,8 +148,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// set pointer to OpenSSL encryption state
 	config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
 #endif // OVERRIDE_ENCRYPTION_UTILS
-	config.AddExtensionOption("custom_request_method", "test setting. remove before merging.",
-						  LogicalType::VARCHAR, Value(""));
 }
 void HttpfsExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
