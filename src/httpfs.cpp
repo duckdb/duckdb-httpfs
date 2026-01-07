@@ -616,7 +616,7 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	// attempt to download the full file and retry.
 
 	if (handle.logger) {
-		DUCKDB_LOG_WARN(handle.logger,
+		DUCKDB_LOG_WARNING(handle.logger,
 		                "Falling back to full file download for file '%s': the server does not support HTTP range "
 		                "requests. Performance and memory usage are potentially degraded.",
 		                handle.path);
