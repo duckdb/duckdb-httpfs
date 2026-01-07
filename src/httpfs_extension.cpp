@@ -62,6 +62,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "http_keep_alive",
 	    "Keep alive connections. Setting this to false can help when running into connection failures",
 	    LogicalType::BOOLEAN, Value(true));
+	config.AddExtensionOption("allow_asterisks_in_http_paths", "Allow '*' character in URLs users can query",
+	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("enable_curl_server_cert_verification",
 	                          "Enable server side certificate verification for CURL backend.", LogicalType::BOOLEAN,
 	                          Value(true));

@@ -139,6 +139,14 @@ public:
 	static bool TryParseLastModifiedTime(const string &timestamp, timestamp_t &result);
 
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override {
+		if (path.find('*') != std::string::npos && opener) {
+			Value setting_val;
+			if (FileOpener::TryGetCurrentSetting(opener, "allow_asterisks_in_http_paths", setting_val) &&
+			    !setting_val.GetValue<bool>()) {
+				throw InvalidInputException("Globs (`*`) for generic HTTP file is are not supported.\nConsider `SET "
+				                            "allow_asterisks_in_http_paths = true;` to allow this behaviour");
+			}
+		}
 		return {path}; // FIXME
 	}
 
