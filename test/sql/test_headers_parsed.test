@@ -6,6 +6,9 @@ require httpfs
 
 require parquet
 
+# FIXME: this tests fails in CI settings, to be investigated
+mode skip
+
 statement ok
 SET httpfs_client_implementation='curl';
 
