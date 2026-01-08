@@ -18,6 +18,9 @@ require httpfs
 require parquet
 
 statement ok
+SET httpfs_client_implementation='curl';
+
+statement ok
 SET enable_logging=true
 
 statement ok
@@ -42,7 +45,7 @@ statement ok
 CALL enable_logging('HTTP');
 
 statement ok
-SET override_request_method_to_get=true;
+SET custom_request_method='GET';
 
 statement ok
 copy (select random() as a FROM range(8000000)) to 's3://test-bucket/test-file2.csv'

@@ -99,8 +99,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("merge_http_secret_into_s3_request", "Merges http secret params into S3 requests",
 	                          LogicalType::BOOLEAN, Value(true));
 
-	config.AddExtensionOption("override_request_method_to_get", "test option",
-	                          LogicalType::VARCHAR, Value(false));
+	config.AddExtensionOption("custom_request_method", "test option",
+	                          LogicalType::VARCHAR);
 
 	auto callback_httpfs_client_implementation = [](ClientContext &context, SetScope scope, Value &parameter) {
 		auto &config = DBConfig::GetConfig(context);
