@@ -1,0 +1,44 @@
+# name: test/sql/httpfs/curl_space_encoding.test
+# description: This is part of url_encode.test to test space encoding with curl
+# group: [httpfs]
+
+require parquet
+
+require httpfs
+
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+# Require that these environment variables are also set
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
+set ignore_error_messages
+
+statement ok
+CREATE TABLE test_1 as (SELECT 1 FROM range(0,5));
+
+statement ok
+SET httpfs_client_implementation = curl
+
+foreach prefix s3:// r2:// s3a:// s3n://
+
+statement ok
+COPY test_1 TO '${prefix}test-bucket-public/url_encode/just because you can doesnt mean you should.parquet' (FORMAT 'parquet');
+
+# For HTTP urls, we also allow regular spaces, which will get encoded to %20 by duckdb
+query I
+SELECT * FROM "http://test-bucket-public.${DUCKDB_S3_ENDPOINT}/url_encode/just because you can doesnt mean you should.parquet" LIMIT 1;
+----
+1
+
+
+endloop
