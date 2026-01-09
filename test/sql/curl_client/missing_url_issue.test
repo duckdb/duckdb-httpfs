@@ -1,0 +1,16 @@
+# name: test/sql/curl_client/missing_url_issue.test
+# description: curl requires a full url to do a request, while httplib reconstructs it from components (hots, path, query)
+# group: [httpfs]
+
+require httpfs
+
+require parquet
+
+statement ok
+SET httpfs_client_implementation = curl;
+
+statement ok
+SET s3_region='us-west-2';
+
+statement ok
+SELECT * FROM read_parquet('s3://overturemaps-us-west-2/release/2025-12-17.0/theme=places/type=place/*.parquet') LIMIT 10
