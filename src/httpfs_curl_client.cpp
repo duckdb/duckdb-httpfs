@@ -168,7 +168,7 @@ public:
 
 		if (!http_params.http_proxy.empty()) {
 			curl_easy_setopt(*curl, CURLOPT_PROXY,
-			                 StringUtil::Format("%s:%s", http_params.http_proxy, http_params.http_proxy_port).c_str());
+			                 StringUtil::Format("%s:%d", http_params.http_proxy, http_params.http_proxy_port).c_str());
 
 			if (!http_params.http_proxy_username.empty()) {
 				curl_easy_setopt(*curl, CURLOPT_PROXYUSERNAME, http_params.http_proxy_username.c_str());
