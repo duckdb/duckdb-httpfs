@@ -6,6 +6,11 @@ require parquet
 
 require httpfs
 
+# FIXME: make it work with curl
+
+statement ok
+SET httpfs_client_implementation = httplib
+
 # FIXME: currently this will not fail the Linux HTTPFS ci job if it fails, because it might do so due to networking issues
 #        however having a CI job dedicated to remote tests that may spuriously fail would solve this
 
