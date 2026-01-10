@@ -4,6 +4,7 @@
 
 #include "duckdb/common/http_util.hpp"
 
+#include <curl/curl.h>
 namespace duckdb {
 class HTTPLogger;
 class FileOpener;
