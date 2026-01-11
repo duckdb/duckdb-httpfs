@@ -1005,7 +1005,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 		const auto &url_info = url_info_by_bucket[bucket];
 
 		for (idx_t batch_start = 0; batch_start < keys.size(); batch_start += MAX_KEYS_PER_REQUEST) {
-			idx_t batch_end = MinValue(batch_start + MAX_KEYS_PER_REQUEST, keys.size());
+			idx_t batch_end = MinValue<idx_t>(batch_start + MAX_KEYS_PER_REQUEST, keys.size());
 
 			std::stringstream xml_body;
 			xml_body << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
@@ -1031,8 +1031,8 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 			string http_query_param = "delete=";
 			auto payload_hash = GetPayloadHash(const_cast<char *>(body.data()), body.length());
 
-			auto headers = create_s3_header(url_info.path, http_query_param, url_info.host, "s3", "POST",
-			                                url_info.auth_params, "", "", payload_hash, "application/xml");
+			auto headers = CreateS3Header(url_info.path, http_query_param, url_info.host, "s3", "POST",
+			                              url_info.auth_params, "", "", payload_hash, "application/xml");
 			headers["Content-MD5"] = content_md5;
 			headers["Content-Type"] = "application/xml";
 
