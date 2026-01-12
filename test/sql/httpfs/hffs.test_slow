@@ -7,6 +7,7 @@ require parquet
 require httpfs
 
 # FIXME: make it work with curl
+# Error message: IO Error: No files found that match the pattern "hf://datasets/samansmink/duckdb_ci_tests/hive_data/part=[b]/**/*.parquet"
 
 statement ok
 SET httpfs_client_implementation = httplib

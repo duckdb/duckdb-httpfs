@@ -24,6 +24,7 @@ require-env DUCKDB_S3_USE_SSL
 set ignore_error_messages
 
 # FIXME: make it work with curl
+# Error message: IO Error: URL using bad/illegal format or missing URL error for HTTP HEAD to 'http://test-bucket-public.duckdb-minio.com:9000/url_encode/just because you can doesnt mean you should.parquet'
 
 statement ok
 SET httpfs_client_implementation = httplib
