@@ -348,22 +348,20 @@ public:
 
 		CURLcode res;
 		{
+			// turn on curl logs
+ 			curl_easy_setopt(*curl, CURLOPT_DEBUGFUNCTION, my_trace);
+			curl_easy_setopt(*curl, CURLOPT_VERBOSE, 1L);
+
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
-			string custom_request_method = info.params.custom_request_method;
 
-			if (custom_request_method.empty()) {
-				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
-				// Set POST body
-				curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
-				curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, info.buffer_in_len);
+			if (info.params.send_post_as_get_request) {
+				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, 'GET');
 			} else {
-				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, custom_request_method.c_str()); // TODO:
-				// Set POST body
-				curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
-				curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, info.buffer_in_len);
+				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
 			}
-
-
+			// Set POST body
+			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
+			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, info.buffer_in_len);
 
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);

@@ -110,14 +110,6 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 		}
 	}
 
-	// initialize override test config param
-	Value custom_request_method;
-	FileOpener::TryGetCurrentSetting(opener, "custom_request_method",
-									 custom_request_method);
-	if (!custom_request_method.IsNull()) {
-		result->custom_request_method = custom_request_method.GetValue<string>();
-	}
-
 	return std::move(result);
 }
 
