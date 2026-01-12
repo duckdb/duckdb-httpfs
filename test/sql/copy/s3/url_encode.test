@@ -23,12 +23,6 @@ require-env DUCKDB_S3_USE_SSL
 # override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
 set ignore_error_messages
 
-# FIXME: make it work with curl
-# Error message: IO Error: URL using bad/illegal format or missing URL error for HTTP HEAD to 'http://test-bucket-public.duckdb-minio.com:9000/url_encode/just because you can doesnt mean you should.parquet'
-
-statement ok
-SET httpfs_client_implementation = httplib
-
 statement ok
 CREATE TABLE test_1 as (SELECT 1 FROM range(0,5));
 CREATE TABLE test_2 as (SELECT 2 FROM range(0,5));
@@ -124,7 +118,7 @@ set s3_endpoint='s3.some.random.endpoint.com';
 statement error
 SELECT * FROM '${prefix}test-bucket/whatever.parquet';
 ----
-Could not establish connection error for HTTP HEAD to 'http://test-bucket.s3.some.random.endpoint.com/whatever.parquet'
+<REGEX>:.*IO Error.*Could not.*error for HTTP HEAD to.*
 
 statement ok
 set s3_endpoint='${DUCKDB_S3_ENDPOINT}'
