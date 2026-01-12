@@ -3,7 +3,6 @@
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
-#include "duckdb/common/http_util.hpp"
 #include <curl/curl.h>
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
