@@ -128,7 +128,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	};
 	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
 	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
-	config.AddExtensionOption("disable_global_s3_configuration",
+	config.AddExtensionOption("enable_global_s3_configuration",
 	                          "Automatically fetch AWS credentials from environment variables.", LogicalType::BOOLEAN,
 	                          Value::BOOLEAN(true));
 
