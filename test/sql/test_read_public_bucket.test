@@ -34,7 +34,7 @@ SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/par
 
 # default to not using globally scoped settings for secrets
 statement ok
-set disable_global_s3_configuration=false;
+set enable_global_s3_configuration=false;
 
 statement ok
 SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
