@@ -328,7 +328,7 @@ string S3FileSystem::InitializeMultipartUpload(S3FileHandle &file_handle) {
 	auto res = s3fs.PostRequest(file_handle, file_handle.path, {}, result, nullptr, 0, query_param);
 
 	if (res->status != HTTPStatusCode::OK_200) {
-		throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %d)", res->url, res->GetError(),
+		throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %d)", file_handle.path, res->GetError(),
 		                    static_cast<int>(res->status));
 	}
 
@@ -384,7 +384,7 @@ void S3FileSystem::UploadBufferImplementation(S3FileHandle &file_handle, shared_
 		                      query_param);
 
 		if (res->status != HTTPStatusCode::OK_200) {
-			throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %d)", res->url, res->GetError(),
+			throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %d)", file_handle.path, res->GetError(),
 			                    static_cast<int>(res->status));
 		}
 

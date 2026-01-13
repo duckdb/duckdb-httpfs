@@ -125,4 +125,4 @@ Could not establish connection error for HTTP HEAD to 'http://test-bucket-public
 statement error
 SELECT * FROM parquet_scan('s3://this-aint-no-bucket/no-path/no-file');
 ----
-Unable to connect to URL "http://
+Unable to connect to URL "s3://this-aint-no-bucket/no-path/no-file"
