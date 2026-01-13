@@ -168,7 +168,7 @@ public:
 
 		if (!http_params.http_proxy.empty()) {
 			curl_easy_setopt(*curl, CURLOPT_PROXY,
-			                 StringUtil::Format("%s:%s", http_params.http_proxy, http_params.http_proxy_port).c_str());
+			                 StringUtil::Format("%s:%d", http_params.http_proxy, http_params.http_proxy_port).c_str());
 
 			if (!http_params.http_proxy_username.empty()) {
 				curl_easy_setopt(*curl, CURLOPT_PROXYUSERNAME, http_params.http_proxy_username.c_str());
@@ -179,6 +179,15 @@ public:
 
 	~HTTPFSCurlClient() {
 		DestroyCurlGlobal();
+	}
+
+	static string EncodeSpaces(const string &url) {
+		string out;
+		out.reserve(url.size());
+		for (char c : url) {
+			out += (c == ' ') ? "%20" : string(1, c);
+		}
+		return out;
 	}
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
@@ -197,7 +206,8 @@ public:
 		{
 			// If the same handle served a HEAD request, we must set NOBODY back to 0L to request content again
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
-			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
+			auto encoded_url = EncodeSpaces(request_info->url);
+			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 			res = curl->Execute();
 		}
@@ -242,7 +252,8 @@ public:
 
 		CURLcode res;
 		{
-			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
+			auto encoded_url = EncodeSpaces(request_info->url);
+			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
 			// Perform PUT
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "PUT");
 			// Include PUT body
@@ -276,7 +287,8 @@ public:
 		CURLcode res;
 		{
 			// Set URL
-			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
+			auto encoded_url = EncodeSpaces(request_info->url);
+			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
 
 			// Perform HEAD request instead of GET
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
@@ -309,7 +321,8 @@ public:
 		CURLcode res;
 		{
 			// Set URL
-			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
+			auto encoded_url = EncodeSpaces(request_info->url);
+			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
 
 			// Set DELETE request method
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "DELETE");
@@ -347,7 +360,8 @@ public:
 
 		CURLcode res;
 		{
-			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
+			auto encoded_url = EncodeSpaces(request_info->url);
+			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
 			curl_easy_setopt(*curl, CURLOPT_POST, 1L);
 
 			// Set POST body
@@ -421,6 +435,7 @@ private:
 		}
 		response->body = request_info->body;
 		response->url = request_info->url;
+		response->reason = HTTPUtil::GetStatusMessage(HTTPUtil::ToStatusCode(request_info->response_code));
 		if (!request_info->header_collection.empty()) {
 			for (auto &header : request_info->header_collection.back()) {
 				response->headers.Insert(header.first, header.second);
