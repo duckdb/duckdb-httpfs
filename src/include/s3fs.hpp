@@ -290,5 +290,4 @@ struct AWSListObjectV2 {
 HTTPHeaders CreateS3Header(string url, string query, string host, string service, string method,
                            const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
                            string payload_hash = "", string content_type = "");
-
 } // namespace duckdb
