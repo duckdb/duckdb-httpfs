@@ -362,7 +362,6 @@ public:
 		{
 			auto encoded_url = EncodeSpaces(request_info->url);
 			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
-
 			if (info.send_post_as_get_request) {
 				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "GET");
 			} else {
