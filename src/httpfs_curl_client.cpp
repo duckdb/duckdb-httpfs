@@ -195,12 +195,8 @@ public:
 			state->get_count++;
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		request_info->url = info.url;
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -240,15 +236,11 @@ public:
 			state->total_bytes_sent += info.buffer_in_len;
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		// Add content type header from info
 		curl_headers.Add("Content-Type: " + info.content_type);
 		// transform parameters
 		request_info->url = info.url;
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -276,13 +268,9 @@ public:
 			state->head_count++;
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		request_info->url = info.url;
 		// transform parameters
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -310,13 +298,9 @@ public:
 			state->delete_count++;
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		// transform parameters
 		request_info->url = info.url;
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -348,15 +332,11 @@ public:
 			state->total_bytes_sent += info.buffer_in_len;
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers);
+		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		const string content_type = "Content-Type: application/octet-stream";
 		curl_headers.Add(content_type.c_str());
 		// transform parameters
 		request_info->url = info.url;
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -385,7 +365,9 @@ public:
 	}
 
 private:
-	CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map) {
+	CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
+		auto &httpfs_params = params.Cast<HTTPFSParams>();
+
 		std::vector<std::string> headers;
 		for (auto &entry : header_map) {
 			const std::string new_header = entry.first + ": " + entry.second;
@@ -395,23 +377,12 @@ private:
 		for (auto &header : headers) {
 			curl_headers.Add(header);
 		}
-		return curl_headers;
-	}
-
-	string TransformParamsCurl(const HTTPParams &params) {
-		string result = "";
-		unordered_map<string, string> escaped_params;
-		bool first_param = true;
-		for (auto &entry : params.extra_headers) {
-			const string key = entry.first;
-			const string value = curl_easy_escape(*curl, entry.second.c_str(), 0);
-			if (!first_param) {
-				result += "&";
+		if (!httpfs_params.pre_merged_headers) {
+			for (auto &entry : params.extra_headers) {
+				curl_headers.Add(entry.first + ": " + entry.second);
 			}
-			result += key + "=" + value;
-			first_param = false;
 		}
-		return result;
+		return curl_headers;
 	}
 
 	void ResetRequestInfo() {
