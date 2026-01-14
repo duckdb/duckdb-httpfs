@@ -189,6 +189,7 @@ case_insensitive_map_t<string> AWSEnvironmentCredentialsProvider::SetAll() {
 	SetValue("s3_kms_key_id", set_val, ret);
 	set_val = SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR);
 	SetValue("s3_requester_pays", set_val, ret);
+	return ret;
 }
 
 S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {

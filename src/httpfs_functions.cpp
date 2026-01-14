@@ -12,6 +12,11 @@ class ExtensionLoader;
 
 namespace duckdb {
 
+struct InheritFromConfigGlobalFunctionStats : public GlobalTableFunctionState {
+public:
+	static unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionInitInput &input) {}
+}
+
 static unique_ptr<FunctionData> HttpfsInheritS3ConfigFromEnvBind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
                                                                  vector<string> &names) {
@@ -31,11 +36,14 @@ static void HttpfsInheritS3ConfigFromEnv(ClientContext &context, TableFunctionIn
 	auto set_vals = provider->SetAll();
 	idx_t i = 0;
 	for (auto &name : set_vals) {
-		FlatVector::GetData<string_t>(output.data[0])[i] = name.first;
-		FlatVector::GetData<string_t>(output.data[1])[i] = name.second;
+		string_t key_string = StringVector::AddString(output.data[0], string_t(name.first));
+		FlatVector::GetData<string_t>(output.data[0])[i] = key_string;
+		string_t value_string = StringVector::AddString(output.data[1], string_t(name.second));
+		FlatVector::GetData<string_t>(output.data[1])[i] = value_string;
 		++i;
 	}
 	output.SetCardinality(i);
+	auto break_here = 0;
 }
 
 vector<TableFunctionSet> HttpfsFunctions::GetTableFunctions(ExtensionLoader &loader) {
