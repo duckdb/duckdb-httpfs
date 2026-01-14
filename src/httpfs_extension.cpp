@@ -109,6 +109,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	};
 	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
 	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
+	config.AddExtensionOption("enable_global_s3_configuration",
+	                          "Automatically fetch AWS credentials from environment variables.", LogicalType::BOOLEAN,
+	                          Value::BOOLEAN(true));
 
 	if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
 		// Already handled, do not override

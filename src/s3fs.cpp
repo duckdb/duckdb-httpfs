@@ -191,12 +191,12 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	}
 
 	const char *secret_types[] = {"s3", "r2", "gcs", "aws"};
-	KeyValueSecretReader secret_reader(*opener, info, secret_types, 3);
+	S3KeyValueReader secret_reader(*opener, info, secret_types, 3);
 
 	return ReadFrom(secret_reader, info.file_path);
 }
 
-S3AuthParams S3AuthParams::ReadFrom(KeyValueSecretReader &secret_reader, const std::string &file_path) {
+S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const std::string &file_path) {
 	auto result = S3AuthParams();
 
 	// These settings we just set or leave to their S3AuthParams default value
@@ -210,7 +210,6 @@ S3AuthParams S3AuthParams::ReadFrom(KeyValueSecretReader &secret_reader, const s
 	secret_reader.TryGetSecretKeyOrSetting("s3_url_compatibility_mode", "s3_url_compatibility_mode",
 	                                       result.s3_url_compatibility_mode);
 	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays", result.requester_pays);
-
 	// Endpoint and url style are slightly more complex and require special handling for gcs and r2
 	auto endpoint_result = secret_reader.TryGetSecretKeyOrSetting("endpoint", "s3_endpoint", result.endpoint);
 	auto url_style_result = secret_reader.TryGetSecretKeyOrSetting("url_style", "s3_url_style", result.url_style);
@@ -1377,6 +1376,15 @@ vector<string> AWSListObjectV2::ParseCommonPrefix(string &aws_response) {
 		}
 	}
 	return s3_prefixes;
+}
+
+S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
+                                   idx_t secret_types_len)
+    : reader(opener_p, info, secret_types, secret_types_len) {
+	Value use_env_vars_for_secret_info_setting;
+	reader.TryGetSecretKeyOrSetting("enable_global_s3_configuration", "enable_global_s3_configuration",
+	                                use_env_vars_for_secret_info_setting);
+	use_env_variables_for_secret_settings = use_env_vars_for_secret_info_setting.GetValue<bool>();
 }
 
 } // namespace duckdb

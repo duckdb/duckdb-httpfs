@@ -20,6 +20,33 @@
 
 namespace duckdb {
 
+class S3KeyValueReader {
+public:
+	S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
+	                 idx_t secret_types_len);
+
+	template <class TYPE>
+	SettingLookupResult TryGetSecretKeyOrSetting(const string &secret_key, const string &setting_name, TYPE &result) {
+		Value temp_result;
+		auto setting_scope = reader.TryGetSecretKeyOrSetting(secret_key, setting_name, temp_result);
+		if (!temp_result.IsNull() &&
+		    !(setting_scope.GetScope() == SettingScope::GLOBAL && !use_env_variables_for_secret_settings)) {
+			result = temp_result.GetValue<TYPE>();
+		}
+		return setting_scope;
+	}
+
+	template <class TYPE>
+	SettingLookupResult TryGetSecretKey(const string &secret_key, TYPE &value_out) {
+		// TryGetSecretKey never returns anything from global scope, so we don't need to check
+		return reader.TryGetSecretKey(secret_key, value_out);
+	}
+
+private:
+	bool use_env_variables_for_secret_settings;
+	KeyValueSecretReader reader;
+};
+
 struct S3AuthParams {
 	string region;
 	string access_key_id;
@@ -34,7 +61,7 @@ struct S3AuthParams {
 	string oauth2_bearer_token; // OAuth2 bearer token for GCS
 
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
-	static S3AuthParams ReadFrom(KeyValueSecretReader &secret_reader, const std::string &file_path);
+	static S3AuthParams ReadFrom(S3KeyValueReader &secret_reader, const std::string &file_path);
 };
 
 struct AWSEnvironmentCredentialsProvider {
