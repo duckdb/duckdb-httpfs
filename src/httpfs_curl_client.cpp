@@ -197,10 +197,6 @@ public:
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		request_info->url = info.url;
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -245,10 +241,6 @@ public:
 		curl_headers.Add("Content-Type: " + info.content_type);
 		// transform parameters
 		request_info->url = info.url;
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -279,10 +271,6 @@ public:
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		request_info->url = info.url;
 		// transform parameters
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -313,10 +301,6 @@ public:
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		// transform parameters
 		request_info->url = info.url;
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -353,10 +337,6 @@ public:
 		curl_headers.Add(content_type.c_str());
 		// transform parameters
 		request_info->url = info.url;
-		if (!info.params.extra_headers.empty()) {
-			auto curl_params = TransformParamsCurl(info.params);
-			request_info->url += "?" + curl_params;
-		}
 
 		CURLcode res;
 		{
@@ -400,22 +380,6 @@ private:
 			}
 		}
 		return curl_headers;
-	}
-
-	string TransformParamsCurl(const HTTPParams &params) {
-		string result = "";
-		unordered_map<string, string> escaped_params;
-		bool first_param = true;
-		for (auto &entry : params.extra_headers) {
-			const string key = entry.first;
-			const string value = curl_easy_escape(*curl, entry.second.c_str(), 0);
-			if (!first_param) {
-				result += "&";
-			}
-			result += key + "=" + value;
-			first_param = false;
-		}
-		return result;
 	}
 
 	void ResetRequestInfo() {
