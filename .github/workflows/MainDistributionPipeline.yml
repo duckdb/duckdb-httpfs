@@ -20,7 +20,6 @@ jobs:
       duckdb_version: v1.5-variegata
       ci_tools_version: main
 
-
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
@@ -32,3 +31,13 @@ jobs:
       ci_tools_version: main
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
+
+  code-quality:
+    name: Code Quality
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
+    with:
+      extension_name: httpfs
+      duckdb_version: 2e305aac80
+      ci_tools_version: main
+      extra_toolchains: 'python3'
+      format_checks: 'format'

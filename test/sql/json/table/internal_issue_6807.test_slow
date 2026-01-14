@@ -1,4 +1,4 @@
-# name: test/sql/json/table/internal_issue_6807.test
+# name: test/sql/json/table/internal_issue_6807.test_slow
 # description: Test logarithmic growth of read buffer for sequential reads
 # group: [table]
 
