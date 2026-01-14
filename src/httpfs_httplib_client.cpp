@@ -92,7 +92,11 @@ public:
 		}
 		// We use a custom Request method here, because there is no Post call with a contentreceiver in httplib
 		duckdb_httplib_openssl::Request req;
-		req.method = "POST";
+		if (info.send_post_as_get_request) {
+			req.method = "GET";
+		} else {
+			req.method = "POST";
+		}
 		req.path = info.path;
 		req.headers = TransformHeaders(info.headers, info.params);
 		if (req.headers.find("Content-Type") == req.headers.end()) {
