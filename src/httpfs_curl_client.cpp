@@ -349,7 +349,7 @@ public:
 		{
 			curl_easy_setopt(*curl, CURLOPT_URL, request_info->url.c_str());
 
-			if (info.params.send_post_as_get_request) {
+			if (info.send_post_as_get_request) {
 				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "GET");
 			} else {
 				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
