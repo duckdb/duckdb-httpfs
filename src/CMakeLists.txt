@@ -6,7 +6,8 @@ set(HTTPFS_SOURCES
     crypto.cpp
     hash_functions.cpp
     create_secret_functions.cpp
-    httpfs_extension.cpp)
+    httpfs_extension.cpp
+    httpfs_functions.cpp)
 if(NOT EMSCRIPTEN)
   set(HTTPFS_SOURCES ${HTTPFS_SOURCES} crypto.cpp httpfs_httplib_client.cpp
                      httpfs_curl_client.cpp)

@@ -79,8 +79,9 @@ struct AWSEnvironmentCredentialsProvider {
 
 	DBConfig &config;
 
-	void SetExtensionOptionValue(string key, const char *env_var);
-	void SetAll();
+	Value SetExtensionOptionValue(string key, const char *env_var);
+	case_insensitive_map_t<string> SetAll();
+	void SetValue(string key, Value &val, case_insensitive_map_t<string> &ret);
 	S3AuthParams CreateParams();
 };
 

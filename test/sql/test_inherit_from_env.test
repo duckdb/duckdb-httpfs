@@ -1,0 +1,9 @@
+# name: test/sql/test_inherit_from_env.test
+# group: [sql]
+
+require httpfs
+
+mode output_result
+
+statement ok
+call inherit_aws_config_from_environment();
