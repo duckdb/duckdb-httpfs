@@ -704,7 +704,13 @@ static optional_ptr<HTTPMetadataCache> TryGetMetadataCache(optional_ptr<FileOpen
 		return nullptr;
 	}
 
-	bool use_shared_cache = db->config.options.http_metadata_cache_enable;
+	Value use_shared_cache_val;
+	bool use_shared_cache = false;
+	FileOpener::TryGetCurrentSetting(opener, "enable_http_metadata_cache", use_shared_cache_val);
+	if (!use_shared_cache_val.IsNull()) {
+		use_shared_cache = use_shared_cache_val.GetValue<bool>();
+	}
+
 	if (use_shared_cache) {
 		return httpfs.GetGlobalCache();
 	} else if (client_context) {
