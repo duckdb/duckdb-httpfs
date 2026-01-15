@@ -1,11 +1,10 @@
 #include "httpfs_extension.hpp"
-
 #include "httpfs_client.hpp"
+#include "httpfs_functions.hpp"
 #include "create_secret_functions.hpp"
 #include "duckdb.hpp"
 #include "s3fs.hpp"
 #include "hffs.hpp"
-#include "include/httpfs_functions.hpp"
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 #include "crypto.hpp"
 #endif // OVERRIDE_ENCRYPTION_UTILS
@@ -116,9 +115,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	} else {
 		config.http_util = make_shared_ptr<HTTPFSUtil>();
 	}
-
-	// auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
-	// provider->SetAll();
 
 	CreateS3SecretFunctions::Register(loader);
 	CreateBearerTokenFunctions::Register(loader);
