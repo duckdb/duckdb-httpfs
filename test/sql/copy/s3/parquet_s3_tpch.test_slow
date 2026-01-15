@@ -39,6 +39,9 @@ set http_retries=6;
 statement ok
 CALL DBGEN(sf=0.01);
 
+statement ok
+call inherit_aws_config_from_environment();
+
 # copy tpch files to S3
 statement ok
 COPY lineitem to 's3://test-bucket/tpch-sf0_01/lineitem.parquet';

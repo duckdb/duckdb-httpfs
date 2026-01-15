@@ -60,6 +60,9 @@ WHERE
 ----
 123141078.2283
 
+statement ok
+call inherit_aws_config_from_environment();
+
 # Parquet file ~300MB
 statement ok
 COPY lineitem TO 's3://test-bucket/multipart/export_large.parquet' (FORMAT 'parquet');

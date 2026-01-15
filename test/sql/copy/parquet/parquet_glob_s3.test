@@ -29,6 +29,9 @@ set ignore_error_messages
 statement ok
 set enable_external_file_cache=false;
 
+statement ok
+call inherit_aws_config_from_environment();
+
 # Copy files to S3 before beginning tests
 statement ok
 COPY (select * from 'duckdb/data/parquet-testing/glob/t1.parquet') to 's3://test-bucket/parquet_glob_s3/glob/t1.parquet';

@@ -39,6 +39,9 @@ foreach urlstyle path vhost
 statement ok
 SET s3_url_style='${urlstyle}'
 
+statement ok
+call inherit_aws_config_from_environment();
+
 ## For both formats we generate 2000 files which we will glob to test the paging mechanism of aws ListObjectV2 call is handled properly
 foreach format parquet csv
 

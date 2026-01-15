@@ -21,6 +21,9 @@ require-env DUCKDB_S3_USE_SSL
 # override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
 set ignore_error_messages
 
+statement ok
+call inherit_aws_config_from_environment();
+
 # Create some test data
 statement ok
 COPY (SELECT 'value-1' as value) TO 's3://test-bucket/http_log/test.parquet';

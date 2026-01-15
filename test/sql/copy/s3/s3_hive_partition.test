@@ -28,6 +28,9 @@ CREATE TABLE test AS SELECT 1 as id, 'value1' as value;
 CREATE TABLE test2 AS SELECT 2 as id, 'value2' as value;
 
 statement ok
+call inherit_aws_config_from_environment();
+
+statement ok
 COPY test TO 's3://test-bucket/hive-partitioning/simple/key_!-_.*()=zisiswurking1/test.parquet';
 COPY test2 TO 's3://test-bucket/hive-partitioning/simple/key_!-_.*()=zisiswurking2/test.parquet';
 
