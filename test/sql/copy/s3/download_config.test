@@ -125,4 +125,4 @@ SELECT i FROM "http://test-bucket-public.duckdb-minio-non-existent-host.com:9000
 statement error
 SELECT * FROM parquet_scan('s3://this-aint-no-bucket/no-path/no-file');
 ----
-Unable to connect to URL "http://
+Unable to connect to URL "s3://this-aint-no-bucket/no-path/no-file"
