@@ -191,6 +191,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
+		ResetRequestInfo();
 		if (state) {
 			state->get_count++;
 		}
@@ -222,6 +223,13 @@ public:
 			state->total_bytes_received += bytes_received;
 		}
 
+		if (info.response_handler) {
+			auto response = TransformResponseCurl(res);
+			if (!info.response_handler(*response)) {
+				return response;
+			}
+		}
+
 		const char *data = request_info->body.c_str();
 		if (info.content_handler) {
 			info.content_handler(const_data_ptr_cast(data), bytes_received);
@@ -231,6 +239,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
+		ResetRequestInfo();
 		if (state) {
 			state->put_count++;
 			state->total_bytes_sent += info.buffer_in_len;
@@ -264,6 +273,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
+		ResetRequestInfo();
 		if (state) {
 			state->head_count++;
 		}
@@ -294,6 +304,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
+		ResetRequestInfo();
 		if (state) {
 			state->delete_count++;
 		}
@@ -327,6 +338,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
+		ResetRequestInfo();
 		if (state) {
 			state->post_count++;
 			state->total_bytes_sent += info.buffer_in_len;
@@ -415,7 +427,7 @@ private:
 				response->headers.Insert(header.first, header.second);
 			}
 		}
-		ResetRequestInfo();
+		// ResetRequestInfo();
 		return response;
 	}
 
