@@ -3,7 +3,15 @@
 
 require httpfs
 
-mode output_result
+require-env AWS_DEFAULT_REGION
 
-statement ok
-call inherit_aws_config_from_environment();
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+statement II
+call inherit_aws_config_from_environment() order by all;
+----
+AWS_ACCESS_KEY_ID	minio_duckdb_user
+AWS_DEFAULT_REGION	eu-west-1
+AWS_SECRET_ACCESS_KEY	<redacted>

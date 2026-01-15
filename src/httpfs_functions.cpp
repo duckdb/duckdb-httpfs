@@ -12,18 +12,25 @@ class ExtensionLoader;
 
 namespace duckdb {
 
-struct InheritFromConfigGlobalFunctionStats : public GlobalTableFunctionState {
+struct InheritFromConfigGlobalFunctionStatsGlobalState : public GlobalTableFunctionState {
+	InheritFromConfigGlobalFunctionStatsGlobalState() : GlobalTableFunctionState(), finished(false) {
+	}
+
 public:
-	static unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionInitInput &input) {}
-}
+	static unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionInitInput &input) {
+		auto global_state = make_uniq<InheritFromConfigGlobalFunctionStatsGlobalState>();
+		return global_state;
+	}
+	bool finished;
+};
 
 static unique_ptr<FunctionData> HttpfsInheritS3ConfigFromEnvBind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
                                                                  vector<string> &names) {
-	names.emplace_back("key");
+	names.emplace_back("config_key");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
-	names.emplace_back("value");
+	names.emplace_back("config_value");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
 	return nullptr;
@@ -31,6 +38,10 @@ static unique_ptr<FunctionData> HttpfsInheritS3ConfigFromEnvBind(ClientContext &
 
 // inherit from config function
 static void HttpfsInheritS3ConfigFromEnv(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &global_state = data.global_state->Cast<InheritFromConfigGlobalFunctionStatsGlobalState>();
+	if (global_state.finished) {
+		return;
+	}
 	auto &config = context.db->config;
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	auto set_vals = provider->SetAll();
@@ -43,13 +54,14 @@ static void HttpfsInheritS3ConfigFromEnv(ClientContext &context, TableFunctionIn
 		++i;
 	}
 	output.SetCardinality(i);
-	auto break_here = 0;
+	global_state.finished = true;
 }
 
 vector<TableFunctionSet> HttpfsFunctions::GetTableFunctions(ExtensionLoader &loader) {
 	vector<TableFunctionSet> functions;
 	TableFunctionSet inherit_aws_config("inherit_aws_config_from_environment");
-	TableFunction table_function({}, HttpfsInheritS3ConfigFromEnv, HttpfsInheritS3ConfigFromEnvBind);
+	TableFunction table_function({}, HttpfsInheritS3ConfigFromEnv, HttpfsInheritS3ConfigFromEnvBind,
+	                             InheritFromConfigGlobalFunctionStatsGlobalState::Init);
 
 	inherit_aws_config.AddFunction(table_function);
 	functions.emplace_back(inherit_aws_config);
