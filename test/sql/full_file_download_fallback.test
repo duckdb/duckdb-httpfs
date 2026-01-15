@@ -11,12 +11,6 @@ require-env PYTHON_HTTP_SERVER_URL
 
 require-env PYTHON_HTTP_SERVER_DIR
 
-# FIXME: make it work with curl
-# Error message: HTTP Error: Server sent back more data than expected, `SET force_download=true` might help in this case
-
-statement ok
-SET httpfs_client_implementation = httplib
-
 statement ok
 CALL enable_logging();
 
