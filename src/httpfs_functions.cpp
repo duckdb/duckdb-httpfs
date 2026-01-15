@@ -27,6 +27,9 @@ public:
 static unique_ptr<FunctionData> HttpfsInheritS3ConfigFromEnvBind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
                                                                  vector<string> &names) {
+	names.emplace_back("environment_variable_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
 	names.emplace_back("config_key");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
@@ -42,15 +45,16 @@ static void HttpfsInheritS3ConfigFromEnv(ClientContext &context, TableFunctionIn
 	if (global_state.finished) {
 		return;
 	}
-	auto &config = context.db->config;
-	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
+	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(context);
 	auto set_vals = provider->SetAll();
 	idx_t i = 0;
 	for (auto &name : set_vals) {
-		string_t key_string = StringVector::AddString(output.data[0], string_t(name.first));
-		FlatVector::GetData<string_t>(output.data[0])[i] = key_string;
-		string_t value_string = StringVector::AddString(output.data[1], string_t(name.second));
-		FlatVector::GetData<string_t>(output.data[1])[i] = value_string;
+		string_t env_var_string = StringVector::AddString(output.data[0], string_t(name.env_var_name));
+		FlatVector::GetData<string_t>(output.data[0])[i] = env_var_string;
+		string_t key_string = StringVector::AddString(output.data[1], string_t(name.config_name));
+		FlatVector::GetData<string_t>(output.data[1])[i] = key_string;
+		string_t value_string = StringVector::AddString(output.data[2], string_t(name.value));
+		FlatVector::GetData<string_t>(output.data[2])[i] = value_string;
 		++i;
 	}
 	output.SetCardinality(i);

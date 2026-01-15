@@ -19,6 +19,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 
 #include "create_secret_functions.hpp"
+#include "re2/re2.h"
 
 #include <iostream>
 #include <thread>
@@ -141,54 +142,38 @@ static bool IsGCSRequest(const string &url) {
 	return StringUtil::StartsWith(url, "gcs://") || StringUtil::StartsWith(url, "gs://");
 }
 
-Value AWSEnvironmentCredentialsProvider::SetExtensionOptionValue(string key, const char *env_var_name) {
+void AWSEnvironmentCredentialsProvider::SetExtensionOptionValue(string key, const char *env_var_name,
+                                                                vector<AWSEnvVarToConfigHelper> &ret) {
 	char *evar;
 
+	Value val;
 	if ((evar = std::getenv(env_var_name)) != NULL) {
-		Value val;
 		if (StringUtil::Lower(evar) == "false") {
-			this->config.SetOption(key, Value(false));
+			// db_config.SetOption(key, Value(false));
+			val = Value(false);
 		} else if (StringUtil::Lower(evar) == "true") {
-			this->config.SetOption(key, Value(true));
+			// db_config.SetOption(key, Value(true));
+			val = Value(true);
 		} else {
 			val = Value(evar);
 		}
-		this->config.SetOption(key, val);
-		return val;
-	}
-	return Value();
-}
-
-void AWSEnvironmentCredentialsProvider::SetValue(string key, Value &val, case_insensitive_map_t<string> &ret) {
-	if (!val.IsNull()) {
-		ret.emplace(key, val.ToString());
+		context.config.set_variables[key] = val;
+		ret.emplace_back(env_var_name, key, val.ToString());
 	}
 }
 
-case_insensitive_map_t<string> AWSEnvironmentCredentialsProvider::SetAll() {
+vector<AWSEnvVarToConfigHelper> AWSEnvironmentCredentialsProvider::SetAll() {
 	Value set_val;
-	case_insensitive_map_t<string> ret;
-	set_val = this->SetExtensionOptionValue("s3_region", DEFAULT_REGION_ENV_VAR);
-	SetValue("s3_region", set_val, ret);
-	set_val = SetExtensionOptionValue("s3_region", REGION_ENV_VAR);
-	SetValue("s3_access_key_id", set_val, ret);
-	set_val = SetExtensionOptionValue("s3_access_key_id", ACCESS_KEY_ENV_VAR);
-	SetValue("s3_access_key_id", set_val, ret);
-	set_val = SetExtensionOptionValue("s3_secret_access_key", SECRET_KEY_ENV_VAR);
-	if (!set_val.IsNull()) {
-		auto tmp_val = Value("<redacted>");
-		SetValue("s3_access_key_id", tmp_val, ret);
-	}
-	set_val = SetExtensionOptionValue("s3_session_token", SESSION_TOKEN_ENV_VAR);
-	SetValue("s3_session_token", set_val, ret);
-	set_val = SetExtensionOptionValue("s3_endpoint", DUCKDB_ENDPOINT_ENV_VAR);
-	SetValue("s3_endpoint", set_val, ret);
-	set_val = SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR);
-	SetValue("s3_use_ssl", set_val, ret);
-	set_val = SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR);
-	SetValue("s3_kms_key_id", set_val, ret);
-	set_val = SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR);
-	SetValue("s3_requester_pays", set_val, ret);
+	vector<AWSEnvVarToConfigHelper> ret;
+	SetExtensionOptionValue("s3_region", DEFAULT_REGION_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_region", REGION_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_access_key_id", ACCESS_KEY_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_secret_access_key", SECRET_KEY_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_session_token", SESSION_TOKEN_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_endpoint", DUCKDB_ENDPOINT_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR, ret);
 	return ret;
 }
 
@@ -1406,10 +1391,6 @@ vector<string> AWSListObjectV2::ParseCommonPrefix(string &aws_response) {
 S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
                                    idx_t secret_types_len)
     : reader(opener_p, info, secret_types, secret_types_len) {
-	Value use_env_vars_for_secret_info_setting;
-	reader.TryGetSecretKeyOrSetting("enable_global_s3_configuration", "enable_global_s3_configuration",
-	                                use_env_vars_for_secret_info_setting);
-	use_env_variables_for_secret_settings = use_env_vars_for_secret_info_setting.GetValue<bool>();
 }
 
 } // namespace duckdb
