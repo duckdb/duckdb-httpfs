@@ -31,7 +31,7 @@ public:
 		auto setting_scope = reader.TryGetSecretKeyOrSetting(secret_key, setting_name, temp_result);
 		if (temp_result.IsNull() || setting_scope.GetScope() == SettingScope::GLOBAL) {
 			// if setting is global, do not use it for s3 key value reader. User must call
-			// inherit_aws_config_from_environment so global/env vars are used for s3secrets
+			// inherit_aws_config_from_environment to load env vars into extension config.
 			return setting_scope;
 		}
 		result = temp_result.GetValue<TYPE>();
