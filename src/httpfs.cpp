@@ -664,10 +664,7 @@ string HTTPFileSystem::GetVersionTag(FileHandle &handle) {
 bool HTTPFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
 	try {
 		auto handle = OpenFile(filename, FileFlags::FILE_FLAGS_READ, opener);
-		auto &sfh = handle->Cast<HTTPFileHandle>();
-		if (sfh.length == 0) {
-			return false;
-		}
+		(void)handle; // suppress warning
 		return true;
 	} catch (...) {
 		return false;
