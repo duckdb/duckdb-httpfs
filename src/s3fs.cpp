@@ -1028,15 +1028,17 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 			string_t md5_blob(const_char_ptr_cast(md5_hash), MD5Context::MD5_HASH_LENGTH_BINARY);
 			string content_md5 = Blob::ToBase64(md5_blob);
 
-			string http_query_param = "delete=";
+			const string http_query_param_for_sig = "delete=";
+			const string http_query_param_for_url = "delete";
 			auto payload_hash = GetPayloadHash(const_cast<char *>(body.data()), body.length());
 
-			auto headers = CreateS3Header(url_info.path, http_query_param, url_info.host, "s3", "POST",
-			                              url_info.auth_params, "", "", payload_hash, "application/xml");
+			auto headers = CreateS3Header(url_info.path, http_query_param_for_sig, url_info.host, "s3", "POST",
+			                              url_info.auth_params, "", "", payload_hash, "");
 			headers["Content-MD5"] = content_md5;
 			headers["Content-Type"] = "application/xml";
 
-			string http_url = url_info.http_proto + url_info.host + url_info.path + "?" + http_query_param;
+			string http_url = url_info.http_proto + url_info.host + S3FileSystem::UrlEncode(url_info.path) + "?" +
+			                  http_query_param_for_url;
 			string bucket_url = url_info.prefix + bucket + "/";
 			auto handle = OpenFile(bucket_url, FileFlags::FILE_FLAGS_READ, opener);
 
@@ -1045,7 +1047,8 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 			                                       body.length());
 
 			if (res->status != HTTPStatusCode::OK_200) {
-				throw IOException("Failed to remove files: HTTP %d", static_cast<int>(res->status));
+				throw IOException("Failed to remove files: HTTP %d (%s)\n%s", static_cast<int>(res->status),
+				                  res->GetError(), result);
 			}
 
 			idx_t cur_pos = 0;
