@@ -50,7 +50,7 @@ set http_proxy_password='yyy'
 statement error
 FROM 's3://test-bucket/proxy-test/test.parquet'
 ----
-Could not establish connection
+<REGEX>:.*IO Error.*HTTP HEAD to 'http://test-bucket.*
 
 # Now a working one
 statement ok
@@ -101,7 +101,7 @@ require-env HTTP_PROXY
 statement error
 FROM 's3://test-bucket/proxy-test/test.parquet'
 ----
-Could not establish connection
+<REGEX>:.*IO Error.*HTTP HEAD to 'http://test-bucket.*
 
 statement ok
 CREATE SECRET http1 (
