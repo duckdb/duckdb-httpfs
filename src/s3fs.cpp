@@ -157,19 +157,27 @@ void AWSEnvironmentCredentialsProvider::SetExtensionOptionValue(string key, cons
 		} else {
 			val = Value(evar);
 		}
-		context.config.set_variables[key] = val;
+		config.options.set_variables[key] = val;
 		ret.emplace_back(env_var_name, key, val.ToString());
 	}
 }
 
 vector<AWSEnvVarToConfigHelper> AWSEnvironmentCredentialsProvider::SetAll() {
-	Value set_val;
 	vector<AWSEnvVarToConfigHelper> ret;
 	SetExtensionOptionValue("s3_region", DEFAULT_REGION_ENV_VAR, ret);
 	SetExtensionOptionValue("s3_region", REGION_ENV_VAR, ret);
 	SetExtensionOptionValue("s3_access_key_id", ACCESS_KEY_ENV_VAR, ret);
 	SetExtensionOptionValue("s3_secret_access_key", SECRET_KEY_ENV_VAR, ret);
 	SetExtensionOptionValue("s3_session_token", SESSION_TOKEN_ENV_VAR, ret);
+	auto duckdb_settings = SetDuckDBSettings();
+	for (auto &val : duckdb_settings) {
+		ret.emplace_back(val);
+	}
+	return ret;
+}
+
+vector<AWSEnvVarToConfigHelper> AWSEnvironmentCredentialsProvider::SetDuckDBSettings() {
+	vector<AWSEnvVarToConfigHelper> ret;
 	SetExtensionOptionValue("s3_endpoint", DUCKDB_ENDPOINT_ENV_VAR, ret);
 	SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR, ret);
 	SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR, ret);

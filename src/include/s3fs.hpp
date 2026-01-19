@@ -85,12 +85,13 @@ struct AWSEnvironmentCredentialsProvider {
 	static constexpr const char *DUCKDB_KMS_KEY_ID_ENV_VAR = "DUCKDB_S3_KMS_KEY_ID";
 	static constexpr const char *DUCKDB_REQUESTER_PAYS_ENV_VAR = "DUCKDB_S3_REQUESTER_PAYS";
 
-	explicit AWSEnvironmentCredentialsProvider(ClientContext &context) : context(context) {};
+	explicit AWSEnvironmentCredentialsProvider(DBConfig &config) : config(config) {};
 
-	ClientContext &context;
+	DBConfig &config;
 
 	void SetExtensionOptionValue(string key, const char *env_var, vector<AWSEnvVarToConfigHelper> &ret);
 	vector<AWSEnvVarToConfigHelper> SetAll();
+	vector<AWSEnvVarToConfigHelper> SetDuckDBSettings();
 	S3AuthParams CreateParams();
 };
 

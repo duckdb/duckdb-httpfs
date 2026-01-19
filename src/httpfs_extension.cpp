@@ -116,6 +116,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 		config.http_util = make_shared_ptr<HTTPFSUtil>();
 	}
 
+	// set config values like s3_endpoint from env vars prefixed with DUCKDB like DUCKDB_S3_ENDPOINT
+	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
+	provider->SetDuckDBSettings();
+
 	CreateS3SecretFunctions::Register(loader);
 	CreateBearerTokenFunctions::Register(loader);
 

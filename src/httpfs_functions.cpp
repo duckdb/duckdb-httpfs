@@ -45,7 +45,8 @@ static void HttpfsInheritS3ConfigFromEnv(ClientContext &context, TableFunctionIn
 	if (global_state.finished) {
 		return;
 	}
-	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(context);
+	D_ASSERT(context.db);
+	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(context.db->config);
 	auto set_vals = provider->SetAll();
 	idx_t i = 0;
 	for (auto &name : set_vals) {
