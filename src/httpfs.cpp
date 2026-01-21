@@ -35,6 +35,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
                                                         optional_ptr<FileOpenerInfo> info) {
 	auto result = make_uniq<HTTPFSParams>(*this);
 	result->Initialize(opener);
+	result->state = HTTPState::TryGetState(opener);
 
 	// No point in continuing without an opener
 	if (!opener) {

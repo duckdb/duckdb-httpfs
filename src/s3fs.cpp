@@ -1115,8 +1115,7 @@ bool S3GlobResult::ExpandNextPath() const {
 		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
 
 		auto prefix_res =
-		    AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params, common_prefix_continuation_token,
-		                             HTTPState::TryGetState(opener).get());
+		    AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params, common_prefix_continuation_token);
 		AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
 		auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
 		common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
@@ -1138,8 +1137,8 @@ bool S3GlobResult::ExpandNextPath() const {
 			throw InternalException("We have common prefixes but we are doing a top-level request");
 		}
 		// issue the main request
-		string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
-		                                               main_continuation_token, HTTPState::TryGetState(opener).get());
+		string response_str =
+		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token);
 		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
 		AWSListObjectV2::ParseFileList(response_str, s3_keys);
 
@@ -1271,7 +1270,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 	return GetS3Error(s3_handle.auth_params, response, url);
 }
 string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, const S3AuthParams &s3_auth_params,
-                                string &continuation_token, optional_ptr<HTTPState> state, bool use_delimiter) {
+                                string &continuation_token) {
 	auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
 
 	// Construct the ListObjectsV2 call
@@ -1284,10 +1283,6 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, con
 	}
 	req_params += "encoding-type=url&list-type=2";
 	req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
-
-	if (use_delimiter) {
-		req_params += "&delimiter=%2F";
-	}
 
 	auto header_map =
 	    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
