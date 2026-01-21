@@ -1184,18 +1184,18 @@ string S3FileSystem::GetName() const {
 	return "S3FileSystem";
 }
 
-bool S3FileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
-                             FileOpener *opener) {
+bool S3FileSystem::ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
+                                     optional_ptr<FileOpener> opener) {
 	string trimmed_dir = directory;
 	StringUtil::RTrim(trimmed_dir, PathSeparator(trimmed_dir));
-	auto glob_res = Glob(JoinPath(trimmed_dir, "**"), opener);
+	auto glob_res = GlobFilesExtended(JoinPath(trimmed_dir, "**"), FileGlobOptions::ALLOW_EMPTY, opener);
 
-	if (glob_res.empty()) {
+	if (!glob_res || glob_res->GetExpandResult() == FileExpandResult::NO_FILES) {
 		return false;
 	}
 
-	for (const auto &file : glob_res) {
-		callback(file.path, false);
+	for (auto file : glob_res->Files()) {
+		callback(file);
 	}
 
 	return true;

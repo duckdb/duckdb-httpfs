@@ -249,9 +249,6 @@ public:
 	static void UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
 	                                       string query_param, bool direct_throw);
 
-	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
-	               FileOpener *opener = nullptr) override;
-
 	//! Wrapper around BufferManager::Allocate to limit the number of buffers
 	BufferHandle Allocate(idx_t part_size, uint16_t max_threads);
 
@@ -267,6 +264,11 @@ public:
 	                                const string &url);
 
 protected:
+	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
+	                       optional_ptr<FileOpener> opener) override;
+	bool SupportsListFilesExtended() const override {
+		return true;
+	}
 	unique_ptr<MultiFileList> GlobFilesExtended(const string &path, const FileGlobInput &input,
 	                                            optional_ptr<FileOpener> opener) override;
 	bool SupportsGlobExtended() const override {
