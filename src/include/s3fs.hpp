@@ -263,11 +263,12 @@ public:
 	static string GetS3BadRequestError(const S3AuthParams &s3_auth_params, string correct_region = "");
 	static string GetS3AuthError(const S3AuthParams &s3_auth_params);
 	static string GetGCSAuthError(const S3AuthParams &s3_auth_params);
-	static HTTPException GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url);
+	static HTTPException GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
+	                                const string &url);
 
 protected:
 	unique_ptr<MultiFileList> GlobFilesExtended(const string &path, const FileGlobInput &input,
-												optional_ptr<FileOpener> opener) override;
+	                                            optional_ptr<FileOpener> opener) override;
 	bool SupportsGlobExtended() const override {
 		return true;
 	}

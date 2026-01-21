@@ -1045,7 +1045,6 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 	return key == key_end && pattern == pattern_end;
 }
 
-
 struct S3GlobResult : public LazyMultiFileList {
 public:
 	S3GlobResult(S3FileSystem &fs, const string &path, optional_ptr<FileOpener> opener);
@@ -1062,9 +1061,14 @@ private:
 	string shared_path;
 	ParsedS3Url parsed_s3_url;
 	mutable string main_continuation_token;
+	mutable string current_common_prefix;
+	mutable string common_prefix_continuation_token;
+	mutable vector<string> common_prefixes;
+	mutable bool initial_request = true;
 };
 
-S3GlobResult::S3GlobResult(S3FileSystem &fs, const string &glob_pattern_p, optional_ptr<FileOpener> opener) : fs(fs), glob_pattern(glob_pattern_p), opener(opener) {
+S3GlobResult::S3GlobResult(S3FileSystem &fs, const string &glob_pattern_p, optional_ptr<FileOpener> opener)
+    : fs(fs), glob_pattern(glob_pattern_p), opener(opener) {
 	if (!opener) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
 	}
@@ -1105,37 +1109,51 @@ bool S3GlobResult::ExpandNextPath() const {
 	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
 	auto http_params = http_util->InitializeParameters(opener, info);
 
-	// Do main listobjectsv2 request
 	vector<OpenFileInfo> s3_keys;
+	if (!current_common_prefix.empty()) {
+		// we have common prefixes left to scan - perform the request
+		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
 
-	// issue the request
-	string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
-	                                               main_continuation_token, HTTPState::TryGetState(opener).get());
-	main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
-	AWSListObjectV2::ParseFileList(response_str, s3_keys);
+		auto prefix_res =
+		    AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params, common_prefix_continuation_token,
+		                             HTTPState::TryGetState(opener).get());
+		AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
+		auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
+		common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
+		common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
+		if (common_prefix_continuation_token.empty()) {
+			// we are done with the current common prefix
+			// either move on to the next one, or finish up
+			if (common_prefixes.empty()) {
+				// done - we need to do a top-level request again next
+				current_common_prefix = string();
+			} else {
+				// process the next prefix
+				current_common_prefix = common_prefixes.back();
+				common_prefixes.pop_back();
+			}
+		}
+	} else {
+		if (!common_prefixes.empty()) {
+			throw InternalException("We have common prefixes but we are doing a top-level request");
+		}
+		// issue the main request
+		string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
+		                                               main_continuation_token, HTTPState::TryGetState(opener).get());
+		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
+		AWSListObjectV2::ParseFileList(response_str, s3_keys);
 
-	// Repeat requests until the keys of all common prefixes are parsed.
-	auto common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
-	while (!common_prefixes.empty()) {
-		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + common_prefixes.back();
-		common_prefixes.pop_back();
-
-		// TODO we could optimize here by doing a match on the prefix, if it doesn't match we can skip this prefix
-		// Paging loop for common prefix requests
-		string common_prefix_continuation_token;
-		do {
-			auto prefix_res =
-			    AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params,
-			                             common_prefix_continuation_token, HTTPState::TryGetState(opener).get());
-			AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
-			auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
-			common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
-			common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
-		} while (!common_prefix_continuation_token.empty());
+		// parse the list of common prefixes
+		common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
+		if (!common_prefixes.empty()) {
+			// we have common prefixes - set one up for the next request
+			current_common_prefix = common_prefixes.back();
+			common_prefixes.pop_back();
+		}
 	}
 
-	if (main_continuation_token.empty()) {
-		// no continuations left - done
+	if (main_continuation_token.empty() && current_common_prefix.empty()) {
+		// we are done
 		finished = true;
 	}
 
@@ -1158,7 +1176,8 @@ bool S3GlobResult::ExpandNextPath() const {
 	return true;
 }
 
-unique_ptr<MultiFileList> S3FileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input, optional_ptr<FileOpener> opener) {
+unique_ptr<MultiFileList> S3FileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
+                                                          optional_ptr<FileOpener> opener) {
 	return make_uniq<S3GlobResult>(*this, path, opener);
 }
 
@@ -1224,7 +1243,8 @@ string S3FileSystem::GetGCSAuthError(const S3AuthParams &s3_auth_params) {
 	return extra_text;
 }
 
-HTTPException S3FileSystem::GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url) {
+HTTPException S3FileSystem::GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
+                                       const string &url) {
 	string extra_text;
 	if (response.status == HTTPStatusCode::BadRequest_400) {
 		extra_text = GetS3BadRequestError(s3_auth_params);
