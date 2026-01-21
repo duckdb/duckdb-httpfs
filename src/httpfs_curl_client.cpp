@@ -424,6 +424,9 @@ private:
 		response->reason = HTTPUtil::GetStatusMessage(HTTPUtil::ToStatusCode(request_info->response_code));
 		if (!request_info->header_collection.empty()) {
 			for (auto &header : request_info->header_collection.back()) {
+				if (header.first == "__RESPONSE_STATUS__") {
+					continue;
+				}
 				response->headers.Insert(header.first, header.second);
 			}
 		}
