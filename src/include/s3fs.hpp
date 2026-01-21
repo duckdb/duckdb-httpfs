@@ -85,14 +85,14 @@ struct AWSEnvironmentCredentialsProvider {
 };
 
 struct ParsedS3Url {
-	const string http_proto;
-	const string prefix;
-	const string host;
-	const string bucket;
-	const string key;
-	const string path;
-	const string query_param;
-	const string trimmed_s3_url;
+	string http_proto;
+	string prefix;
+	string host;
+	string bucket;
+	string key;
+	string path;
+	string query_param;
+	string trimmed_s3_url;
 
 	string GetHTTPUrl(S3AuthParams &auth_params, const string &http_query_string = "");
 };
@@ -235,7 +235,7 @@ public:
 	void FlushAllBuffers(S3FileHandle &handle);
 
 	void ReadQueryParams(const string &url_query_param, S3AuthParams &params);
-	static ParsedS3Url S3UrlParse(string url, S3AuthParams &params);
+	static ParsedS3Url S3UrlParse(string url, const S3AuthParams &params);
 
 	static string UrlEncode(const string &input, bool encode_slash = false);
 	static string UrlDecode(string input);
@@ -249,7 +249,6 @@ public:
 	static void UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
 	                                       string query_param, bool direct_throw);
 
-	vector<OpenFileInfo> Glob(const string &glob_pattern, FileOpener *opener = nullptr) override;
 	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
 	               FileOpener *opener = nullptr) override;
 
@@ -261,10 +260,17 @@ public:
 		return true;
 	}
 
-	static string GetS3BadRequestError(S3AuthParams &s3_auth_params, string correct_region = "");
-	static string GetS3AuthError(S3AuthParams &s3_auth_params);
-	static string GetGCSAuthError(S3AuthParams &s3_auth_params);
-	static HTTPException GetS3Error(S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url);
+	static string GetS3BadRequestError(const S3AuthParams &s3_auth_params, string correct_region = "");
+	static string GetS3AuthError(const S3AuthParams &s3_auth_params);
+	static string GetGCSAuthError(const S3AuthParams &s3_auth_params);
+	static HTTPException GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url);
+
+protected:
+	unique_ptr<MultiFileList> GlobFilesExtended(const string &path, const FileGlobInput &input,
+												optional_ptr<FileOpener> opener) override;
+	bool SupportsGlobExtended() const override {
+		return true;
+	}
 
 protected:
 	static void NotifyUploadsInProgress(S3FileHandle &file_handle);
@@ -280,7 +286,7 @@ protected:
 
 // Helper class to do s3 ListObjectV2 api call https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
 struct AWSListObjectV2 {
-	static string Request(string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
+	static string Request(const string &path, HTTPParams &http_params, const S3AuthParams &s3_auth_params,
 	                      string &continuation_token, optional_ptr<HTTPState> state, bool use_delimiter = false);
 	static void ParseFileList(string &aws_response, vector<OpenFileInfo> &result);
 	static vector<string> ParseCommonPrefix(string &aws_response);
