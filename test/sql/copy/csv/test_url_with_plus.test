@@ -4,6 +4,9 @@
 
 require httpfs
 
+# FIXME: check again later. Something must have changed on the server side and both httplib and curl get code 202 (Accepted).
+mode skip
+
 statement ok
 PRAGMA enable_verification
 
