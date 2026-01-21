@@ -24,6 +24,7 @@ class S3KeyValueReader {
 public:
 	S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
 	                 idx_t secret_types_len);
+	explicit S3KeyValueReader(const KeyValueSecretReader &reader);
 
 	template <class TYPE>
 	SettingLookupResult TryGetSecretKeyOrSetting(const string &secret_key, const string &setting_name, TYPE &result) {
