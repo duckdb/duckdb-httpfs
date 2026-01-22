@@ -211,6 +211,12 @@ void S3AuthParams::InitializeEndpoint() {
 		return;
 	}
 	if (region.empty()) {
+		if (access_key_id.empty()) {
+			// no access key and no region - use legacy global endpoint
+			endpoint = "s3.amazonaws.com";
+			return;
+		}
+		// access key but no region - default to us-east-1
 		region = "us-east-1";
 	}
 	endpoint = StringUtil::Format("s3.%s.amazonaws.com", region);
