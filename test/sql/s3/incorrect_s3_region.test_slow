@@ -4,8 +4,11 @@
 
 require httpfs
 
-# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
-set ignore_error_messages
+# override MinIO setup
+statement ok
+SET s3_access_key_id='';
+SET s3_secret_access_key='';
+SET s3_endpoint='s3.amazonaws.com';
 
 statement ok
 set enable_logging=true;
