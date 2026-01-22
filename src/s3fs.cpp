@@ -978,6 +978,11 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		FileOpenerInfo info = {path};
 		auth_params = S3AuthParams::ReadFrom(opener, info);
 		if (!correct_region.empty()) {
+			DUCKDB_LOG_WARNING(
+			    logger,
+			    "Read S3 file \"%s\" from incorrect region \"%s\" - retrying with updated region \"%s\".\n"
+			    "Consider setting the S3 region to this explicitly to avoid extra round-trips.",
+			    path, auth_params.region, correct_region);
 			auth_params.SetRegion(std::move(correct_region));
 		}
 		HTTPFileHandle::Initialize(opener);
