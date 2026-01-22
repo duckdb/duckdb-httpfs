@@ -1,0 +1,45 @@
+# name: test/sql/copy/parquet/parquet_lazy_glob.test_slow
+# description: Test basic globbing of parquet files over s3
+# group: [parquet]
+
+require parquet
+
+require httpfs
+
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+# Require that these environment variables are also set
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+foreach part_count 2 2000
+
+statement ok
+CREATE OR REPLACE TABLE vals AS SELECT i part_key, concat('this is a value for part key ', i) v FROM range(${part_count}) t(i);
+
+statement ok
+COPY vals to 's3://test-bucket/parquet_glob_s3_many_files' (FORMAT PARQUET, PARTITION_BY (part_key), OVERWRITE 1);
+
+query I
+SELECT case when COUNT(*) = ${part_count} then NULL else {'expected': ${part_count}, 'got': COUNT(*)} end FROM glob('s3://test-bucket/parquet_glob_s3_many_files/**/*.parquet')
+----
+NULL
+
+query I
+SELECT COUNT(*) FROM (SELECT * FROM glob('s3://test-bucket/parquet_glob_s3_many_files/**/*.parquet') LIMIT 2)
+----
+2
+
+query II
+SELECT part_key, v FROM 's3://test-bucket/parquet_glob_s3_many_files/**/*.parquet' EXCEPT ALL SELECT part_key, v FROM vals
+----
+
+endloop

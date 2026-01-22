@@ -1053,7 +1053,6 @@ protected:
 	bool ExpandNextPath() const override;
 
 private:
-	S3FileSystem &fs;
 	string glob_pattern;
 	optional_ptr<FileOpener> opener;
 	mutable bool finished = false;
@@ -1064,11 +1063,10 @@ private:
 	mutable string current_common_prefix;
 	mutable string common_prefix_continuation_token;
 	mutable vector<string> common_prefixes;
-	mutable bool initial_request = true;
 };
 
 S3GlobResult::S3GlobResult(S3FileSystem &fs, const string &glob_pattern_p, optional_ptr<FileOpener> opener)
-    : fs(fs), glob_pattern(glob_pattern_p), opener(opener) {
+    : glob_pattern(glob_pattern_p), opener(opener) {
 	if (!opener) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
 	}
@@ -1187,14 +1185,22 @@ string S3FileSystem::GetName() const {
 bool S3FileSystem::ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
                                      optional_ptr<FileOpener> opener) {
 	string trimmed_dir = directory;
-	StringUtil::RTrim(trimmed_dir, PathSeparator(trimmed_dir));
+	auto sep = PathSeparator(trimmed_dir);
+	StringUtil::RTrim(trimmed_dir, sep);
 	auto glob_res = GlobFilesExtended(JoinPath(trimmed_dir, "**"), FileGlobOptions::ALLOW_EMPTY, opener);
 
 	if (!glob_res || glob_res->GetExpandResult() == FileExpandResult::NO_FILES) {
 		return false;
 	}
+	auto base_path = trimmed_dir + sep;
 
 	for (auto file : glob_res->Files()) {
+		if (!StringUtil::StartsWith(file.path, base_path)) {
+			throw InvalidInputException(
+			    "Globbed directory \"%s\", but found file \"%s\" that does not start with base path \"%s\"", directory,
+			    file.path, base_path);
+		}
+		file.path = file.path.substr(base_path.size());
 		callback(file);
 	}
 
@@ -1270,7 +1276,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 	return GetS3Error(s3_handle.auth_params, response, url);
 }
 string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, const S3AuthParams &s3_auth_params,
-                                string &continuation_token) {
+                                string &continuation_token, optional_idx max_keys) {
 	auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
 
 	// Construct the ListObjectsV2 call
@@ -1282,6 +1288,9 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, con
 		req_params += "&";
 	}
 	req_params += "encoding-type=url&list-type=2";
+	if (max_keys.IsValid()) {
+		req_params += "&max-keys=" + to_string(max_keys.GetIndex());
+	}
 	req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
 
 	auto header_map =
