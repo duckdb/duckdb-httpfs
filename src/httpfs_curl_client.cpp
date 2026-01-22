@@ -410,7 +410,8 @@ private:
 		auto status_code = HTTPStatusCode(request_info->response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
 		if (res != CURLcode::CURLE_OK) {
-			// __RESPONSE_STATUS__ is used for error propagation and debugging. It stores the full HTTP status trail, e.g. in cases of redirection failures, to help trace the sequence of HTTP statuses.
+			// __RESPONSE_STATUS__ is used for error propagation and debugging. It stores the full HTTP status trail,
+			// e.g. in cases of redirection failures, to help trace the sequence of HTTP statuses.
 			if (!request_info->header_collection.empty() &&
 			    request_info->header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
 				response->request_error = request_info->header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
