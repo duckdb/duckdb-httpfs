@@ -1339,89 +1339,94 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 }
 string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
                                 string &continuation_token) {
-	auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
+	const idx_t MAX_RETRIES = 1;
+	for (idx_t it = 0; it <= MAX_RETRIES; it++) {
+		auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
 
-	// Construct the ListObjectsV2 call
-	string req_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
+		// Construct the ListObjectsV2 call
+		string req_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
 
-	string req_params;
-	if (!continuation_token.empty()) {
-		req_params += "continuation-token=" + S3FileSystem::UrlEncode(continuation_token, true);
-		req_params += "&";
-	}
-	req_params += "encoding-type=url&list-type=2";
-	req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
+		string req_params;
+		if (!continuation_token.empty()) {
+			req_params += "continuation-token=" + S3FileSystem::UrlEncode(continuation_token, true);
+			req_params += "&";
+		}
+		req_params += "encoding-type=url&list-type=2";
+		req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
 
-	auto header_map =
-	    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
+		auto header_map =
+		    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
 
-	// Get requests use fresh connection
-	string full_host = parsed_url.http_proto + parsed_url.host;
-	string listobjectv2_url = full_host + req_path + "?" + req_params;
-	std::stringstream response;
-	ErrorData error;
-	GetRequestInfo get_request(
-	    full_host, listobjectv2_url, header_map, http_params,
-	    [&](const HTTPResponse &response) {
-		    if (static_cast<int>(response.status) >= 400) {
-			    string trimmed_path = path;
-			    StringUtil::RTrim(trimmed_path, "/");
-			    trimmed_path += listobjectv2_url;
-			    error = ErrorData(S3FileSystem::GetS3Error(s3_auth_params, response, trimmed_path));
-		    }
-		    return true;
-	    },
-	    [&](const_data_ptr_t data, idx_t data_length) {
-		    response << string(const_char_ptr_cast(data), data_length);
-		    return true;
-	    });
-	auto result = http_params.http_util.Request(get_request);
-	if (result->HasRequestError()) {
-		throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), listobjectv2_url);
-	}
-	// check
-	string updated_bucket_region;
-	if (result->status == HTTPStatusCode::MovedPermanently_301) {
-		string moved_error;
-		if (result->HasHeader("x-amz-bucket-region")) {
-			auto response_region = result->GetHeaderValue("x-amz-bucket-region");
-			if (response_region == s3_auth_params.region) {
-				moved_error = "suggested region \"" + response_region +
-				              "\" is the same as the region we used to make the request";
+		// Get requests use fresh connection
+		string full_host = parsed_url.http_proto + parsed_url.host;
+		string listobjectv2_url = full_host + req_path + "?" + req_params;
+		std::stringstream response;
+		ErrorData error;
+		GetRequestInfo get_request(
+		    full_host, listobjectv2_url, header_map, http_params,
+		    [&](const HTTPResponse &response) {
+			    if (static_cast<int>(response.status) >= 400) {
+				    string trimmed_path = path;
+				    StringUtil::RTrim(trimmed_path, "/");
+				    trimmed_path += listobjectv2_url;
+				    error = ErrorData(S3FileSystem::GetS3Error(s3_auth_params, response, trimmed_path));
+			    }
+			    return true;
+		    },
+		    [&](const_data_ptr_t data, idx_t data_length) {
+			    response << string(const_char_ptr_cast(data), data_length);
+			    return true;
+		    });
+		auto result = http_params.http_util.Request(get_request);
+		if (result->HasRequestError()) {
+			throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), listobjectv2_url);
+		}
+		// check
+		string updated_bucket_region;
+		if (result->status == HTTPStatusCode::MovedPermanently_301) {
+			string moved_error;
+			if (it == 0 && result->HasHeader("x-amz-bucket-region")) {
+				auto response_region = result->GetHeaderValue("x-amz-bucket-region");
+				if (response_region == s3_auth_params.region) {
+					moved_error = "suggested region \"" + response_region +
+					              "\" is the same as the region we used to make the request";
+				} else {
+					updated_bucket_region = response_region;
+				}
 			} else {
-				updated_bucket_region = response_region;
+				moved_error = "HTTP response did not contain header_x-amz-bucket-region";
 			}
-		} else {
-			moved_error = "HTTP response did not contain header_x-amz-bucket-region";
-		}
-		if (!moved_error.empty()) {
-			throw HTTPException(*result, "HTTP 301 response when running glob \"%s\" but %s", path, moved_error);
-		}
-	}
-	if (error.HasError()) {
-		if (result->HasHeader("x-amz-bucket-region")) {
-			auto response_region = result->GetHeaderValue("x-amz-bucket-region");
-			if (response_region != s3_auth_params.region) {
-				updated_bucket_region = response_region;
+			if (!moved_error.empty()) {
+				throw HTTPException(*result, "HTTP 301 response when running glob \"%s\" but %s", path, moved_error);
 			}
 		}
-		if (updated_bucket_region.empty()) {
-			// no updated region found
-			error.Throw();
+		if (error.HasError()) {
+			if (it == 0 && result->HasHeader("x-amz-bucket-region")) {
+				auto response_region = result->GetHeaderValue("x-amz-bucket-region");
+				if (response_region != s3_auth_params.region) {
+					updated_bucket_region = response_region;
+				}
+			}
+			if (updated_bucket_region.empty()) {
+				// no updated region found
+				error.Throw();
+			}
 		}
-	}
-	if (!updated_bucket_region.empty()) {
-		DUCKDB_LOG_WARNING(http_params.logger,
-		                   "Ran S3 glob \"%s\" from incorrect region \"%s\" - retrying with updated region \"%s\".\n"
-		                   "Consider setting the S3 region to this explicitly to avoid extra round-trips.",
-		                   path, s3_auth_params.region, updated_bucket_region);
+		if (!updated_bucket_region.empty()) {
+			DUCKDB_LOG_WARNING(
+			    http_params.logger,
+			    "Ran S3 glob \"%s\" from incorrect region \"%s\" - retrying with updated region \"%s\".\n"
+			    "Consider setting the S3 region to this explicitly to avoid extra round-trips.",
+			    path, s3_auth_params.region, updated_bucket_region);
 
-		// bucket region was updated - update and re-run the request against the correct endpoint
-		s3_auth_params.SetRegion(std::move(updated_bucket_region));
-		return AWSListObjectV2::Request(path, http_params, s3_auth_params, continuation_token);
+			// bucket region was updated - update and re-run the request against the correct endpoint
+			s3_auth_params.SetRegion(std::move(updated_bucket_region));
+			continue;
+		}
+		return response.str();
 	}
-
-	return response.str();
+	throw InvalidInputException(
+	    "Exceeded retry count in AWSListObjectV2::Request - this means we got multiple redirects to different regions");
 }
 
 optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
