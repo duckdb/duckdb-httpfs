@@ -195,7 +195,27 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	return ReadFrom(secret_reader, info.file_path);
 }
 
-S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const std::string &file_path) {
+bool EndpointIsAWS(const string &endpoint) {
+	if (endpoint.empty()) {
+		// default (empty) endpoint is AWS
+		return true;
+	}
+	if (StringUtil::StartsWith(endpoint, "s3.") && StringUtil::EndsWith(endpoint, ".amazonaws.com")) {
+		return true;
+	}
+	return false;
+}
+
+void S3AuthParams::InitializeEndpoint() {
+	if (!region.empty() && EndpointIsAWS(endpoint)) {
+		// adjust AWS endpoints to the correct regional endpoint
+		endpoint = StringUtil::Format("s3.%s.amazonaws.com", region);
+	} else if (endpoint.empty()) {
+		endpoint = "s3.amazonaws.com";
+	}
+}
+
+S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const string &file_path) {
 	auto result = S3AuthParams();
 
 	// These settings we just set or leave to their S3AuthParams default value
@@ -224,12 +244,7 @@ S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const std::
 		// Read bearer token for GCS
 		secret_reader.TryGetSecretKey("bearer_token", result.oauth2_bearer_token);
 	}
-
-	if (!result.region.empty() && (result.endpoint.empty() || result.endpoint == "s3.amazonaws.com")) {
-		result.endpoint = StringUtil::Format("s3.%s.amazonaws.com", result.region);
-	} else if (result.endpoint.empty()) {
-		result.endpoint = "s3.amazonaws.com";
-	}
+	result.InitializeEndpoint();
 
 	return result;
 }
@@ -258,6 +273,20 @@ unique_ptr<KeyValueSecret> CreateSecret(vector<string> &prefix_paths_p, string &
 	}
 
 	return return_value;
+}
+
+S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+                           unique_ptr<HTTPParams> http_params_p, const S3AuthParams &auth_params_p,
+                           const S3ConfigParams &config_params_p)
+    : HTTPFileHandle(fs, file, flags, std::move(http_params_p)), auth_params(auth_params_p),
+      config_params(config_params_p), uploads_in_progress(0), parts_uploaded(0), upload_finalized(false),
+      uploader_has_error(false), upload_exception(nullptr) {
+	auto_fallback_to_full_file_download = false;
+	if (flags.OpenForReading() && flags.OpenForWriting()) {
+		throw NotImplementedException("Cannot open an HTTP file for both reading and writing");
+	} else if (flags.OpenForAppending()) {
+		throw NotImplementedException("Cannot open an HTTP file for appending");
+	}
 }
 
 S3FileHandle::~S3FileHandle() {
@@ -891,18 +920,16 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 				}
 			}
 		}
+		string correct_region;
 		if (!refreshed_secret) {
 			auto &extra_info = error.ExtraInfo();
 			auto entry = extra_info.find("status_code");
 			if (entry != extra_info.end()) {
 				if (entry->second == "301" || entry->second == "400") {
 					auto new_region = extra_info.find("header_x-amz-bucket-region");
-					string correct_region = "";
 					if (new_region != extra_info.end()) {
 						correct_region = new_region->second;
 					}
-					auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params, correct_region);
-					throw Exception(extra_info, error.Type(), error.RawMessage() + extra_text);
 				}
 				if (entry->second == "403") {
 					// 403: FORBIDDEN
@@ -915,11 +942,17 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 					throw Exception(extra_info, error.Type(), error.RawMessage() + extra_text);
 				}
 			}
-			throw;
+			if (correct_region.empty()) {
+				throw;
+			}
 		}
 		// We have succesfully refreshed a secret: retry initializing with new credentials
 		FileOpenerInfo info = {path};
 		auth_params = S3AuthParams::ReadFrom(opener, info);
+		if (!correct_region.empty()) {
+			auth_params.region = std::move(correct_region);
+			auth_params.InitializeEndpoint();
+		}
 		HTTPFileHandle::Initialize(opener);
 	}
 
