@@ -286,13 +286,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	    url, header_map, hfh.http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
-			    string error =
-			        "HTTP GET error on '" + url + "' (HTTP " + to_string(static_cast<int>(response.status)) + ")";
-			    if (response.status == HTTPStatusCode::RangeNotSatisfiable_416) {
-				    error += " This could mean the file was changed. Try disabling the duckdb http metadata cache "
-				             "if enabled, and confirm the server supports range requests.";
-			    }
-			    throw HTTPException(response, error);
+			    throw GetHTTPError(handle, response, url);
 		    }
 		    if (static_cast<int>(response.status) < 300) { // done redirecting
 			    out_offset = 0;

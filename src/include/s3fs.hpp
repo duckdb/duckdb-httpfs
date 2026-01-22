@@ -256,6 +256,7 @@ public:
 	}
 
 	static string GetS3BadRequestError(const S3AuthParams &s3_auth_params, string correct_region = "");
+	static string ParseS3Error(const string &error);
 	static string GetS3AuthError(const S3AuthParams &s3_auth_params);
 	static string GetGCSAuthError(const S3AuthParams &s3_auth_params);
 	static HTTPException GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,

@@ -1269,6 +1269,23 @@ bool S3FileSystem::ListFilesExtended(const string &directory, const std::functio
 	return true;
 }
 
+optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
+	string open_tag = "<" + tag + ">";
+	string close_tag = "</" + tag + ">";
+	auto open_tag_pos = response.find(open_tag, cur_pos);
+	if (open_tag_pos == string::npos) {
+		// tag not found
+		return optional_idx();
+	}
+	auto close_tag_pos = response.find(close_tag, open_tag_pos + open_tag.size());
+	if (close_tag_pos == string::npos) {
+		throw InternalException("Failed to parse S3 result: found open tag for %s but did not find matching close tag",
+		                        tag);
+	}
+	result = response.substr(open_tag_pos + open_tag.size(), close_tag_pos - open_tag_pos - open_tag.size());
+	return close_tag_pos + close_tag.size();
+}
+
 string S3FileSystem::GetS3BadRequestError(const S3AuthParams &s3_auth_params, string correct_region) {
 	string extra_text = "\n\nBad Request - this can be caused by the S3 region being set incorrectly.";
 	if (s3_auth_params.region.empty()) {
@@ -1310,14 +1327,38 @@ string S3FileSystem::GetGCSAuthError(const S3AuthParams &s3_auth_params) {
 	return extra_text;
 }
 
+string S3FileSystem::ParseS3Error(const string &error) {
+	// S3 errors look like this:
+	//<Error>
+	//  <Code>NoSuchKey</Code>
+	//  <Message>The resource you requested does not exist</Message>
+	//  <Resource>/mybucket/myfoto.jpg</Resource>
+	//  <RequestId>4442587FB7D0A2F9</RequestId>
+	//</Error>
+	if (error.empty()) {
+		return string();
+	}
+	string error_code, error_message;
+	idx_t cur_pos = 0;
+	auto next_pos = FindTagContents(error, "Code", cur_pos, error_code);
+	if (!next_pos.IsValid()) {
+		return string();
+	}
+	next_pos = FindTagContents(error, "Message", cur_pos, error_message);
+	if (!next_pos.IsValid()) {
+		return string();
+	}
+	return StringUtil::Format("\n\n%s: %s", error_code, error_message);
+}
+
 HTTPException S3FileSystem::GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
                                        const string &url) {
-	string extra_text;
+	string extra_text = ParseS3Error(response.body);
 	if (response.status == HTTPStatusCode::BadRequest_400) {
-		extra_text = GetS3BadRequestError(s3_auth_params);
+		extra_text += GetS3BadRequestError(s3_auth_params);
 	}
 	if (response.status == HTTPStatusCode::Forbidden_403) {
-		extra_text = GetS3AuthError(s3_auth_params);
+		extra_text += GetS3AuthError(s3_auth_params);
 	}
 	auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
 	return HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url,
@@ -1427,23 +1468,6 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 	}
 	throw InvalidInputException(
 	    "Exceeded retry count in AWSListObjectV2::Request - this means we got multiple redirects to different regions");
-}
-
-optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
-	string open_tag = "<" + tag + ">";
-	string close_tag = "</" + tag + ">";
-	auto open_tag_pos = response.find(open_tag, cur_pos);
-	if (open_tag_pos == string::npos) {
-		// tag not found
-		return optional_idx();
-	}
-	auto close_tag_pos = response.find(close_tag, open_tag_pos + open_tag.size());
-	if (close_tag_pos == string::npos) {
-		throw InternalException("Failed to parse S3 result: found open tag for %s but did not find matching close tag",
-		                        tag);
-	}
-	result = response.substr(open_tag_pos + open_tag.size(), close_tag_pos - open_tag_pos - open_tag.size());
-	return close_tag_pos + close_tag.size();
 }
 
 void AWSListObjectV2::ParseFileList(string &aws_response, vector<OpenFileInfo> &result) {

@@ -1,6 +1,6 @@
 # name: test/sql/s3/incorrect_s3_region.test_slow
 # description: Test globbing when the incorrect S3 region is specified
-# group: [httpfs]
+# group: [s3]
 
 require httpfs
 
