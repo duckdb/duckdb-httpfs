@@ -1338,17 +1338,34 @@ string S3FileSystem::ParseS3Error(const string &error) {
 	if (error.empty()) {
 		return string();
 	}
-	string error_code, error_message;
+	// find <Error> tag
+	string error_xml;
+	idx_t err_pos = 0;
+	auto next_pos = FindTagContents(error, "Error", err_pos, error_xml);
+	if (!next_pos.IsValid()) {
+		return string();
+	}
+	// find <Code> and <Message>
+	string error_code, error_message, extra_error_data;
 	idx_t cur_pos = 0;
-	auto next_pos = FindTagContents(error, "Code", cur_pos, error_code);
+	next_pos = FindTagContents(error_xml, "Code", cur_pos, error_code);
 	if (!next_pos.IsValid()) {
 		return string();
 	}
-	next_pos = FindTagContents(error, "Message", cur_pos, error_message);
+	cur_pos = 0;
+	next_pos = FindTagContents(error_xml, "Message", cur_pos, error_message);
 	if (!next_pos.IsValid()) {
 		return string();
 	}
-	return StringUtil::Format("\n\n%s: %s", error_code, error_message);
+	// depending on Code, find other info
+	if (error_code == "InvalidAccessKeyId") {
+		cur_pos = 0;
+		next_pos = FindTagContents(error_xml, "AWSAccessKeyId", cur_pos, extra_error_data);
+		if (next_pos.IsValid()) {
+			extra_error_data = "\nInvalid Access Key: \"" + extra_error_data + "\"";
+		}
+	}
+	return StringUtil::Format("\n\n%s: %s%s", error_code, error_message, extra_error_data);
 }
 
 HTTPException S3FileSystem::GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
@@ -1409,7 +1426,6 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 			    if (static_cast<int>(response.status) >= 400) {
 				    string trimmed_path = path;
 				    StringUtil::RTrim(trimmed_path, "/");
-				    trimmed_path += listobjectv2_url;
 				    error = ErrorData(S3FileSystem::GetS3Error(s3_auth_params, response, trimmed_path));
 			    }
 			    return true;
