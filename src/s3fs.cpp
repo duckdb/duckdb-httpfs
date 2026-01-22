@@ -1411,6 +1411,11 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		}
 	}
 	if (!updated_bucket_region.empty()) {
+		DUCKDB_LOG_WARNING(http_params.logger,
+		                   "Ran S3 glob \"%s\" from incorrect region \"%s\" - retrying with updated region \"%s\".\n"
+		                   "Consider setting the S3 region to this explicitly to avoid extra round-trips.",
+		                   path, s3_auth_params.region, updated_bucket_region);
+
 		// bucket region was updated - update and re-run the request against the correct endpoint
 		s3_auth_params.SetRegion(std::move(updated_bucket_region));
 		return AWSListObjectV2::Request(path, http_params, s3_auth_params, continuation_token);
