@@ -489,7 +489,7 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders
 			error.Throw();
 		}
 		throw HTTPException(*res, "Request returned HTTP %d for HTTP %s to '%s'", static_cast<int>(res->status),
-		                    EnumUtil::ToString(RequestType::GET_REQUEST), res->url);
+		                    EnumUtil::ToString(RequestType::GET_REQUEST), url);
 	}
 	throw IOException("Unknown error for HTTP %s to '%s'", EnumUtil::ToString(RequestType::GET_REQUEST), url);
 }
@@ -814,7 +814,7 @@ void HTTPFileHandle::LoadFileInfo() {
 				}
 				res = std::move(range_res);
 			} else {
-				throw HTTPException(*res, "Unable to connect to URL \"%s\": %d (%s).", res->url,
+				throw HTTPException(*res, "Unable to connect to URL \"%s\": %d (%s).", path,
 				                    static_cast<int>(res->status), res->GetError());
 			}
 		}
