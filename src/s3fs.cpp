@@ -293,6 +293,12 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 	} else if (flags.OpenForAppending()) {
 		throw NotImplementedException("Cannot open an HTTP file for appending");
 	}
+	if (file.extended_info) {
+		auto entry = file.extended_info->options.find("s3_region");
+		if (entry != file.extended_info->options.end()) {
+			auth_params.SetRegion(entry->second.ToString());
+		}
+	}
 }
 
 S3FileHandle::~S3FileHandle() {
@@ -1223,6 +1229,9 @@ bool S3GlobResult::ExpandNextPath() const {
 				result_full_url += '?' + parsed_s3_url.query_param;
 			}
 			s3_key.path = std::move(result_full_url);
+			if (!s3_auth_params.region.empty()) {
+				s3_key.extended_info->options["s3_region"] = s3_auth_params.region;
+			}
 			expanded_files.push_back(std::move(s3_key));
 		}
 	}
