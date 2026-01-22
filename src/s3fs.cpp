@@ -207,12 +207,13 @@ bool EndpointIsAWS(const string &endpoint) {
 }
 
 void S3AuthParams::InitializeEndpoint() {
-	if (!region.empty() && EndpointIsAWS(endpoint)) {
-		// adjust AWS endpoints to the correct regional endpoint
-		endpoint = StringUtil::Format("s3.%s.amazonaws.com", region);
-	} else if (endpoint.empty()) {
-		endpoint = "s3.amazonaws.com";
+	if (!EndpointIsAWS(endpoint)) {
+		return;
 	}
+	if (region.empty()) {
+		region = "us-east-1";
+	}
+	endpoint = StringUtil::Format("s3.%s.amazonaws.com", region);
 }
 
 S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const string &file_path) {
@@ -1361,18 +1362,44 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		    return true;
 	    });
 	auto result = http_params.http_util.Request(get_request);
+	if (result->HasRequestError()) {
+		throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), listobjectv2_url);
+	}
+	// check
+	string updated_bucket_region;
+	if (result->status == HTTPStatusCode::MovedPermanently_301) {
+		string moved_error;
+		if (result->HasHeader("x-amz-bucket-region")) {
+			auto response_region = result->GetHeaderValue("x-amz-bucket-region");
+			if (response_region == s3_auth_params.region) {
+				moved_error = "suggested region \"" + response_region +
+				              "\" is the same as the region we used to make the request";
+			} else {
+				updated_bucket_region = response_region;
+			}
+		} else {
+			moved_error = "HTTP response did not contain header_x-amz-bucket-region";
+		}
+		if (!moved_error.empty()) {
+			throw HTTPException(*result, "HTTP 301 response when running glob \"%s\" but %s", path, moved_error);
+		}
+	}
 	if (error.HasError()) {
 		if (result->HasHeader("x-amz-bucket-region")) {
 			auto response_region = result->GetHeaderValue("x-amz-bucket-region");
 			if (response_region != s3_auth_params.region) {
-				s3_auth_params.region = response_region;
-				return AWSListObjectV2::Request(path, http_params, s3_auth_params, continuation_token);
+				updated_bucket_region = response_region;
 			}
 		}
-		error.Throw();
+		if (updated_bucket_region.empty()) {
+			// no updated region found
+			error.Throw();
+		}
 	}
-	if (result->HasRequestError()) {
-		throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), listobjectv2_url);
+	if (!updated_bucket_region.empty()) {
+		// bucket region was updated - update and re-run the request against the correct endpoint
+		s3_auth_params.SetRegion(std::move(updated_bucket_region));
+		return AWSListObjectV2::Request(path, http_params, s3_auth_params, continuation_token);
 	}
 
 	return response.str();
