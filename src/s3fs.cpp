@@ -2,7 +2,6 @@
 
 #include "crypto.hpp"
 #include "duckdb.hpp"
-#ifndef DUCKDB_AMALGAMATION
 #include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "duckdb/logging/file_system_logger.hpp"
@@ -11,12 +10,12 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/function/scalar/strftime_format.hpp"
 #include "http_state.hpp"
-#endif
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 
 #include "create_secret_functions.hpp"
 
@@ -647,7 +646,7 @@ string S3FileSystem::GetPrefix(const string &url) {
 	return prefix;
 }
 
-ParsedS3Url S3FileSystem::S3UrlParse(string url, S3AuthParams &params) {
+ParsedS3Url S3FileSystem::S3UrlParse(string url, const S3AuthParams &params) {
 	string http_proto, prefix, host, bucket, key, path, query_param, trimmed_s3_url;
 
 	prefix = GetPrefix(url);
@@ -1046,71 +1045,118 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 	return key == key_end && pattern == pattern_end;
 }
 
-vector<OpenFileInfo> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener) {
-	if (opener == nullptr) {
+struct S3GlobResult : public LazyMultiFileList {
+public:
+	S3GlobResult(S3FileSystem &fs, const string &path, optional_ptr<FileOpener> opener);
+
+protected:
+	bool ExpandNextPath() const override;
+
+private:
+	S3FileSystem &fs;
+	string glob_pattern;
+	optional_ptr<FileOpener> opener;
+	mutable bool finished = false;
+	S3AuthParams s3_auth_params;
+	string shared_path;
+	ParsedS3Url parsed_s3_url;
+	mutable string main_continuation_token;
+	mutable string current_common_prefix;
+	mutable string common_prefix_continuation_token;
+	mutable vector<string> common_prefixes;
+	mutable bool initial_request = true;
+};
+
+S3GlobResult::S3GlobResult(S3FileSystem &fs, const string &glob_pattern_p, optional_ptr<FileOpener> opener)
+    : fs(fs), glob_pattern(glob_pattern_p), opener(opener) {
+	if (!opener) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
 	}
-
 	FileOpenerInfo info = {glob_pattern};
 
 	// Trim any query parameters from the string
-	S3AuthParams s3_auth_params = S3AuthParams::ReadFrom(opener, info);
+	s3_auth_params = S3AuthParams::ReadFrom(opener, info);
 
 	// In url compatibility mode, we ignore globs allowing users to query files with the glob chars
 	if (s3_auth_params.s3_url_compatibility_mode) {
-		return {glob_pattern};
+		expanded_files.emplace_back(glob_pattern);
+		finished = true;
+		return;
 	}
 
-	auto parsed_s3_url = S3UrlParse(glob_pattern, s3_auth_params);
+	parsed_s3_url = fs.S3UrlParse(glob_pattern, s3_auth_params);
 	auto parsed_glob_url = parsed_s3_url.trimmed_s3_url;
 
 	// AWS matches on prefix, not glob pattern, so we take a substring until the first wildcard char for the aws calls
 	auto first_wildcard_pos = parsed_glob_url.find_first_of("*[\\");
 	if (first_wildcard_pos == string::npos) {
-		return {glob_pattern};
+		expanded_files.emplace_back(glob_pattern);
+		finished = true;
+		return;
 	}
 
-	string shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
+	shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
+
+	fs.ReadQueryParams(parsed_s3_url.query_param, s3_auth_params);
+}
+
+bool S3GlobResult::ExpandNextPath() const {
+	if (finished) {
+		return false;
+	}
+
+	FileOpenerInfo info = {glob_pattern};
 	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
 	auto http_params = http_util->InitializeParameters(opener, info);
 
-	ReadQueryParams(parsed_s3_url.query_param, s3_auth_params);
-
-	// Do main listobjectsv2 request
 	vector<OpenFileInfo> s3_keys;
-	string main_continuation_token;
+	if (!current_common_prefix.empty()) {
+		// we have common prefixes left to scan - perform the request
+		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
 
-	// Main paging loop
-	do {
-		// main listobject call, may
-		string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
-		                                               main_continuation_token, HTTPState::TryGetState(opener).get());
+		auto prefix_res =
+		    AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params, common_prefix_continuation_token);
+		AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
+		auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
+		common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
+		common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
+		if (common_prefix_continuation_token.empty()) {
+			// we are done with the current common prefix
+			// either move on to the next one, or finish up
+			if (common_prefixes.empty()) {
+				// done - we need to do a top-level request again next
+				current_common_prefix = string();
+			} else {
+				// process the next prefix
+				current_common_prefix = common_prefixes.back();
+				common_prefixes.pop_back();
+			}
+		}
+	} else {
+		if (!common_prefixes.empty()) {
+			throw InternalException("We have common prefixes but we are doing a top-level request");
+		}
+		// issue the main request
+		string response_str =
+		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token);
 		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
 		AWSListObjectV2::ParseFileList(response_str, s3_keys);
 
-		// Repeat requests until the keys of all common prefixes are parsed.
-		auto common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
-		while (!common_prefixes.empty()) {
-			auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + common_prefixes.back();
+		// parse the list of common prefixes
+		common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
+		if (!common_prefixes.empty()) {
+			// we have common prefixes - set one up for the next request
+			current_common_prefix = common_prefixes.back();
 			common_prefixes.pop_back();
-
-			// TODO we could optimize here by doing a match on the prefix, if it doesn't match we can skip this prefix
-			// Paging loop for common prefix requests
-			string common_prefix_continuation_token;
-			do {
-				auto prefix_res =
-				    AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params,
-				                             common_prefix_continuation_token, HTTPState::TryGetState(opener).get());
-				AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
-				auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
-				common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
-				common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
-			} while (!common_prefix_continuation_token.empty());
 		}
-	} while (!main_continuation_token.empty());
+	}
+
+	if (main_continuation_token.empty() && current_common_prefix.empty()) {
+		// we are done
+		finished = true;
+	}
 
 	vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
-	vector<OpenFileInfo> result;
 	for (auto &s3_key : s3_keys) {
 
 		vector<string> key_splits = StringUtil::Split(s3_key.path, "/");
@@ -1123,34 +1169,39 @@ vector<OpenFileInfo> S3FileSystem::Glob(const string &glob_pattern, FileOpener *
 				result_full_url += '?' + parsed_s3_url.query_param;
 			}
 			s3_key.path = std::move(result_full_url);
-			result.push_back(std::move(s3_key));
+			expanded_files.push_back(std::move(s3_key));
 		}
 	}
-	return result;
+	return true;
+}
+
+unique_ptr<MultiFileList> S3FileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
+                                                          optional_ptr<FileOpener> opener) {
+	return make_uniq<S3GlobResult>(*this, path, opener);
 }
 
 string S3FileSystem::GetName() const {
 	return "S3FileSystem";
 }
 
-bool S3FileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
-                             FileOpener *opener) {
+bool S3FileSystem::ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
+                                     optional_ptr<FileOpener> opener) {
 	string trimmed_dir = directory;
 	StringUtil::RTrim(trimmed_dir, PathSeparator(trimmed_dir));
-	auto glob_res = Glob(JoinPath(trimmed_dir, "**"), opener);
+	auto glob_res = GlobFilesExtended(JoinPath(trimmed_dir, "**"), FileGlobOptions::ALLOW_EMPTY, opener);
 
-	if (glob_res.empty()) {
+	if (!glob_res || glob_res->GetExpandResult() == FileExpandResult::NO_FILES) {
 		return false;
 	}
 
-	for (const auto &file : glob_res) {
-		callback(file.path, false);
+	for (auto file : glob_res->Files()) {
+		callback(file);
 	}
 
 	return true;
 }
 
-string S3FileSystem::GetS3BadRequestError(S3AuthParams &s3_auth_params, string correct_region) {
+string S3FileSystem::GetS3BadRequestError(const S3AuthParams &s3_auth_params, string correct_region) {
 	string extra_text = "\n\nBad Request - this can be caused by the S3 region being set incorrectly.";
 	if (s3_auth_params.region.empty()) {
 		extra_text += "\n* No region is provided.";
@@ -1163,7 +1214,7 @@ string S3FileSystem::GetS3BadRequestError(S3AuthParams &s3_auth_params, string c
 	return extra_text;
 }
 
-string S3FileSystem::GetS3AuthError(S3AuthParams &s3_auth_params) {
+string S3FileSystem::GetS3AuthError(const S3AuthParams &s3_auth_params) {
 	string extra_text = "\n\nAuthentication Failure - this is usually caused by invalid or missing credentials.";
 	if (s3_auth_params.secret_access_key.empty() && s3_auth_params.access_key_id.empty()) {
 		extra_text += "\n* No credentials are provided.";
@@ -1174,7 +1225,7 @@ string S3FileSystem::GetS3AuthError(S3AuthParams &s3_auth_params) {
 	return extra_text;
 }
 
-string S3FileSystem::GetGCSAuthError(S3AuthParams &s3_auth_params) {
+string S3FileSystem::GetGCSAuthError(const S3AuthParams &s3_auth_params) {
 	string extra_text = "\n\nAuthentication Failure - GCS authentication failed.";
 	if (s3_auth_params.oauth2_bearer_token.empty() && s3_auth_params.secret_access_key.empty() &&
 	    s3_auth_params.access_key_id.empty()) {
@@ -1191,7 +1242,8 @@ string S3FileSystem::GetGCSAuthError(S3AuthParams &s3_auth_params) {
 	return extra_text;
 }
 
-HTTPException S3FileSystem::GetS3Error(S3AuthParams &s3_auth_params, const HTTPResponse &response, const string &url) {
+HTTPException S3FileSystem::GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
+                                       const string &url) {
 	string extra_text;
 	if (response.status == HTTPStatusCode::BadRequest_400) {
 		extra_text = GetS3BadRequestError(s3_auth_params);
@@ -1217,8 +1269,8 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 
 	return GetS3Error(s3_handle.auth_params, response, url);
 }
-string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
-                                string &continuation_token, optional_ptr<HTTPState> state, bool use_delimiter) {
+string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, const S3AuthParams &s3_auth_params,
+                                string &continuation_token) {
 	auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
 
 	// Construct the ListObjectsV2 call
@@ -1231,10 +1283,6 @@ string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthPar
 	}
 	req_params += "encoding-type=url&list-type=2";
 	req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
-
-	if (use_delimiter) {
-		req_params += "&delimiter=%2F";
-	}
 
 	auto header_map =
 	    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
