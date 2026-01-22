@@ -1,0 +1,29 @@
+# name: test/sql/s3/incorrect_s3_region.test_slow
+# description: Test globbing when the incorrect S3 region is specified
+# group: [httpfs]
+
+require httpfs
+
+# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
+set ignore_error_messages
+
+statement ok
+set enable_logging=true;
+
+foreach s3_region us-east-1 us-west-2 us-west-2
+
+query I
+SELECT COUNT(*) FROM (FROM glob('s3://overturemaps-us-west-2/**/*.parquet') LIMIT 10);
+----
+10
+
+statement ok
+SET s3_region='${s3_region}'
+
+endloop
+
+# we should have a message signaling we're using the incorrect region
+query I
+SELECT COUNT(*) > 0 FROM duckdb_logs WHERE 'incorrect region' IN message;
+----
+true
