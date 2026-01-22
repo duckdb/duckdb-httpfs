@@ -249,6 +249,11 @@ S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const strin
 	return result;
 }
 
+void S3AuthParams::SetRegion(string new_region) {
+	region = std::move(new_region);
+	InitializeEndpoint();
+}
+
 unique_ptr<KeyValueSecret> CreateSecret(vector<string> &prefix_paths_p, string &type, string &provider, string &name,
                                         S3AuthParams &params) {
 	auto return_value = make_uniq<KeyValueSecret>(prefix_paths_p, type, provider, name);
@@ -901,6 +906,22 @@ unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, 
 	                                       S3ConfigParams::ReadFrom(opener));
 }
 
+void S3FileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) {
+	HTTPFileHandle::InitializeFromCacheEntry(cache_entry);
+	auto entry = cache_entry.properties.find("s3_region");
+	if (entry != cache_entry.properties.end()) {
+		auth_params.SetRegion(entry->second);
+	}
+}
+
+HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
+	auto result = HTTPFileHandle::GetCacheEntry();
+	if (!auth_params.region.empty()) {
+		result.properties["s3_region"] = auth_params.region;
+	}
+	return result;
+}
+
 void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	try {
 		HTTPFileHandle::Initialize(opener);
@@ -950,8 +971,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		FileOpenerInfo info = {path};
 		auth_params = S3AuthParams::ReadFrom(opener, info);
 		if (!correct_region.empty()) {
-			auth_params.region = std::move(correct_region);
-			auth_params.InitializeEndpoint();
+			auth_params.SetRegion(std::move(correct_region));
 		}
 		HTTPFileHandle::Initialize(opener);
 	}

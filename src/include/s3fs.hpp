@@ -62,6 +62,9 @@ struct S3AuthParams {
 
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
 	static S3AuthParams ReadFrom(S3KeyValueReader &secret_reader, const std::string &file_path);
+	void SetRegion(string region_p);
+
+private:
 	void InitializeEndpoint();
 };
 
@@ -153,6 +156,10 @@ public:
 	void Initialize(optional_ptr<FileOpener> opener) override;
 
 	shared_ptr<S3WriteBuffer> GetBuffer(uint16_t write_buffer_idx);
+
+protected:
+	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
+	HTTPMetadataCacheEntry GetCacheEntry() const override;
 
 protected:
 	string multipart_upload_id;
