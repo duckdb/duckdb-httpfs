@@ -1057,7 +1057,7 @@ private:
 	string glob_pattern;
 	optional_ptr<FileOpener> opener;
 	mutable bool finished = false;
-	S3AuthParams s3_auth_params;
+	mutable S3AuthParams s3_auth_params;
 	string shared_path;
 	ParsedS3Url parsed_s3_url;
 	mutable string main_continuation_token;
@@ -1252,8 +1252,8 @@ HTTPException S3FileSystem::GetS3Error(const S3AuthParams &s3_auth_params, const
 		extra_text = GetS3AuthError(s3_auth_params);
 	}
 	auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
-	throw HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url,
-	                    s3_auth_params.region, response.status, status_message, extra_text);
+	return HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url,
+	                     s3_auth_params.region, response.status, status_message, extra_text);
 }
 
 HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &response, const string &url) {
@@ -1269,7 +1269,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 
 	return GetS3Error(s3_handle.auth_params, response, url);
 }
-string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, const S3AuthParams &s3_auth_params,
+string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
                                 string &continuation_token) {
 	auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
 
@@ -1291,6 +1291,7 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, con
 	string full_host = parsed_url.http_proto + parsed_url.host;
 	string listobjectv2_url = full_host + req_path + "?" + req_params;
 	std::stringstream response;
+	ErrorData error;
 	GetRequestInfo get_request(
 	    full_host, listobjectv2_url, header_map, http_params,
 	    [&](const HTTPResponse &response) {
@@ -1298,7 +1299,7 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, con
 			    string trimmed_path = path;
 			    StringUtil::RTrim(trimmed_path, "/");
 			    trimmed_path += listobjectv2_url;
-			    throw S3FileSystem::GetS3Error(s3_auth_params, response, trimmed_path);
+			    error = ErrorData(S3FileSystem::GetS3Error(s3_auth_params, response, trimmed_path));
 		    }
 		    return true;
 	    },
@@ -1307,6 +1308,16 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, con
 		    return true;
 	    });
 	auto result = http_params.http_util.Request(get_request);
+	if (error.HasError()) {
+		if (result->HasHeader("x-amz-bucket-region")) {
+			auto response_region = result->GetHeaderValue("x-amz-bucket-region");
+			if (response_region != s3_auth_params.region) {
+				s3_auth_params.region = response_region;
+				return AWSListObjectV2::Request(path, http_params, s3_auth_params, continuation_token);
+			}
+		}
+		error.Throw();
+	}
 	if (result->HasRequestError()) {
 		throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), listobjectv2_url);
 	}
