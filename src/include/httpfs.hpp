@@ -129,6 +129,9 @@ protected:
 	//! TODO: make base function virtual?
 	void TryAddLogger(FileOpener &opener);
 
+	virtual void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry);
+	virtual HTTPMetadataCacheEntry GetCacheEntry() const;
+
 public:
 	//! Fully downloads a file
 	void FullDownload(HTTPFileSystem &hfs, bool &should_write_cache);

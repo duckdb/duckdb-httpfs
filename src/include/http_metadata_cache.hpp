@@ -19,6 +19,7 @@ struct HTTPMetadataCacheEntry {
 	idx_t length;
 	timestamp_t last_modified;
 	string etag;
+	unordered_map<string, string> properties;
 };
 
 // Simple cache with a max age for an entry to be valid

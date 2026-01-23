@@ -195,7 +195,34 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	return ReadFrom(secret_reader, info.file_path);
 }
 
-S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const std::string &file_path) {
+bool EndpointIsAWS(const string &endpoint) {
+	if (endpoint.empty()) {
+		// default (empty) endpoint is AWS
+		return true;
+	}
+	if (StringUtil::StartsWith(endpoint, "s3.") && StringUtil::EndsWith(endpoint, ".amazonaws.com")) {
+		return true;
+	}
+	return false;
+}
+
+void S3AuthParams::InitializeEndpoint() {
+	if (!EndpointIsAWS(endpoint)) {
+		return;
+	}
+	if (region.empty()) {
+		if (access_key_id.empty()) {
+			// no access key and no region - use legacy global endpoint
+			endpoint = "s3.amazonaws.com";
+			return;
+		}
+		// access key but no region - default to us-east-1
+		region = "us-east-1";
+	}
+	endpoint = StringUtil::Format("s3.%s.amazonaws.com", region);
+}
+
+S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const string &file_path) {
 	auto result = S3AuthParams();
 
 	// These settings we just set or leave to their S3AuthParams default value
@@ -224,14 +251,14 @@ S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const std::
 		// Read bearer token for GCS
 		secret_reader.TryGetSecretKey("bearer_token", result.oauth2_bearer_token);
 	}
-
-	if (!result.region.empty() && (result.endpoint.empty() || result.endpoint == "s3.amazonaws.com")) {
-		result.endpoint = StringUtil::Format("s3.%s.amazonaws.com", result.region);
-	} else if (result.endpoint.empty()) {
-		result.endpoint = "s3.amazonaws.com";
-	}
+	result.InitializeEndpoint();
 
 	return result;
+}
+
+void S3AuthParams::SetRegion(string new_region) {
+	region = std::move(new_region);
+	InitializeEndpoint();
 }
 
 unique_ptr<KeyValueSecret> CreateSecret(vector<string> &prefix_paths_p, string &type, string &provider, string &name,
@@ -258,6 +285,26 @@ unique_ptr<KeyValueSecret> CreateSecret(vector<string> &prefix_paths_p, string &
 	}
 
 	return return_value;
+}
+
+S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+                           unique_ptr<HTTPParams> http_params_p, const S3AuthParams &auth_params_p,
+                           const S3ConfigParams &config_params_p)
+    : HTTPFileHandle(fs, file, flags, std::move(http_params_p)), auth_params(auth_params_p),
+      config_params(config_params_p), uploads_in_progress(0), parts_uploaded(0), upload_finalized(false),
+      uploader_has_error(false), upload_exception(nullptr) {
+	auto_fallback_to_full_file_download = false;
+	if (flags.OpenForReading() && flags.OpenForWriting()) {
+		throw NotImplementedException("Cannot open an HTTP file for both reading and writing");
+	} else if (flags.OpenForAppending()) {
+		throw NotImplementedException("Cannot open an HTTP file for appending");
+	}
+	if (file.extended_info) {
+		auto entry = file.extended_info->options.find("s3_region");
+		if (entry != file.extended_info->options.end()) {
+			auth_params.SetRegion(entry->second.ToString());
+		}
+	}
 }
 
 S3FileHandle::~S3FileHandle() {
@@ -872,6 +919,22 @@ unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, 
 	                                       S3ConfigParams::ReadFrom(opener));
 }
 
+void S3FileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) {
+	HTTPFileHandle::InitializeFromCacheEntry(cache_entry);
+	auto entry = cache_entry.properties.find("s3_region");
+	if (entry != cache_entry.properties.end()) {
+		auth_params.SetRegion(entry->second);
+	}
+}
+
+HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
+	auto result = HTTPFileHandle::GetCacheEntry();
+	if (!auth_params.region.empty()) {
+		result.properties["s3_region"] = auth_params.region;
+	}
+	return result;
+}
+
 void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	try {
 		HTTPFileHandle::Initialize(opener);
@@ -891,18 +954,16 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 				}
 			}
 		}
+		string correct_region;
 		if (!refreshed_secret) {
 			auto &extra_info = error.ExtraInfo();
 			auto entry = extra_info.find("status_code");
 			if (entry != extra_info.end()) {
 				if (entry->second == "301" || entry->second == "400") {
 					auto new_region = extra_info.find("header_x-amz-bucket-region");
-					string correct_region = "";
 					if (new_region != extra_info.end()) {
 						correct_region = new_region->second;
 					}
-					auto extra_text = S3FileSystem::GetS3BadRequestError(auth_params, correct_region);
-					throw Exception(extra_info, error.Type(), error.RawMessage() + extra_text);
 				}
 				if (entry->second == "403") {
 					// 403: FORBIDDEN
@@ -915,11 +976,21 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 					throw Exception(extra_info, error.Type(), error.RawMessage() + extra_text);
 				}
 			}
-			throw;
+			if (correct_region.empty()) {
+				throw;
+			}
 		}
 		// We have succesfully refreshed a secret: retry initializing with new credentials
 		FileOpenerInfo info = {path};
 		auth_params = S3AuthParams::ReadFrom(opener, info);
+		if (!correct_region.empty()) {
+			DUCKDB_LOG_WARNING(
+			    logger,
+			    "Read S3 file \"%s\" from incorrect region \"%s\" - retrying with updated region \"%s\".\n"
+			    "Consider setting the S3 region to this explicitly to avoid extra round-trips.",
+			    path, auth_params.region, correct_region);
+			auth_params.SetRegion(std::move(correct_region));
+		}
 		HTTPFileHandle::Initialize(opener);
 	}
 
@@ -1056,7 +1127,7 @@ private:
 	string glob_pattern;
 	optional_ptr<FileOpener> opener;
 	mutable bool finished = false;
-	S3AuthParams s3_auth_params;
+	mutable S3AuthParams s3_auth_params;
 	string shared_path;
 	ParsedS3Url parsed_s3_url;
 	mutable string main_continuation_token;
@@ -1167,6 +1238,9 @@ bool S3GlobResult::ExpandNextPath() const {
 				result_full_url += '?' + parsed_s3_url.query_param;
 			}
 			s3_key.path = std::move(result_full_url);
+			if (!s3_auth_params.region.empty()) {
+				s3_key.extended_info->options["s3_region"] = s3_auth_params.region;
+			}
 			expanded_files.push_back(std::move(s3_key));
 		}
 	}
@@ -1205,6 +1279,23 @@ bool S3FileSystem::ListFilesExtended(const string &directory, const std::functio
 	}
 
 	return true;
+}
+
+optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
+	string open_tag = "<" + tag + ">";
+	string close_tag = "</" + tag + ">";
+	auto open_tag_pos = response.find(open_tag, cur_pos);
+	if (open_tag_pos == string::npos) {
+		// tag not found
+		return optional_idx();
+	}
+	auto close_tag_pos = response.find(close_tag, open_tag_pos + open_tag.size());
+	if (close_tag_pos == string::npos) {
+		throw InternalException("Failed to parse S3 result: found open tag for %s but did not find matching close tag",
+		                        tag);
+	}
+	result = response.substr(open_tag_pos + open_tag.size(), close_tag_pos - open_tag_pos - open_tag.size());
+	return close_tag_pos + close_tag.size();
 }
 
 string S3FileSystem::GetS3BadRequestError(const S3AuthParams &s3_auth_params, string correct_region) {
@@ -1248,18 +1339,59 @@ string S3FileSystem::GetGCSAuthError(const S3AuthParams &s3_auth_params) {
 	return extra_text;
 }
 
+string S3FileSystem::ParseS3Error(const string &error) {
+	// S3 errors look like this:
+	//<Error>
+	//  <Code>NoSuchKey</Code>
+	//  <Message>The resource you requested does not exist</Message>
+	//  <Resource>/mybucket/myfoto.jpg</Resource>
+	//  <RequestId>4442587FB7D0A2F9</RequestId>
+	//</Error>
+	if (error.empty()) {
+		return string();
+	}
+	// find <Error> tag
+	string error_xml;
+	idx_t err_pos = 0;
+	auto next_pos = FindTagContents(error, "Error", err_pos, error_xml);
+	if (!next_pos.IsValid()) {
+		return string();
+	}
+	// find <Code> and <Message>
+	string error_code, error_message, extra_error_data;
+	idx_t cur_pos = 0;
+	next_pos = FindTagContents(error_xml, "Code", cur_pos, error_code);
+	if (!next_pos.IsValid()) {
+		return string();
+	}
+	cur_pos = 0;
+	next_pos = FindTagContents(error_xml, "Message", cur_pos, error_message);
+	if (!next_pos.IsValid()) {
+		return string();
+	}
+	// depending on Code, find other info
+	if (error_code == "InvalidAccessKeyId") {
+		cur_pos = 0;
+		next_pos = FindTagContents(error_xml, "AWSAccessKeyId", cur_pos, extra_error_data);
+		if (next_pos.IsValid()) {
+			extra_error_data = "\nInvalid Access Key: \"" + extra_error_data + "\"";
+		}
+	}
+	return StringUtil::Format("\n\n%s: %s%s", error_code, error_message, extra_error_data);
+}
+
 HTTPException S3FileSystem::GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
                                        const string &url) {
-	string extra_text;
+	string extra_text = ParseS3Error(response.body);
 	if (response.status == HTTPStatusCode::BadRequest_400) {
-		extra_text = GetS3BadRequestError(s3_auth_params);
+		extra_text += GetS3BadRequestError(s3_auth_params);
 	}
 	if (response.status == HTTPStatusCode::Forbidden_403) {
-		extra_text = GetS3AuthError(s3_auth_params);
+		extra_text += GetS3AuthError(s3_auth_params);
 	}
 	auto status_message = HTTPFSUtil::GetStatusMessage(response.status);
-	throw HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url,
-	                    s3_auth_params.region, response.status, status_message, extra_text);
+	return HTTPException(response, "HTTP GET error reading '%s' in region '%s' (HTTP %d %s)%s", url,
+	                     s3_auth_params.region, response.status, status_message, extra_text);
 }
 
 HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &response, const string &url) {
@@ -1275,69 +1407,99 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 
 	return GetS3Error(s3_handle.auth_params, response, url);
 }
-string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, const S3AuthParams &s3_auth_params,
+
+string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
                                 string &continuation_token, optional_idx max_keys) {
-	auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
+	const idx_t MAX_RETRIES = 1;
+	for (idx_t it = 0; it <= MAX_RETRIES; it++) {
+		auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
 
-	// Construct the ListObjectsV2 call
-	string req_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
+		// Construct the ListObjectsV2 call
+		string req_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
 
-	string req_params;
-	if (!continuation_token.empty()) {
-		req_params += "continuation-token=" + S3FileSystem::UrlEncode(continuation_token, true);
-		req_params += "&";
+		string req_params;
+		if (!continuation_token.empty()) {
+			req_params += "continuation-token=" + S3FileSystem::UrlEncode(continuation_token, true);
+			req_params += "&";
+		}
+		req_params += "encoding-type=url&list-type=2";
+		req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
+		if (max_keys.IsValid()) {
+			req_params += "&max-keys=" + to_string(max_keys.GetIndex());
+		}
+
+		auto header_map =
+		    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
+
+		// Get requests use fresh connection
+		string full_host = parsed_url.http_proto + parsed_url.host;
+		string listobjectv2_url = full_host + req_path + "?" + req_params;
+		std::stringstream response;
+		ErrorData error;
+		GetRequestInfo get_request(
+		    full_host, listobjectv2_url, header_map, http_params,
+		    [&](const HTTPResponse &response) {
+			    if (static_cast<int>(response.status) >= 400) {
+				    string trimmed_path = path;
+				    StringUtil::RTrim(trimmed_path, "/");
+				    error = ErrorData(S3FileSystem::GetS3Error(s3_auth_params, response, trimmed_path));
+			    }
+			    return true;
+		    },
+		    [&](const_data_ptr_t data, idx_t data_length) {
+			    response << string(const_char_ptr_cast(data), data_length);
+			    return true;
+		    });
+		auto result = http_params.http_util.Request(get_request);
+		if (result->HasRequestError()) {
+			throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), listobjectv2_url);
+		}
+		// check
+		string updated_bucket_region;
+		if (result->status == HTTPStatusCode::MovedPermanently_301) {
+			string moved_error;
+			if (it == 0 && result->HasHeader("x-amz-bucket-region")) {
+				auto response_region = result->GetHeaderValue("x-amz-bucket-region");
+				if (response_region == s3_auth_params.region) {
+					moved_error = "suggested region \"" + response_region +
+					              "\" is the same as the region we used to make the request";
+				} else {
+					updated_bucket_region = response_region;
+				}
+			} else {
+				moved_error = "HTTP response did not contain header_x-amz-bucket-region";
+			}
+			if (!moved_error.empty()) {
+				throw HTTPException(*result, "HTTP 301 response when running glob \"%s\" but %s", path, moved_error);
+			}
+		}
+		if (error.HasError()) {
+			if (it == 0 && result->HasHeader("x-amz-bucket-region")) {
+				auto response_region = result->GetHeaderValue("x-amz-bucket-region");
+				if (response_region != s3_auth_params.region) {
+					updated_bucket_region = response_region;
+				}
+			}
+			if (updated_bucket_region.empty()) {
+				// no updated region found
+				error.Throw();
+			}
+		}
+		if (!updated_bucket_region.empty()) {
+			DUCKDB_LOG_WARNING(
+			    http_params.logger,
+			    "Ran S3 glob \"%s\" from incorrect region \"%s\" - retrying with updated region \"%s\".\n"
+			    "Consider setting the S3 region to this explicitly to avoid extra round-trips.",
+			    path, s3_auth_params.region, updated_bucket_region);
+
+			// bucket region was updated - update and re-run the request against the correct endpoint
+			s3_auth_params.SetRegion(std::move(updated_bucket_region));
+			continue;
+		}
+		return response.str();
 	}
-	req_params += "encoding-type=url&list-type=2";
-	if (max_keys.IsValid()) {
-		req_params += "&max-keys=" + to_string(max_keys.GetIndex());
-	}
-	req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
-
-	auto header_map =
-	    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
-
-	// Get requests use fresh connection
-	string full_host = parsed_url.http_proto + parsed_url.host;
-	string listobjectv2_url = full_host + req_path + "?" + req_params;
-	std::stringstream response;
-	GetRequestInfo get_request(
-	    full_host, listobjectv2_url, header_map, http_params,
-	    [&](const HTTPResponse &response) {
-		    if (static_cast<int>(response.status) >= 400) {
-			    string trimmed_path = path;
-			    StringUtil::RTrim(trimmed_path, "/");
-			    trimmed_path += listobjectv2_url;
-			    throw S3FileSystem::GetS3Error(s3_auth_params, response, trimmed_path);
-		    }
-		    return true;
-	    },
-	    [&](const_data_ptr_t data, idx_t data_length) {
-		    response << string(const_char_ptr_cast(data), data_length);
-		    return true;
-	    });
-	auto result = http_params.http_util.Request(get_request);
-	if (result->HasRequestError()) {
-		throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), listobjectv2_url);
-	}
-
-	return response.str();
-}
-
-optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
-	string open_tag = "<" + tag + ">";
-	string close_tag = "</" + tag + ">";
-	auto open_tag_pos = response.find(open_tag, cur_pos);
-	if (open_tag_pos == string::npos) {
-		// tag not found
-		return optional_idx();
-	}
-	auto close_tag_pos = response.find(close_tag, open_tag_pos + open_tag.size());
-	if (close_tag_pos == string::npos) {
-		throw InternalException("Failed to parse S3 result: found open tag for %s but did not find matching close tag",
-		                        tag);
-	}
-	result = response.substr(open_tag_pos + open_tag.size(), close_tag_pos - open_tag_pos - open_tag.size());
-	return close_tag_pos + close_tag.size();
+	throw InvalidInputException(
+	    "Exceeded retry count in AWSListObjectV2::Request - this means we got multiple redirects to different regions");
 }
 
 void AWSListObjectV2::ParseFileList(string &aws_response, vector<OpenFileInfo> &result) {

@@ -286,13 +286,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	    url, header_map, hfh.http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
-			    string error =
-			        "HTTP GET error on '" + url + "' (HTTP " + to_string(static_cast<int>(response.status)) + ")";
-			    if (response.status == HTTPStatusCode::RangeNotSatisfiable_416) {
-				    error += " This could mean the file was changed. Try disabling the duckdb http metadata cache "
-				             "if enabled, and confirm the server supports range requests.";
-			    }
-			    throw HTTPException(response, error);
+			    throw GetHTTPError(handle, response, url);
 		    }
 		    if (static_cast<int>(response.status) < 300) { // done redirecting
 			    out_offset = 0;
@@ -863,6 +857,20 @@ void HTTPFileHandle::AllocateReadBuffer(optional_ptr<FileOpener> opener) {
 	read_buffer = allocator.Allocate(INITIAL_READ_BUFFER_LEN);
 }
 
+void HTTPFileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) {
+	last_modified = cache_entry.last_modified;
+	length = cache_entry.length;
+	etag = cache_entry.etag;
+}
+
+HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
+	HTTPMetadataCacheEntry result;
+	result.length = length;
+	result.last_modified = last_modified;
+	result.etag = etag;
+	return result;
+}
+
 void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	auto &hfs = file_system.Cast<HTTPFileSystem>();
 	http_params.state = HTTPState::TryGetState(opener);
@@ -888,9 +896,7 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			bool found = current_cache->Find(path, value);
 
 			if (found) {
-				last_modified = value.last_modified;
-				length = value.length;
-				etag = value.etag;
+				InitializeFromCacheEntry(value);
 
 				if (flags.OpenForReading() && !SkipBuffer()) {
 					AllocateReadBuffer(opener);
@@ -908,7 +914,7 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			FullDownload(hfs, should_write_cache);
 		}
 		if (should_write_cache) {
-			current_cache->Insert(path, {length, last_modified, etag});
+			current_cache->Insert(path, GetCacheEntry());
 		}
 
 		if (!SkipBuffer()) {

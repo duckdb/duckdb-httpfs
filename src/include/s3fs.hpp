@@ -62,6 +62,10 @@ struct S3AuthParams {
 
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
 	static S3AuthParams ReadFrom(S3KeyValueReader &secret_reader, const std::string &file_path);
+	void SetRegion(string region_p);
+
+private:
+	void InitializeEndpoint();
 };
 
 struct AWSEnvironmentCredentialsProvider {
@@ -140,17 +144,7 @@ class S3FileHandle : public HTTPFileHandle {
 
 public:
 	S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, unique_ptr<HTTPParams> http_params_p,
-	             const S3AuthParams &auth_params_p, const S3ConfigParams &config_params_p)
-	    : HTTPFileHandle(fs, file, flags, std::move(http_params_p)), auth_params(auth_params_p),
-	      config_params(config_params_p), uploads_in_progress(0), parts_uploaded(0), upload_finalized(false),
-	      uploader_has_error(false), upload_exception(nullptr) {
-		auto_fallback_to_full_file_download = false;
-		if (flags.OpenForReading() && flags.OpenForWriting()) {
-			throw NotImplementedException("Cannot open an HTTP file for both reading and writing");
-		} else if (flags.OpenForAppending()) {
-			throw NotImplementedException("Cannot open an HTTP file for appending");
-		}
-	}
+	             const S3AuthParams &auth_params_p, const S3ConfigParams &config_params_p);
 	~S3FileHandle() override;
 
 	S3AuthParams auth_params;
@@ -162,6 +156,10 @@ public:
 	void Initialize(optional_ptr<FileOpener> opener) override;
 
 	shared_ptr<S3WriteBuffer> GetBuffer(uint16_t write_buffer_idx);
+
+protected:
+	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
+	HTTPMetadataCacheEntry GetCacheEntry() const override;
 
 protected:
 	string multipart_upload_id;
@@ -258,6 +256,7 @@ public:
 	}
 
 	static string GetS3BadRequestError(const S3AuthParams &s3_auth_params, string correct_region = "");
+	static string ParseS3Error(const string &error);
 	static string GetS3AuthError(const S3AuthParams &s3_auth_params);
 	static string GetGCSAuthError(const S3AuthParams &s3_auth_params);
 	static HTTPException GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
@@ -289,7 +288,7 @@ protected:
 
 // Helper class to do s3 ListObjectV2 api call https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
 struct AWSListObjectV2 {
-	static string Request(const string &path, HTTPParams &http_params, const S3AuthParams &s3_auth_params,
+	static string Request(const string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
 	                      string &continuation_token, optional_idx max_keys = optional_idx());
 	static void ParseFileList(string &aws_response, vector<OpenFileInfo> &result);
 	static vector<string> ParseCommonPrefix(string &aws_response);
