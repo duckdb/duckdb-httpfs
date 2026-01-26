@@ -1433,7 +1433,7 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 
 		// Get requests use fresh connection
 		string full_host = parsed_url.http_proto + parsed_url.host;
-		string listobjectv2_url = full_host + req_path + "?" + req_params;
+		string listobjectv2_url = req_path + "?" + req_params;
 		std::stringstream response;
 		ErrorData error;
 		GetRequestInfo get_request(
