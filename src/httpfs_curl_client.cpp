@@ -115,7 +115,8 @@ static idx_t httpfs_client_count = 0;
 class HTTPFSCurlClient : public HTTPClient {
 public:
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
-		// FIXME: proto_host_port is not used
+		base_url = curl_url();
+		curl_url_set(base_url, CURLUPART_URL, proto_host_port.c_str(), 0);
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
@@ -178,16 +179,8 @@ public:
 	}
 
 	~HTTPFSCurlClient() {
+		curl_url_cleanup(base_url);
 		DestroyCurlGlobal();
-	}
-
-	static string EncodeSpaces(const string &url) {
-		string out;
-		out.reserve(url.size());
-		for (char c : url) {
-			out += (c == ' ') ? "%20" : string(1, c);
-		}
-		return out;
 	}
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
@@ -201,12 +194,16 @@ public:
 
 		CURLcode res;
 		{
-			// If the same handle served a HEAD request, we must set NOBODY back to 0L to request content again
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
-			auto encoded_url = EncodeSpaces(request_info->url);
-			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
+			CURLU *url = curl_url_dup(base_url);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
+
+			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
+
 			res = curl->Execute();
+			curl_url_cleanup(url);
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -253,8 +250,11 @@ public:
 
 		CURLcode res;
 		{
-			auto encoded_url = EncodeSpaces(request_info->url);
-			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
+			CURLU *url = curl_url_dup(base_url);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
+
+			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
 			// Perform PUT
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "PUT");
 			// Include PUT body
@@ -265,6 +265,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			res = curl->Execute();
+			curl_url_cleanup(url);
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -284,19 +285,22 @@ public:
 
 		CURLcode res;
 		{
-			// Set URL
-			auto encoded_url = EncodeSpaces(request_info->url);
-			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
-
 			// Perform HEAD request instead of GET
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
+
+			CURLU *url = curl_url_dup(base_url);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
+
+			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
 
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			// Execute HEAD request
 			res = curl->Execute();
+			curl_url_cleanup(url);
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -315,9 +319,11 @@ public:
 
 		CURLcode res;
 		{
-			// Set URL
-			auto encoded_url = EncodeSpaces(request_info->url);
-			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
+			CURLU *url = curl_url_dup(base_url);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
+
+			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
 
 			// Set DELETE request method
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "DELETE");
@@ -330,6 +336,7 @@ public:
 
 			// Execute DELETE request
 			res = curl->Execute();
+			curl_url_cleanup(url);
 		}
 
 		// Get HTTP response status code
@@ -352,8 +359,11 @@ public:
 
 		CURLcode res;
 		{
-			auto encoded_url = EncodeSpaces(request_info->url);
-			curl_easy_setopt(*curl, CURLOPT_URL, encoded_url.c_str());
+			CURLU *url = curl_url_dup(base_url);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
+
+			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
 			if (info.send_post_as_get_request) {
 				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "GET");
 			} else {
@@ -368,6 +378,7 @@ public:
 
 			// Execute POST request
 			res = curl->Execute();
+			curl_url_cleanup(url);
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -440,6 +451,7 @@ private:
 	unique_ptr<CURLHandle> curl;
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
+	CURLU *base_url = nullptr;
 
 	static std::mutex &GetRefLock() {
 		static std::mutex mtx;
