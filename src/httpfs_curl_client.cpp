@@ -97,6 +97,7 @@ CURLHandle::CURLHandle(const string &token, const string &cert_path) {
 	if (!cert_path.empty()) {
 		curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
 	}
+	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_AUTO_CLIENT_CERT | CURLSSLOPT_NATIVE_CA);
 }
 
 CURLHandle::~CURLHandle() {
