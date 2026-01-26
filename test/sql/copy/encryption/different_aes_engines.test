@@ -20,7 +20,8 @@ restart
 require httpfs
 
 statement ok
-ATTACH '__TEST_DIR__/enc_test_${cipher}.db' as enc (ENCRYPTION_KEY 'asdf', ENCRYPTION_CIPHER '${cipher}');
+ATTACH '__TEST_DIR__/enc_test_${cipher}.db' as enc (ENCRYPTION_KEY 'asdf');
+
 
 query II
 FROM enc.test
@@ -28,6 +29,7 @@ FROM enc.test
 11	22
 13	22
 12	21
+
 
 restart
 
@@ -39,7 +41,7 @@ foreach cipher GCM CTR
 require httpfs
 
 statement ok
-ATTACH '__TEST_DIR__/enc_test2_${cipher}.db' as enc (ENCRYPTION_KEY 'asdf', ENCRYPTION_CIPHER '${cipher}');
+ATTACH '__TEST_DIR__/enc_test_${cipher}.db' as enc (ENCRYPTION_KEY 'asdf', ENCRYPTION_CIPHER '${cipher}');
 
 statement ok
 CREATE TABLE enc.test (a INTEGER, b INTEGER);
@@ -53,7 +55,7 @@ DETACH enc
 restart
 
 statement ok
-ATTACH '__TEST_DIR__/enc_test_${cipher}.db' as enc (ENCRYPTION_KEY 'asdf', ENCRYPTION_CIPHER '${cipher}');
+ATTACH '__TEST_DIR__/enc_test_${cipher}.db' as enc (ENCRYPTION_KEY 'asdf');
 
 query II
 FROM enc.test
