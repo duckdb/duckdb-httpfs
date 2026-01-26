@@ -115,7 +115,7 @@ static idx_t httpfs_client_count = 0;
 class HTTPFSCurlClient : public HTTPClient {
 public:
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
-		// FIXME: proto_host_port is not used
+		proto_host = proto_host_port;
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
@@ -198,6 +198,10 @@ public:
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		request_info->url = info.url;
+		if (StringUtil::StartsWith(info.url, proto_host))
+			request_info->url = info.url;
+		else
+			request_info->url = proto_host + info.url;
 
 		CURLcode res;
 		{
@@ -250,6 +254,10 @@ public:
 		curl_headers.Add("Content-Type: " + info.content_type);
 		// transform parameters
 		request_info->url = info.url;
+		if (StringUtil::StartsWith(info.url, proto_host))
+			request_info->url = info.url;
+		else
+			request_info->url = proto_host + info.url;
 
 		CURLcode res;
 		{
@@ -280,6 +288,10 @@ public:
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		request_info->url = info.url;
+		if (StringUtil::StartsWith(info.url, proto_host))
+			request_info->url = info.url;
+		else
+			request_info->url = proto_host + info.url;
 		// transform parameters
 
 		CURLcode res;
@@ -312,6 +324,10 @@ public:
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		// transform parameters
 		request_info->url = info.url;
+		if (StringUtil::StartsWith(info.url, proto_host))
+			request_info->url = info.url;
+		else
+			request_info->url = proto_host + info.url;
 
 		CURLcode res;
 		{
@@ -349,6 +365,10 @@ public:
 		curl_headers.Add(content_type.c_str());
 		// transform parameters
 		request_info->url = info.url;
+		if (StringUtil::StartsWith(info.url, proto_host))
+			request_info->url = info.url;
+		else
+			request_info->url = proto_host + info.url;
 
 		CURLcode res;
 		{
@@ -435,6 +455,7 @@ private:
 	unique_ptr<CURLHandle> curl;
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
+	string proto_host;
 
 	static std::mutex &GetRefLock() {
 		static std::mutex mtx;

@@ -1,0 +1,12 @@
+# name: test/sql/httpfs/check_glob_error_message.test
+# description: 
+# group: [httpfs]
+
+require httpfs
+
+require parquet
+
+statement error
+FROM 's3://coiled-datasets/timeseries/20-years/parquet/1*.parquet'
+----
+<REGEX>:.*IO Error.*
