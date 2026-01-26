@@ -1603,6 +1603,7 @@ S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpener
 	reader.TryGetSecretKeyOrSetting("enable_global_s3_configuration", "enable_global_s3_configuration",
 	                                use_env_vars_for_secret_info_setting);
 	use_env_variables_for_secret_settings = use_env_vars_for_secret_info_setting.GetValue<bool>();
+	(void)info;
 }
 
 } // namespace duckdb
