@@ -1219,16 +1219,14 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 			return false;
 		}
 		if (!Glob(key->data(), key->length(), pattern->data(), pattern->length())) {
+			//std::cout << *key << "\t" << *pattern << " are different\n";
 			return false;
 		}
 		key++;
 		pattern++;
 	}
-	if (*pattern == "**" && !completed) {
-		while (*pattern == "**") pattern++;
-		if (pattern == pattern_end) {
-			return true;
-		}
+	if (pattern != pattern_end && !completed) {
+		return true;
 	}
 	return key == key_end && pattern == pattern_end;
 }
@@ -1305,7 +1303,7 @@ bool S3GlobResult::ExpandNextPath() const {
                vector<string> key_splits = StringUtil::Split(current_common_prefix, "/");
                //pattern_splits.resize(key_splits.size());
                const bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(), false);
-	//	std::cout << current_common_prefix << "\t" << parsed_s3_url.key << "\t" << (is_match ? "MATCH" : "no" )<< "\n";
+		//std::cout << current_common_prefix << "\t" << parsed_s3_url.key << "\t" << (is_match ? "MATCH" : "no" )<< "\n";
                if (is_match) {
                        auto prefix_res = AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params,
                                                                   common_prefix_continuation_token, true);
