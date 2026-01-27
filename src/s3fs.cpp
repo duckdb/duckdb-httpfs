@@ -1201,12 +1201,16 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
                   vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end) {
 
 	while (key != key_end && pattern != pattern_end) {
+		if (*key == "**") {
+			return true;
+		}
 		if (*pattern == "**") {
 			if (std::next(pattern) == pattern_end) {
 				return true;
 			}
+			pattern ++;
 			while (key != key_end) {
-				if (Match(key, key_end, std::next(pattern), pattern_end)) {
+				if (Match(key, key_end, pattern, pattern_end)) {
 					return true;
 				}
 				key++;
@@ -1218,6 +1222,12 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 		}
 		key++;
 		pattern++;
+	}
+	if (*pattern == "**") {
+		while (*pattern == "**") pattern++;
+		if (pattern == pattern_end) {
+			return true;
+		}
 	}
 	return key == key_end && pattern == pattern_end;
 }
@@ -1289,12 +1299,23 @@ bool S3GlobResult::ExpandNextPath() const {
 		// we have common prefixes left to scan - perform the request
 		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
 
-		auto prefix_res =
-		    AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params, common_prefix_continuation_token);
-		AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
-		auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
-		common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
-		common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
+
+               vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
+               vector<string> key_splits = StringUtil::Split(current_common_prefix, "/");
+               //pattern_splits.resize(key_splits.size());
+		key_splits.push_back("**");
+               const bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end());
+		std::cout << current_common_prefix << "\t" << parsed_s3_url.key << "\t" << (is_match ? "MATCH" : "no" )<< "\n";
+               if (is_match) {
+                       auto prefix_res = AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params,
+                                                                  common_prefix_continuation_token, true);
+
+                       AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
+                       auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
+                       common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
+                       common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
+               }
+
 		if (common_prefix_continuation_token.empty()) {
 			// we are done with the current common prefix
 			// either move on to the next one, or finish up
@@ -1313,7 +1334,7 @@ bool S3GlobResult::ExpandNextPath() const {
 		}
 		// issue the main request
 		string response_str =
-		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token);
+		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token, true);
 		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
 		AWSListObjectV2::ParseFileList(response_str, s3_keys);
 
