@@ -1216,6 +1216,7 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 				}
 				key++;
 			}
+			if (!completed) return true;
 			return false;
 		}
 		if (!Glob(key->data(), key->length(), pattern->data(), pattern->length())) {
