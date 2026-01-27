@@ -1542,29 +1542,37 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		// Construct the ListObjectsV2 call
 		string req_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
 
-		string req_params;
-		// NOTE: req_params needs to be sorted
+		map<string,string> req_params;
+		// NOTE: req_params needs to be sorted before passing to sigv4 code
 		if (!continuation_token.empty()) {
-			req_params += "continuation-token=" + S3FileSystem::UrlEncode(continuation_token, true);
-			req_params += "&";
+			req_params["continuation-token"] = S3FileSystem::UrlEncode(continuation_token, true);
 		}
 
 		if (use_delimiter) {
-			req_params += "delimiter=%2F&";
+			req_params["delimiter"] ="%2F";
 		}
 
-		req_params += "encoding-type=url&list-type=2";
+		req_params["encoding-type"] = "url";
+		req_params["list-type"] = "2";
 		if (max_keys.IsValid()) {
-			req_params += "&max-keys=" + to_string(max_keys.GetIndex());
+			req_params["max-keys"] = to_string(max_keys.GetIndex());
 		}
-		req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
+		req_params["prefix"] = S3FileSystem::UrlEncode(parsed_url.key, true);
 
+		string encoded_params = "";
+		for (const auto & p : req_params) {
+			encoded_params += p.first + "=" + p.second + "&";
+		}
+		if (!encoded_params.empty()) {
+			// Remove last '&'
+			encoded_params.pop_back();
+		}
 		auto header_map =
-		    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
+		    CreateS3Header(req_path, encoded_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
 
 		// Get requests use fresh connection
 		string full_host = parsed_url.http_proto + parsed_url.host;
-		string listobjectv2_url = req_path + "?" + req_params;
+		string listobjectv2_url = req_path + "?" + encoded_params;
 		std::stringstream response;
 		ErrorData error;
 		GetRequestInfo get_request(
