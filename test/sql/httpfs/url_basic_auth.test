@@ -1,0 +1,38 @@
+# name: test/sql/httpfs/url_basic_auth.test
+# description: Test URL embedded basic auth (user:pass@host)
+# group: [httpfs]
+
+require httpfs
+
+statement ok
+PRAGMA enable_verification
+
+# Test with correct credentials - should return authenticated: true
+query I
+SELECT content LIKE '%"authenticated": true%' FROM read_text('https://testuser:testpass@httpbin.org/basic-auth/testuser/testpass')
+----
+true
+
+# Test with wrong password - should fail with HTTP 401
+statement error
+SELECT * FROM read_text('https://testuser:wrongpass@httpbin.org/basic-auth/testuser/testpass')
+----
+401
+
+# Test with no credentials - should fail with HTTP 401
+statement error
+SELECT * FROM read_text('https://httpbin.org/basic-auth/testuser/testpass')
+----
+401
+
+# Test with blank password (user:@host) - should fail with HTTP 401
+statement error
+SELECT * FROM read_text('https://testuser:@httpbin.org/basic-auth/testuser/testpass')
+----
+401
+
+# Test HTTP (non-SSL) variant
+query I
+SELECT content LIKE '%"authenticated": true%' FROM read_text('http://testuser:testpass@httpbin.org/basic-auth/testuser/testpass')
+----
+true

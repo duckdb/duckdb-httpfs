@@ -39,8 +39,16 @@ public:
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 
+	//! Initialize client with explicit basic auth credentials
+	unique_ptr<HTTPClient> InitializeClientWithAuth(HTTPParams &http_params, const string &proto_host_port,
+	                                                const string &basic_auth_username,
+	                                                const string &basic_auth_password);
+
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 	static shared_ptr<HTTPUtil> GetHTTPUtil(optional_ptr<FileOpener> opener);
+
+	//! Parse basic auth credentials from URL (user:pass@host format)
+	static void ParseBasicAuth(const string &url, string &username_out, string &password_out);
 
 	string GetName() const override;
 };
@@ -48,6 +56,11 @@ public:
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+
+	//! Initialize client with explicit basic auth credentials
+	unique_ptr<HTTPClient> InitializeClientWithAuth(HTTPParams &http_params, const string &proto_host_port,
+	                                                const string &basic_auth_username,
+	                                                const string &basic_auth_password);
 
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 

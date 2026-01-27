@@ -114,7 +114,9 @@ static idx_t httpfs_client_count = 0;
 
 class HTTPFSCurlClient : public HTTPClient {
 public:
-	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
+	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port,
+	                 const string &basic_auth_username, const string &basic_auth_password)
+	    : basic_auth_username(basic_auth_username), basic_auth_password(basic_auth_password) {
 		base_url = curl_url();
 		curl_url_set(base_url, CURLUPART_URL, proto_host_port.c_str(), 0);
 		Initialize(http_params);
@@ -175,6 +177,13 @@ public:
 				curl_easy_setopt(*curl, CURLOPT_PROXYUSERNAME, http_params.http_proxy_username.c_str());
 				curl_easy_setopt(*curl, CURLOPT_PROXYPASSWORD, http_params.http_proxy_password.c_str());
 			}
+		}
+
+		// Set basic auth if present
+		if (!basic_auth_username.empty() || !basic_auth_password.empty()) {
+			curl_easy_setopt(*curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+			curl_easy_setopt(*curl, CURLOPT_USERNAME, basic_auth_username.c_str());
+			curl_easy_setopt(*curl, CURLOPT_PASSWORD, basic_auth_password.c_str());
 		}
 	}
 
@@ -452,6 +461,8 @@ private:
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
 	CURLU *base_url = nullptr;
+	string basic_auth_username;
+	string basic_auth_password;
 
 	static std::mutex &GetRefLock() {
 		static std::mutex mtx;
@@ -481,7 +492,15 @@ private:
 };
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
-	auto client = make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
+	auto client = make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port, "", "");
+	return std::move(client);
+}
+
+unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClientWithAuth(HTTPParams &http_params, const string &proto_host_port,
+                                                                const string &basic_auth_username,
+                                                                const string &basic_auth_password) {
+	auto client = make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port,
+	                                          basic_auth_username, basic_auth_password);
 	return std::move(client);
 }
 
