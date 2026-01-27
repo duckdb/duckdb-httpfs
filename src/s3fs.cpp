@@ -1515,7 +1515,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 }
 
 string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
-                                string &continuation_token, optional_idx max_keys) {
+                                string &continuation_token, bool use_delimiter, optional_idx max_keys) {
 	const idx_t MAX_RETRIES = 1;
 	for (idx_t it = 0; it <= MAX_RETRIES; it++) {
 		auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
@@ -1524,15 +1524,21 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		string req_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
 
 		string req_params;
+		// NOTE: req_params needs to be sorted
 		if (!continuation_token.empty()) {
 			req_params += "continuation-token=" + S3FileSystem::UrlEncode(continuation_token, true);
 			req_params += "&";
 		}
+
+		if (use_delimiter) {
+			req_params += "delimiter=%2F&";
+		}
+
 		req_params += "encoding-type=url&list-type=2";
-		req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
 		if (max_keys.IsValid()) {
 			req_params += "&max-keys=" + to_string(max_keys.GetIndex());
 		}
+		req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
 
 		auto header_map =
 		    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
