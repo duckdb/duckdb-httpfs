@@ -126,14 +126,14 @@ FROM GLOB('s3://test-bucket/glob_ss/*/*/t0.csv');
 ----
 s3://test-bucket/glob_ss/a/b/t0.csv
 
-query I
+query I rowsort
 FROM GLOB('s3://test-bucket/glob_ss/**/t0.csv');
 ----
 s3://test-bucket/glob_ss/a/b/t0.csv
 s3://test-bucket/glob_ss/a/t0.csv
 s3://test-bucket/glob_ss/t0.csv
 
-query I
+query I rowsort
 FROM GLOB('s3://test-bucket/glob_ss/**/*/t0.csv');
 ----
 s3://test-bucket/glob_ss/a/b/t0.csv
@@ -143,27 +143,27 @@ query I
 FROM GLOB('s3://test-bucket/glob_ss/*/*/*/t0.csv');
 ----
 
-query I
+query I  rowsort
 FROM GLOB('s3://test-bucket/glob_ss/**');
 ----
 s3://test-bucket/glob_ss/a/b/t0.csv
 s3://test-bucket/glob_ss/a/t0.csv
 s3://test-bucket/glob_ss/t0.csv
 
-query I
+query I rowsort
 FROM GLOB('s3://test-bucket/glob_ss/**/*');
 ----
 s3://test-bucket/glob_ss/a/b/t0.csv
 s3://test-bucket/glob_ss/a/t0.csv
 s3://test-bucket/glob_ss/t0.csv
 
-query I
+query I rowsort
 FROM GLOB('s3://test-bucket/glob_ss/*/**');
 ----
 s3://test-bucket/glob_ss/a/b/t0.csv
 s3://test-bucket/glob_ss/a/t0.csv
 
-query I
+query I rowsort
 FROM GLOB('s3://test-bucket/glob_ss/a/**');
 ----
 s3://test-bucket/glob_ss/a/b/t0.csv
@@ -221,7 +221,7 @@ SELECT COUNT(*) FROM GLOB('s3://test-bucket/glob_ss/partitioned/**/*');
 ----
 10
 
-query I
+query I rowsort
 FROM GLOB('s3://test-bucket/glob_ss/partitioned/**/*.parquet');
 ----
 s3://test-bucket/glob_ss/partitioned/a=0/b=0/data_0.parquet
