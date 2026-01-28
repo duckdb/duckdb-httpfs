@@ -130,7 +130,14 @@ public:
 		// call curl_global_init if not already done by another HTTPFS Client
 		InitCurlGlobal();
 
-		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
+		std::string cert_file_path;
+		if (!http_params.ca_cert_file.empty()) {
+			cert_file_path = http_params.ca_cert_file;
+		} else {
+			cert_file_path = SelectCURLCertPath();
+		}
+
+		curl = make_uniq<CURLHandle>(bearer_token, cert_file_path);
 		request_info = make_uniq<RequestInfo>();
 
 		// set curl options
