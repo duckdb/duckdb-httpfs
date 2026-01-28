@@ -30,6 +30,9 @@ CREATE TABLE bigdata AS SELECT i AS col_a, i AS col_b FROM range(0,10000) tbl(i)
 statement ok
 set threads=1
 
+statement ok
+call inherit_aws_config_from_environment();
+
 # parameter in bytes
 statement ok
 COPY (FROM bigdata) TO 's3://test-bucket/file_size_bytes_csv1' (FORMAT CSV, FILE_SIZE_BYTES 1000);

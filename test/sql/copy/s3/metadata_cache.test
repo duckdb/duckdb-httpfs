@@ -30,6 +30,9 @@ statement ok
 set enable_external_file_cache=false;
 
 statement ok
+call inherit_aws_config_from_environment();
+
+statement ok
 CREATE TABLE test as SELECT * FROM range(0,10) tbl(i);
 
 statement ok

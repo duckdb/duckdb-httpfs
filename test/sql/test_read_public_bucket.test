@@ -18,23 +18,23 @@ require-env AWS_SECRET_ACCESS_KEY
 set ignore_error_messages
 
 statement ok
+SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
+
+# default to not using globally scoped settings for secrets
+statement ok
+call inherit_aws_config_from_environment();
+
+# set region correctly
+statement ok
 set s3_region='us-east-2';
 
-# set endpoint to the correct default, otherwise it will pick up the env variable
+# set s3_endpoint back
 statement ok
 set s3_endpoint='s3.amazonaws.com';
 
 # see duckdb-internal/issues/6620
-# env vars for access_key_id and secret_key_id are used
-# which results in 403
+# when env vars are loaded, this should fail since the env vars are incorrect
 statement error
 SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
 ----
-<REGEX>:.*HTTP Error:.*403.*Authentication Failure.*
-
-# default to not using globally scoped settings for secrets
-statement ok
-set enable_global_s3_configuration=false;
-
-statement ok
-SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
+<REGEX>:.*HTTP GET error.*

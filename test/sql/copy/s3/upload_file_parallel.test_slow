@@ -52,8 +52,9 @@ WHERE
 # We do this in parallel to also test synchronization of s3fs between 2 connections
 concurrentloop threadid 0 2
 
+# you have to load the env variables into secrets in every thread
 statement ok
-SET s3_endpoint='${DUCKDB_S3_ENDPOINT}';SET s3_use_ssl=${DUCKDB_S3_USE_SSL};
+call inherit_aws_config_from_environment();
 
 # Parquet file
 statement ok
@@ -94,6 +95,10 @@ WHERE
 
 # Upload and query 100 tiny files in parallel
 concurrentloop threadid 0 100
+
+# you have to load the env variables into secrets in every thread
+statement ok
+call inherit_aws_config_from_environment();
 
 statement ok
 SET s3_secret_access_key='${AWS_SECRET_ACCESS_KEY}';SET s3_access_key_id='${AWS_ACCESS_KEY_ID}';SET s3_region='${AWS_DEFAULT_REGION}'; SET s3_endpoint='${DUCKDB_S3_ENDPOINT}';SET s3_use_ssl=${DUCKDB_S3_USE_SSL};

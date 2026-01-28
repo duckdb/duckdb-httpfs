@@ -29,10 +29,12 @@ public:
 	SettingLookupResult TryGetSecretKeyOrSetting(const string &secret_key, const string &setting_name, TYPE &result) {
 		Value temp_result;
 		auto setting_scope = reader.TryGetSecretKeyOrSetting(secret_key, setting_name, temp_result);
-		if (!temp_result.IsNull() &&
-		    !(setting_scope.GetScope() == SettingScope::GLOBAL && !use_env_variables_for_secret_settings)) {
-			result = temp_result.GetValue<TYPE>();
+		if (temp_result.IsNull() || setting_scope.GetScope() == SettingScope::GLOBAL) {
+			// if setting is global, do not use it for s3 key value reader. User must call
+			// inherit_aws_config_from_environment to load env vars into extension config.
+			return setting_scope;
 		}
+		result = temp_result.GetValue<TYPE>();
 		return setting_scope;
 	}
 
@@ -43,7 +45,6 @@ public:
 	}
 
 private:
-	bool use_env_variables_for_secret_settings;
 	KeyValueSecretReader reader;
 };
 
@@ -68,6 +69,15 @@ private:
 	void InitializeEndpoint();
 };
 
+struct AWSEnvVarToConfigHelper {
+	AWSEnvVarToConfigHelper(string env_var_name, string config_name, string value)
+	    : env_var_name(env_var_name), config_name(config_name), value(value) {
+	}
+	string env_var_name;
+	string config_name;
+	string value;
+};
+
 struct AWSEnvironmentCredentialsProvider {
 	static constexpr const char *REGION_ENV_VAR = "AWS_REGION";
 	static constexpr const char *DEFAULT_REGION_ENV_VAR = "AWS_DEFAULT_REGION";
@@ -83,8 +93,9 @@ struct AWSEnvironmentCredentialsProvider {
 
 	DBConfig &config;
 
-	void SetExtensionOptionValue(string key, const char *env_var);
-	void SetAll();
+	void SetExtensionOptionValue(string key, const char *env_var, vector<AWSEnvVarToConfigHelper> &ret);
+	vector<AWSEnvVarToConfigHelper> SetAll();
+	vector<AWSEnvVarToConfigHelper> SetDuckDBSettings();
 	S3AuthParams CreateParams();
 };
 
