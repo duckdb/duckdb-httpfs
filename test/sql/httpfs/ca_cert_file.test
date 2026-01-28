@@ -1,0 +1,16 @@
+# name: test/sql/httpfs/ca_cert_file.test
+# description: Test that invalid ca_cert_file causes SSL connection to fail
+# group: [httpfs]
+
+require httpfs
+
+statement ok
+SET enable_server_cert_verification = true;
+
+statement ok
+SET ca_cert_file = 'README.md';
+
+statement error
+FROM read_blob('https://duckdb.org/')
+----
+<REGEX>:.*IO Error.*SSL.*
