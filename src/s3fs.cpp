@@ -1092,26 +1092,36 @@ void S3FileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx
 }
 
 static bool Match(vector<string>::const_iterator key, vector<string>::const_iterator key_end,
-                  vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end) {
+                  vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end, bool completed) {
+
+		if (key == key_end && !completed) {
+			return true;
+		}
 
 	while (key != key_end && pattern != pattern_end) {
 		if (*pattern == "**") {
 			if (std::next(pattern) == pattern_end) {
 				return true;
 			}
+			pattern ++;
 			while (key != key_end) {
-				if (Match(key, key_end, std::next(pattern), pattern_end)) {
+				if (Match(key, key_end, pattern, pattern_end, completed)) {
 					return true;
 				}
 				key++;
 			}
+			if (!completed) return true;
 			return false;
 		}
 		if (!Glob(key->data(), key->length(), pattern->data(), pattern->length())) {
+			//std::cout << *key << "\t" << *pattern << " are different\n";
 			return false;
 		}
 		key++;
 		pattern++;
+	}
+	if (pattern != pattern_end && !completed) {
+		return true;
 	}
 	return key == key_end && pattern == pattern_end;
 }
@@ -1183,12 +1193,22 @@ bool S3GlobResult::ExpandNextPath() const {
 		// we have common prefixes left to scan - perform the request
 		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
 
-		auto prefix_res =
-		    AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params, common_prefix_continuation_token);
-		AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
-		auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
-		common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
-		common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
+
+               vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
+               vector<string> key_splits = StringUtil::Split(current_common_prefix, "/");
+               //pattern_splits.resize(key_splits.size());
+               const bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(), false);
+		//std::cout << current_common_prefix << "\t" << parsed_s3_url.key << "\t" << (is_match ? "MATCH" : "no" )<< "\n";
+               if (is_match) {
+                       auto prefix_res = AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params,
+                                                                  common_prefix_continuation_token, true);
+
+                       AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
+                       auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
+                       common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
+                       common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
+               }
+
 		if (common_prefix_continuation_token.empty()) {
 			// we are done with the current common prefix
 			// either move on to the next one, or finish up
@@ -1207,7 +1227,7 @@ bool S3GlobResult::ExpandNextPath() const {
 		}
 		// issue the main request
 		string response_str =
-		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token);
+		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token, true);
 		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
 		AWSListObjectV2::ParseFileList(response_str, s3_keys);
 
@@ -1229,7 +1249,7 @@ bool S3GlobResult::ExpandNextPath() const {
 	for (auto &s3_key : s3_keys) {
 
 		vector<string> key_splits = StringUtil::Split(s3_key.path, "/");
-		bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end());
+		bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(), true);
 
 		if (is_match) {
 			auto result_full_url = parsed_s3_url.prefix + parsed_s3_url.bucket + "/" + s3_key.path;
@@ -1409,7 +1429,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 }
 
 string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3AuthParams &s3_auth_params,
-                                string &continuation_token, optional_idx max_keys) {
+                                string &continuation_token, bool use_delimiter, optional_idx max_keys) {
 	const idx_t MAX_RETRIES = 1;
 	for (idx_t it = 0; it <= MAX_RETRIES; it++) {
 		auto parsed_url = S3FileSystem::S3UrlParse(path, s3_auth_params);
@@ -1417,23 +1437,37 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		// Construct the ListObjectsV2 call
 		string req_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
 
-		string req_params;
+		map<string,string> req_params;
+		// NOTE: req_params needs to be sorted before passing to sigv4 code
 		if (!continuation_token.empty()) {
-			req_params += "continuation-token=" + S3FileSystem::UrlEncode(continuation_token, true);
-			req_params += "&";
-		}
-		req_params += "encoding-type=url&list-type=2";
-		req_params += "&prefix=" + S3FileSystem::UrlEncode(parsed_url.key, true);
-		if (max_keys.IsValid()) {
-			req_params += "&max-keys=" + to_string(max_keys.GetIndex());
+			req_params["continuation-token"] = S3FileSystem::UrlEncode(continuation_token, true);
 		}
 
+		if (use_delimiter) {
+			req_params["delimiter"] ="%2F";
+		}
+
+		req_params["encoding-type"] = "url";
+		req_params["list-type"] = "2";
+		if (max_keys.IsValid()) {
+			req_params["max-keys"] = to_string(max_keys.GetIndex());
+		}
+		req_params["prefix"] = S3FileSystem::UrlEncode(parsed_url.key, true);
+
+		string encoded_params = "";
+		for (const auto & p : req_params) {
+			encoded_params += p.first + "=" + p.second + "&";
+		}
+		if (!encoded_params.empty()) {
+			// Remove last '&'
+			encoded_params.pop_back();
+		}
 		auto header_map =
-		    CreateS3Header(req_path, req_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
+		    CreateS3Header(req_path, encoded_params, parsed_url.host, "s3", "GET", s3_auth_params, "", "", "", "");
 
 		// Get requests use fresh connection
 		string full_host = parsed_url.http_proto + parsed_url.host;
-		string listobjectv2_url = req_path + "?" + req_params;
+		string listobjectv2_url = req_path + "?" + encoded_params;
 		std::stringstream response;
 		ErrorData error;
 		GetRequestInfo get_request(
