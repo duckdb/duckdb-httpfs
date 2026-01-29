@@ -39,8 +39,6 @@ static std::string SelectCURLCertPath() {
 	return std::string();
 }
 
-static std::string cert_path = SelectCURLCertPath();
-
 static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 	size_t totalSize = size * nmemb;
 	std::string *str = static_cast<std::string *>(userp);
@@ -97,6 +95,7 @@ CURLHandle::CURLHandle(const string &token, const string &cert_path) {
 	if (!cert_path.empty()) {
 		curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
 	}
+	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_AUTO_CLIENT_CERT | CURLSSLOPT_NATIVE_CA);
 }
 
 CURLHandle::~CURLHandle() {
@@ -117,6 +116,8 @@ public:
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
 		base_url = curl_url();
 		curl_url_set(base_url, CURLUPART_URL, proto_host_port.c_str(), 0);
+		stored_bearer_token = "";
+		stored_cert_file_path = "";
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
@@ -125,12 +126,25 @@ public:
 		if (!http_params.bearer_token.empty()) {
 			bearer_token = http_params.bearer_token.c_str();
 		}
+
 		state = http_params.state;
 
-		// call curl_global_init if not already done by another HTTPFS Client
-		InitCurlGlobal();
+		std::string cert_file_path;
+		if (!http_params.ca_cert_file.empty()) {
+			cert_file_path = http_params.ca_cert_file;
+		}
 
-		curl = make_uniq<CURLHandle>(bearer_token, SelectCURLCertPath());
+		if (!curl || (stored_bearer_token != bearer_token) || (stored_cert_file_path != cert_file_path)) {
+			// call curl_global_init if not already done by another HTTPFS Client
+			InitCurlGlobal();
+
+			stored_cert_file_path = cert_file_path;
+
+			if (cert_file_path.empty()) {
+				cert_file_path = SelectCURLCertPath();
+			}
+			curl = make_uniq<CURLHandle>(bearer_token, cert_file_path);
+		}
 		request_info = make_uniq<RequestInfo>();
 
 		// set curl options
@@ -140,6 +154,8 @@ public:
 		// Curl re-uses connections by default
 		if (!http_params.keep_alive) {
 			curl_easy_setopt(*curl, CURLOPT_FORBID_REUSE, 1L);
+		} else {
+			curl_easy_setopt(*curl, CURLOPT_FORBID_REUSE, 0L);
 		}
 
 		if (http_params.enable_curl_server_cert_verification) {
@@ -166,6 +182,11 @@ public:
 		// define the write data callback (for get requests)
 		curl_easy_setopt(*curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
 		curl_easy_setopt(*curl, CURLOPT_WRITEDATA, &request_info->body);
+
+		// Reset PROXY-related settings, so they are set only on proxy actually being there
+		curl_easy_setopt(*curl, CURLOPT_PROXY, NULL);
+		curl_easy_setopt(*curl, CURLOPT_PROXYUSERNAME, NULL);
+		curl_easy_setopt(*curl, CURLOPT_PROXYPASSWORD, NULL);
 
 		if (!http_params.http_proxy.empty()) {
 			curl_easy_setopt(*curl, CURLOPT_PROXY,
@@ -452,6 +473,8 @@ private:
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
 	CURLU *base_url = nullptr;
+	string stored_bearer_token;
+	string stored_cert_file_path;
 
 	static std::mutex &GetRefLock() {
 		static std::mutex mtx;
