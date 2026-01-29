@@ -144,6 +144,7 @@ public:
 				cert_file_path = SelectCURLCertPath();
 			}
 			curl = make_uniq<CURLHandle>(bearer_token, cert_file_path);
+			stored_bearer_token = bearer_token;
 		}
 		request_info = make_uniq<RequestInfo>();
 
