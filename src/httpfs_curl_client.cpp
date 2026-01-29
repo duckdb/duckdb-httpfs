@@ -373,8 +373,10 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
-		const string content_type = "Content-Type: application/octet-stream";
-		curl_headers.Add(content_type.c_str());
+		if (!info.headers.HasHeader("Content-Type")) {
+			const string content_type = "Content-Type: application/octet-stream";
+			curl_headers.Add(content_type.c_str());
+		}
 		// transform parameters
 		request_info->url = info.url;
 

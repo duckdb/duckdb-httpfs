@@ -31,7 +31,7 @@ namespace duckdb {
 
 HTTPHeaders CreateS3Header(string url, string query, string host, string service, string method,
                            const S3AuthParams &auth_params, string date_now, string datetime_now, string payload_hash,
-                           string content_type) {
+                           string content_type, string content_md5) {
 
 	HTTPHeaders res;
 	res["Host"] = host;
@@ -74,11 +74,15 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	string signed_headers = "";
 	hash_bytes canonical_request_hash;
 	hash_str canonical_request_hash_str;
+	if (content_md5.length() > 0) {
+		signed_headers += "content-md5;";
+		res["content-md5"] = content_md5;
+	}
 	if (content_type.length() > 0) {
 		signed_headers += "content-type;";
-#ifdef EMSCRIPTEN
-		res["content-type"] = content_type;
-#endif
+		if (content_type != "application/octet-stream") {
+			res["content-type"] = content_type;
+		}
 	}
 	signed_headers += "host;x-amz-content-sha256;x-amz-date";
 	if (use_requester_pays) {
@@ -91,6 +95,9 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 		signed_headers += ";x-amz-server-side-encryption;x-amz-server-side-encryption-aws-kms-key-id";
 	}
 	auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
+	if (content_md5.length() > 0) {
+		canonical_request += "\ncontent-md5:" + content_md5;
+	}
 	if (content_type.length() > 0) {
 		canonical_request += "\ncontent-type:" + content_type;
 	}
@@ -107,6 +114,7 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	}
 
 	canonical_request += "\n\n" + signed_headers + "\n" + payload_hash;
+
 	sha256(canonical_request.c_str(), canonical_request.length(), canonical_request_hash);
 
 	hex256(canonical_request_hash, canonical_request_hash_str);
@@ -1104,9 +1112,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 			auto payload_hash = GetPayloadHash(const_cast<char *>(body.data()), body.length());
 
 			auto headers = CreateS3Header(url_info.path, http_query_param_for_sig, url_info.host, "s3", "POST",
-			                              url_info.auth_params, "", "", payload_hash, "");
-			headers["Content-MD5"] = content_md5;
-			headers["Content-Type"] = "application/xml";
+			                              url_info.auth_params, "", "", payload_hash, "application/xml", content_md5);
 
 			string http_url = url_info.http_proto + url_info.host + S3FileSystem::UrlEncode(url_info.path) + "?" +
 			                  http_query_param_for_url;
