@@ -395,7 +395,15 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 }
 
 shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string &path) {
-	return make_uniq<HTTPClientCache>();
+	lock_guard<mutex> lock(client_cache_map_lock);
+
+	string path_out, proto_host_port;
+	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
+	if (client_cache_map.count(proto_host_port) == 0) {
+		client_cache_map[proto_host_port] = make_uniq<HTTPClientCache>();
+	}
+
+	return client_cache_map[proto_host_port];
 }
 
 void HTTPFileHandle::InitializeClientCache(HTTPFileSystem &file_system) {
