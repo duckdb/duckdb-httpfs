@@ -10,6 +10,9 @@ SET enable_server_cert_verification = true;
 statement ok
 SET ca_cert_file = 'README.md';
 
+# FIXME: There are some inconsistencies between curl global options set by spatial AND httpfs on Windows, to be investigated
+require notwindows
+
 statement error
 FROM read_blob('https://duckdb.org/')
 ----
