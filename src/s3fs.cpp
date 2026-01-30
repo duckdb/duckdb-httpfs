@@ -20,6 +20,7 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 
 #include "create_secret_functions.hpp"
+#include "re2/re2.h"
 
 #include <iostream>
 #include <thread>
@@ -150,30 +151,47 @@ static bool IsGCSRequest(const string &url) {
 	return StringUtil::StartsWith(url, "gcs://") || StringUtil::StartsWith(url, "gs://");
 }
 
-void AWSEnvironmentCredentialsProvider::SetExtensionOptionValue(string key, const char *env_var_name) {
+void AWSEnvironmentCredentialsProvider::SetExtensionOptionValue(string key, const char *env_var_name,
+                                                                vector<AWSEnvVarToConfigHelper> &ret) {
 	char *evar;
 
+	Value val;
 	if ((evar = std::getenv(env_var_name)) != NULL) {
 		if (StringUtil::Lower(evar) == "false") {
-			this->config.SetOption(key, Value(false));
+			// db_config.SetOption(key, Value(false));
+			val = Value(false);
 		} else if (StringUtil::Lower(evar) == "true") {
-			this->config.SetOption(key, Value(true));
+			// db_config.SetOption(key, Value(true));
+			val = Value(true);
 		} else {
-			this->config.SetOption(key, Value(evar));
+			val = Value(evar);
 		}
+		config.options.set_variables[key] = val;
+		ret.emplace_back(env_var_name, key, val.ToString());
 	}
 }
 
-void AWSEnvironmentCredentialsProvider::SetAll() {
-	this->SetExtensionOptionValue("s3_region", DEFAULT_REGION_ENV_VAR);
-	this->SetExtensionOptionValue("s3_region", REGION_ENV_VAR);
-	this->SetExtensionOptionValue("s3_access_key_id", ACCESS_KEY_ENV_VAR);
-	this->SetExtensionOptionValue("s3_secret_access_key", SECRET_KEY_ENV_VAR);
-	this->SetExtensionOptionValue("s3_session_token", SESSION_TOKEN_ENV_VAR);
-	this->SetExtensionOptionValue("s3_endpoint", DUCKDB_ENDPOINT_ENV_VAR);
-	this->SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR);
-	this->SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR);
-	this->SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR);
+vector<AWSEnvVarToConfigHelper> AWSEnvironmentCredentialsProvider::SetAll() {
+	vector<AWSEnvVarToConfigHelper> ret;
+	SetExtensionOptionValue("s3_region", DEFAULT_REGION_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_region", REGION_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_access_key_id", ACCESS_KEY_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_secret_access_key", SECRET_KEY_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_session_token", SESSION_TOKEN_ENV_VAR, ret);
+	auto duckdb_settings = SetDuckDBSettings();
+	for (auto &val : duckdb_settings) {
+		ret.emplace_back(val);
+	}
+	return ret;
+}
+
+vector<AWSEnvVarToConfigHelper> AWSEnvironmentCredentialsProvider::SetDuckDBSettings() {
+	vector<AWSEnvVarToConfigHelper> ret;
+	SetExtensionOptionValue("s3_endpoint", DUCKDB_ENDPOINT_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR, ret);
+	SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR, ret);
+	return ret;
 }
 
 S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
@@ -1700,10 +1718,6 @@ vector<string> AWSListObjectV2::ParseCommonPrefix(string &aws_response) {
 S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
                                    idx_t secret_types_len)
     : reader(opener_p, info, secret_types, secret_types_len) {
-	Value use_env_vars_for_secret_info_setting;
-	reader.TryGetSecretKeyOrSetting("enable_global_s3_configuration", "enable_global_s3_configuration",
-	                                use_env_vars_for_secret_info_setting);
-	use_env_variables_for_secret_settings = use_env_vars_for_secret_info_setting.GetValue<bool>();
 }
 
 } // namespace duckdb
