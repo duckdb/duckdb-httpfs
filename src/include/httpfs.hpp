@@ -55,7 +55,7 @@ public:
 	virtual void Initialize(optional_ptr<FileOpener> opener);
 
 	// We keep an http client stored for connection reuse with keep-alive headers
-	HTTPClientCache client_cache;
+	shared_ptr<HTTPClientCache> client_cache;
 
 	unique_ptr<HTTPParams> params;
 	HTTPFSParams &http_params;
@@ -107,6 +107,7 @@ public:
 	bool SkipBuffer() const {
 		return flags.DirectIO() || flags.RequireParallelAccess();
 	}
+	void InitializeClientCache(HTTPFileSystem &file_system);
 
 private:
 	void AllocateReadBuffer(optional_ptr<FileOpener> opener);
