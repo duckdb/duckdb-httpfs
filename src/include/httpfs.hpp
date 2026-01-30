@@ -193,6 +193,9 @@ public:
 	static void Verify();
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
+	shared_ptr<HTTPClientCache> GetOrCreateClientCache(const string &path);
+
+	map<string, shared_ptr<HTTPClientCache>> client_cache_map;
 
 protected:
 	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
