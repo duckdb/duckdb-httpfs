@@ -12,6 +12,8 @@
 #include "http_state.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/crypto/md5.hpp"
+#include "duckdb/common/types/blob.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
@@ -29,7 +31,7 @@ namespace duckdb {
 
 HTTPHeaders CreateS3Header(string url, string query, string host, string service, string method,
                            const S3AuthParams &auth_params, string date_now, string datetime_now, string payload_hash,
-                           string content_type) {
+                           string content_type, string content_md5) {
 
 	HTTPHeaders res;
 	res["Host"] = host;
@@ -72,11 +74,15 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	string signed_headers = "";
 	hash_bytes canonical_request_hash;
 	hash_str canonical_request_hash_str;
+	if (content_md5.length() > 0) {
+		signed_headers += "content-md5;";
+		res["content-md5"] = content_md5;
+	}
 	if (content_type.length() > 0) {
 		signed_headers += "content-type;";
-#ifdef EMSCRIPTEN
-		res["content-type"] = content_type;
-#endif
+		if (content_type != "application/octet-stream") {
+			res["content-type"] = content_type;
+		}
 	}
 	signed_headers += "host;x-amz-content-sha256;x-amz-date";
 	if (use_requester_pays) {
@@ -89,6 +95,9 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 		signed_headers += ";x-amz-server-side-encryption;x-amz-server-side-encryption-aws-kms-key-id";
 	}
 	auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
+	if (content_md5.length() > 0) {
+		canonical_request += "\ncontent-md5:" + content_md5;
+	}
 	if (content_type.length() > 0) {
 		canonical_request += "\ncontent-type:" + content_type;
 	}
@@ -105,6 +114,7 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	}
 
 	canonical_request += "\n\n" + signed_headers + "\n" + payload_hash;
+
 	sha256(canonical_request.c_str(), canonical_request.length(), canonical_request_hash);
 
 	hex256(canonical_request_hash, canonical_request_hash_str);
@@ -1028,21 +1038,112 @@ void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opene
 	}
 }
 
+// Forward declaration for FindTagContents (defined later in file)
+optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result);
+
+void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener) {
+	if (paths.empty()) {
+		return;
+	}
+
+	struct BucketUrlInfo {
+		string prefix;
+		string http_proto;
+		string host;
+		string path;
+		S3AuthParams auth_params;
+	};
+
+	unordered_map<string, vector<string>> keys_by_bucket;
+	unordered_map<string, BucketUrlInfo> url_info_by_bucket;
+
+	for (auto &path : paths) {
+		FileOpenerInfo info = {path};
+		S3AuthParams auth_params = S3AuthParams::ReadFrom(opener, info);
+		auto parsed_url = S3UrlParse(path, auth_params);
+		ReadQueryParams(parsed_url.query_param, auth_params);
+
+		const string &bucket = parsed_url.bucket;
+		if (keys_by_bucket.find(bucket) == keys_by_bucket.end()) {
+			string bucket_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length() - 1);
+			if (bucket_path.empty()) {
+				bucket_path = "/";
+			}
+			url_info_by_bucket[bucket] = {parsed_url.prefix, parsed_url.http_proto, parsed_url.host, bucket_path,
+			                              auth_params};
+		}
+
+		keys_by_bucket[bucket].push_back(parsed_url.key);
+	}
+
+	constexpr idx_t MAX_KEYS_PER_REQUEST = 1000;
+
+	for (auto &bucket_entry : keys_by_bucket) {
+		const string &bucket = bucket_entry.first;
+		const vector<string> &keys = bucket_entry.second;
+		const auto &url_info = url_info_by_bucket[bucket];
+
+		for (idx_t batch_start = 0; batch_start < keys.size(); batch_start += MAX_KEYS_PER_REQUEST) {
+			idx_t batch_end = MinValue<idx_t>(batch_start + MAX_KEYS_PER_REQUEST, keys.size());
+
+			std::stringstream xml_body;
+			xml_body << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+			xml_body << "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
+
+			for (idx_t i = batch_start; i < batch_end; i++) {
+				xml_body << "<Object><Key>" << keys[i] << "</Key></Object>";
+			}
+
+			xml_body << "<Quiet>true</Quiet>";
+			xml_body << "</Delete>";
+
+			string body = xml_body.str();
+
+			MD5Context md5_context;
+			md5_context.Add(body);
+			data_t md5_hash[MD5Context::MD5_HASH_LENGTH_BINARY];
+			md5_context.Finish(md5_hash);
+
+			string_t md5_blob(const_char_ptr_cast(md5_hash), MD5Context::MD5_HASH_LENGTH_BINARY);
+			string content_md5 = Blob::ToBase64(md5_blob);
+
+			const string http_query_param_for_sig = "delete=";
+			const string http_query_param_for_url = "delete";
+			auto payload_hash = GetPayloadHash(const_cast<char *>(body.data()), body.length());
+
+			auto headers = CreateS3Header(url_info.path, http_query_param_for_sig, url_info.host, "s3", "POST",
+			                              url_info.auth_params, "", "", payload_hash, "application/xml", content_md5);
+
+			string http_url = url_info.http_proto + url_info.host + S3FileSystem::UrlEncode(url_info.path) + "?" +
+			                  http_query_param_for_url;
+			string bucket_url = url_info.prefix + bucket + "/";
+			auto handle = OpenFile(bucket_url, FileFlags::FILE_FLAGS_READ, opener);
+
+			string result;
+			auto res = HTTPFileSystem::PostRequest(*handle, http_url, headers, result, const_cast<char *>(body.data()),
+			                                       body.length());
+
+			if (res->status != HTTPStatusCode::OK_200) {
+				throw IOException("Failed to remove files: HTTP %d (%s)\n%s", static_cast<int>(res->status),
+				                  res->GetError(), result);
+			}
+
+			idx_t cur_pos = 0;
+			string error_content;
+			auto error_pos = FindTagContents(result, "Error", cur_pos, error_content);
+			if (error_pos.IsValid()) {
+				throw IOException("Failed to remove files: %s", error_content);
+			}
+		}
+	}
+}
+
 void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> opener) {
+	vector<string> files_to_remove;
 	ListFiles(
-	    path,
-	    [&](const string &file, bool is_dir) {
-		    try {
-			    this->RemoveFile(file, opener);
-		    } catch (IOException &e) {
-			    string errmsg(e.what());
-			    if (errmsg.find("No such file or directory") != std::string::npos) {
-				    return;
-			    }
-			    throw;
-		    }
-	    },
-	    opener.get());
+	    path, [&](const string &file, bool is_dir) { files_to_remove.push_back(file); }, opener.get());
+
+	RemoveFiles(files_to_remove, opener);
 }
 
 void S3FileSystem::FileSync(FileHandle &handle) {
@@ -1137,7 +1238,7 @@ private:
 };
 
 S3GlobResult::S3GlobResult(S3FileSystem &fs, const string &glob_pattern_p, optional_ptr<FileOpener> opener)
-    : glob_pattern(glob_pattern_p), opener(opener) {
+    : LazyMultiFileList(FileOpener::TryGetClientContext(opener)), glob_pattern(glob_pattern_p), opener(opener) {
 	if (!opener) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
 	}

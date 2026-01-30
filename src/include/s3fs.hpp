@@ -223,6 +223,7 @@ public:
 		return false;
 	}
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
+	void RemoveFiles(const vector<string> &filenames, optional_ptr<FileOpener> opener = nullptr) override;
 	void RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener = nullptr) override;
 	void FileSync(FileHandle &handle) override;
 	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
@@ -297,5 +298,5 @@ struct AWSListObjectV2 {
 
 HTTPHeaders CreateS3Header(string url, string query, string host, string service, string method,
                            const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
-                           string payload_hash = "", string content_type = "");
+                           string payload_hash = "", string content_type = "", string content_md5 = "");
 } // namespace duckdb
