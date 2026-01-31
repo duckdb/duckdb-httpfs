@@ -224,7 +224,7 @@ protected:
 protected:
 	virtual duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                                        optional_ptr<FileOpener> opener);
-
+	void FinalizeHandleCreate(duckdb::unique_ptr<HTTPFileHandle> &);
 private:
 	// Global cache
 	mutex global_cache_lock;

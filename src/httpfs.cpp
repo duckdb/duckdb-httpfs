@@ -433,12 +433,13 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 		}
 	}
 	auto handle = duckdb::make_uniq<HTTPFileHandle>(*this, file, flags, std::move(params));
+	return handle;
+}
+
+void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle) {
 	if (handle) {
 		handle->InitializeClientCache(*this);
-	} else {
-		throw IOException("AAAA");
 	}
-	return handle;
 }
 
 unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
@@ -448,6 +449,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	if (flags.ReturnNullIfNotExists()) {
 		try {
 			auto handle = CreateHandle(file, flags, opener);
+			FinalizeHandleCreate(handle);
 			handle->Initialize(opener);
 			return std::move(handle);
 		} catch (...) {
@@ -456,6 +458,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	}
 
 	auto handle = CreateHandle(file, flags, opener);
+	FinalizeHandleCreate(handle);
 
 	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
 		handle->write_overwrite_mode = true;
@@ -974,9 +977,11 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 
 unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
 	// Try to fetch a cached client
-	auto cached_client = client_cache->GetClient();
-	if (cached_client) {
-		return cached_client;
+	if (client_cache) {
+		auto cached_client = client_cache->GetClient();
+		if (cached_client) {
+			return cached_client;
+		}
 	}
 
 	// Create a new client
@@ -991,7 +996,9 @@ unique_ptr<HTTPClient> HTTPFileHandle::CreateClient() {
 }
 
 void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
-	client_cache->StoreClient(std::move(client));
+	if (client_cache){
+		client_cache->StoreClient(std::move(client));
+	}
 }
 
 HTTPFileHandle::~HTTPFileHandle() {
