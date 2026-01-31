@@ -395,10 +395,11 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 }
 
 shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string &path) {
-	lock_guard<mutex> lock(client_cache_map_lock);
-
 	string path_out, proto_host_port;
 	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
+
+	lock_guard<mutex> lock(client_cache_map_lock);
+	std::cout << proto_host_port << "\n";
 	if (client_cache_map.count(proto_host_port) == 0) {
 		client_cache_map[proto_host_port] = make_uniq<HTTPClientCache>();
 	}
@@ -432,7 +433,11 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 		}
 	}
 	auto handle = duckdb::make_uniq<HTTPFileHandle>(*this, file, flags, std::move(params));
-	handle->InitializeClientCache(*this);
+	if (handle) {
+		handle->InitializeClientCache(*this);
+	} else {
+		throw IOException("AAAA");
+	}
 	return handle;
 }
 
