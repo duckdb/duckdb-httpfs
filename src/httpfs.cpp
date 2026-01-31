@@ -395,20 +395,25 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 }
 
 shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string &path) {
-	string path_out, proto_host_port;
-	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
-
 	lock_guard<mutex> lock(client_cache_map_lock);
-	std::cout << proto_host_port << "\n";
-	if (client_cache_map.count(proto_host_port) == 0) {
-		client_cache_map[proto_host_port] = make_uniq<HTTPClientCache>();
+
+	if (auto existing = lru_client_cache.Get(path)) {
+		return existing;
 	}
 
-	return client_cache_map[proto_host_port];
+	auto client_cache = make_uniq<HTTPClientCache>();
+	lru_client_cache.Put(path, std::move(client_cache));
+	return lru_client_cache.Get(path);
 }
 
 void HTTPFileHandle::InitializeClientCache(HTTPFileSystem &file_system) {
-	client_cache = file_system.GetOrCreateClientCache(path);
+	client_cache = file_system.GetOrCreateClientCache(BaseUrl());
+}
+
+string HTTPFileHandle::BaseUrl() const {
+	string path_out, proto_host_port;
+	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
+	return proto_host_port;
 }
 
 unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
@@ -438,8 +443,12 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 
 void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle) {
 	if (handle) {
-		handle->InitializeClientCache(*this);
+		FinalizeHandleCreate(*handle);
 	}
+}
+
+void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle) {
+	handle.InitializeClientCache(*this);
 }
 
 unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
@@ -990,13 +999,11 @@ unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
 
 unique_ptr<HTTPClient> HTTPFileHandle::CreateClient() {
 	// Create a new client
-	string path_out, proto_host_port;
-	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
-	return http_params.http_util.InitializeClient(http_params, proto_host_port);
+	return http_params.http_util.InitializeClient(http_params, BaseUrl());
 }
 
 void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
-	if (client_cache){
+	if (client_cache) {
 		client_cache->StoreClient(std::move(client));
 	}
 }

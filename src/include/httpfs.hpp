@@ -3,6 +3,7 @@
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "http_state.hpp"
+#include "duckdb/common/lru_cache.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
@@ -108,6 +109,7 @@ public:
 		return flags.DirectIO() || flags.RequireParallelAccess();
 	}
 	void InitializeClientCache(HTTPFileSystem &file_system);
+	virtual string BaseUrl() const;
 
 private:
 	void AllocateReadBuffer(optional_ptr<FileOpener> opener);
@@ -126,7 +128,7 @@ public:
 
 protected:
 	//! Create a new Client
-	virtual unique_ptr<HTTPClient> CreateClient();
+	unique_ptr<HTTPClient> CreateClient();
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
 
@@ -207,8 +209,15 @@ public:
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
 	shared_ptr<HTTPClientCache> GetOrCreateClientCache(const string &path);
 
-	map<string, shared_ptr<HTTPClientCache>> client_cache_map;
+	struct NopCleanup {
+		void operator()(unique_ptr<int> &) {
+		}
+	};
+
+	SharedLruCache<string, HTTPClientCache, DefaultPayload> lru_client_cache {16};
 	mutex client_cache_map_lock;
+	void FinalizeHandleCreate(duckdb::unique_ptr<HTTPFileHandle> &);
+	void FinalizeHandleCreate(HTTPFileHandle &);
 
 protected:
 	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
@@ -224,7 +233,7 @@ protected:
 protected:
 	virtual duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                                        optional_ptr<FileOpener> opener);
-	void FinalizeHandleCreate(duckdb::unique_ptr<HTTPFileHandle> &);
+
 private:
 	// Global cache
 	mutex global_cache_lock;
