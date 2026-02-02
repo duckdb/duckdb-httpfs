@@ -1165,7 +1165,8 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 
 void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> opener) {
 	vector<string> files_to_remove;
-	ListFiles(path, [&](const string &file, bool is_dir) { files_to_remove.push_back(file); }, opener.get());
+	ListFiles(
+	    path, [&](const string &file, bool is_dir) { files_to_remove.push_back(file); }, opener.get());
 
 	RemoveFiles(files_to_remove, opener);
 }
