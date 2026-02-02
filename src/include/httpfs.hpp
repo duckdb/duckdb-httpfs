@@ -15,12 +15,6 @@
 
 namespace duckdb {
 
-struct DefaultPayload {
-	idx_t GetWeight() const {
-		return 1;
-	}
-};
-
 class RangeRequestNotSupportedException {
 public:
 	// Call static Throw instead: if thrown as exception DuckDB can't catch it.
