@@ -214,7 +214,7 @@ public:
 		}
 	};
 
-	SharedLruCache<string, HTTPClientCache, DefaultPayload> lru_client_cache {16};
+	SharedLruCache<string, HTTPClientCache, DefaultPayload> lru_client_cache {256};
 	mutex client_cache_map_lock;
 	void FinalizeHandleCreate(duckdb::unique_ptr<HTTPFileHandle> &);
 	void FinalizeHandleCreate(HTTPFileHandle &);
