@@ -3,6 +3,7 @@
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "http_state.hpp"
+#include "duckdb/common/lru_cache.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
@@ -53,7 +54,7 @@ public:
 	virtual void Initialize(optional_ptr<FileOpener> opener);
 
 	// We keep an http client stored for connection reuse with keep-alive headers
-	HTTPClientCache client_cache;
+	shared_ptr<HTTPClientCache> client_cache;
 
 	unique_ptr<HTTPParams> params;
 	HTTPFSParams &http_params;
@@ -104,6 +105,8 @@ public:
 	bool SkipBuffer() const {
 		return flags.DirectIO() || flags.RequireParallelAccess();
 	}
+	void InitializeClientCache(HTTPFileSystem &file_system);
+	virtual string BaseUrl() const;
 
 private:
 	void AllocateReadBuffer(optional_ptr<FileOpener> opener);
@@ -122,7 +125,7 @@ public:
 
 protected:
 	//! Create a new Client
-	virtual unique_ptr<HTTPClient> CreateClient();
+	unique_ptr<HTTPClient> CreateClient();
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
 
@@ -200,6 +203,17 @@ public:
 	static void Verify();
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
+	shared_ptr<HTTPClientCache> GetOrCreateClientCache(const string &path);
+
+	struct NopCleanup {
+		void operator()(unique_ptr<int> &) {
+		}
+	};
+
+	SharedLruCache<string, HTTPClientCache, DefaultPayload> lru_client_cache {256};
+	mutex client_cache_map_lock;
+	void FinalizeHandleCreate(duckdb::unique_ptr<HTTPFileHandle> &);
+	void FinalizeHandleCreate(HTTPFileHandle &);
 
 protected:
 	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,

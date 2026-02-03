@@ -377,6 +377,29 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		}
 	}
 }
+
+shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string &path) {
+	lock_guard<mutex> lock(client_cache_map_lock);
+
+	if (auto existing = lru_client_cache.Get(path)) {
+		return existing;
+	}
+
+	auto client_cache = make_uniq<HTTPClientCache>();
+	lru_client_cache.Put(path, std::move(client_cache));
+	return lru_client_cache.Get(path);
+}
+
+void HTTPFileHandle::InitializeClientCache(HTTPFileSystem &file_system) {
+	client_cache = file_system.GetOrCreateClientCache(BaseUrl());
+}
+
+string HTTPFileHandle::BaseUrl() const {
+	string path_out, proto_host_port;
+	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
+	return proto_host_port;
+}
+
 unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                         optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
@@ -398,7 +421,18 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 			httpfs_params.bearer_token = kv_secret.TryGetValue("token", true).ToString();
 		}
 	}
-	return duckdb::make_uniq<HTTPFileHandle>(*this, file, flags, std::move(params));
+	auto handle = duckdb::make_uniq<HTTPFileHandle>(*this, file, flags, std::move(params));
+	return handle;
+}
+
+void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle) {
+	if (handle) {
+		FinalizeHandleCreate(*handle);
+	}
+}
+
+void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle) {
+	handle.InitializeClientCache(*this);
 }
 
 unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
@@ -408,6 +442,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	if (flags.ReturnNullIfNotExists()) {
 		try {
 			auto handle = CreateHandle(file, flags, opener);
+			FinalizeHandleCreate(handle);
 			handle->Initialize(opener);
 			return std::move(handle);
 		} catch (...) {
@@ -416,6 +451,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	}
 
 	auto handle = CreateHandle(file, flags, opener);
+	FinalizeHandleCreate(handle);
 
 	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
 		handle->write_overwrite_mode = true;
@@ -928,9 +964,11 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 
 unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
 	// Try to fetch a cached client
-	auto cached_client = client_cache.GetClient();
-	if (cached_client) {
-		return cached_client;
+	if (client_cache) {
+		auto cached_client = client_cache->GetClient();
+		if (cached_client) {
+			return cached_client;
+		}
 	}
 
 	// Create a new client
@@ -939,13 +977,13 @@ unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
 
 unique_ptr<HTTPClient> HTTPFileHandle::CreateClient() {
 	// Create a new client
-	string path_out, proto_host_port;
-	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
-	return http_params.http_util.InitializeClient(http_params, proto_host_port);
+	return http_params.http_util.InitializeClient(http_params, BaseUrl());
 }
 
 void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
-	client_cache.StoreClient(std::move(client));
+	if (client_cache) {
+		client_cache->StoreClient(std::move(client));
+	}
 }
 
 HTTPFileHandle::~HTTPFileHandle() {
