@@ -34,7 +34,7 @@ struct TemporaryAWSCredential {
 	string access_key_id;
 	string secret_access_key;
 	string session_token;
-	timestamp_t expiration{};
+	timestamp_t expiration {};
 };
 
 static LRUCache<string, string> AccountIdCache(1024);
@@ -319,7 +319,12 @@ bool get_data_access(HTTPParams &http_params, S3AuthParams &auth_params, const s
 	string_t tz(nullptr, 0);
 	Timestamp::TryConvertTimestampTZ(expiration.c_str(), expiration.size(), expiration_ts, true, has_offset, tz);
 	expiration_ts -= 10 * 60 * 1000000; // 10 min buffer
-	AccessGrantsCache.Put(matched_grant_target, {access_key_id, secret_access_key, session_token, expiration_ts});
+	TemporaryAWSCredential temp_creds;
+	temp_creds.access_key_id = access_key_id;
+	temp_creds.secret_access_key = secret_access_key;
+	temp_creds.session_token = session_token;
+	temp_creds.expiration = expiration_ts;
+	AccessGrantsCache.Put(matched_grant_target, temp_creds);
 	return true;
 }
 
