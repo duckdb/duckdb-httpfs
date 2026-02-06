@@ -118,6 +118,9 @@ public:
 		curl_url_set(base_url, CURLUPART_URL, proto_host_port.c_str(), 0);
 		stored_bearer_token = "";
 		stored_cert_file_path = "";
+		if (StringUtil::StartsWith(proto_host_port, "https://")) {
+			https_connection = true;
+		}
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
@@ -159,7 +162,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_FORBID_REUSE, 0L);
 		}
 
-		if (http_params.enable_curl_server_cert_verification) {
+		if (https_connection && http_params.enable_curl_server_cert_verification) {
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYPEER, 1L); // Verify the cert
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYHOST, 2L); // Verify that the cert matches the hostname
 		} else {
@@ -445,14 +448,7 @@ private:
 		auto status_code = HTTPStatusCode(request_info->response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
 		if (res != CURLcode::CURLE_OK) {
-			// __RESPONSE_STATUS__ is used for error propagation and debugging. It stores the full HTTP status trail,
-			// e.g. in cases of redirection failures, to help trace the sequence of HTTP statuses.
-			if (!request_info->header_collection.empty() &&
-			    request_info->header_collection.back().HasHeader("__RESPONSE_STATUS__")) {
-				response->request_error = request_info->header_collection.back().GetHeaderValue("__RESPONSE_STATUS__");
-			} else {
-				response->request_error = curl_easy_strerror(res);
-			}
+			response->request_error = curl_easy_strerror(res);
 			return response;
 		}
 		response->body = request_info->body;
@@ -478,6 +474,7 @@ private:
 	CURLU *base_url = nullptr;
 	string stored_bearer_token;
 	string stored_cert_file_path;
+	bool https_connection = false;
 
 	static std::mutex &GetRefLock() {
 		static std::mutex mtx;
