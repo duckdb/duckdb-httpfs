@@ -4,6 +4,9 @@
 foreach cipher GCM CTR
 
 statement ok
+SET force_mbedtls_unsafe = 'true';
+
+statement ok
 ATTACH '__TEST_DIR__/enc_test_${cipher}.db' as enc (ENCRYPTION_KEY 'asdf', ENCRYPTION_CIPHER '${cipher}');
 
 statement ok
@@ -30,6 +33,9 @@ FROM enc.test
 12	21
 
 restart
+
+statement ok
+SET force_mbedtls_unsafe = 'false';
 
 endloop
 
