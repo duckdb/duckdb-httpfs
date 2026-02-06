@@ -236,6 +236,10 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 			    }
 			    throw HTTPException(error);
 		    }
+		    // Capture S3 version ID if not already set
+		    if (hfh.version_id.empty() && response.HasHeader("x-amz-version-id")) {
+			    hfh.version_id = response.GetHeaderValue("x-amz-version-id");
+		    }
 		    return true;
 	    },
 	    [&](const_data_ptr_t data, idx_t data_length) {
@@ -314,6 +318,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 					        "unsafe_disable_etag_checks = true;`",
 					        handle.path, hfh.etag, response.GetHeaderValue("ETag"));
 				    }
+			    }
+
+			    // Capture S3 version ID if not already set (fallback for when HEAD didn't return it)
+			    if (hfh.version_id.empty() && response.HasHeader("x-amz-version-id")) {
+				    hfh.version_id = response.GetHeaderValue("x-amz-version-id");
 			    }
 
 			    if (response.HasHeader("Content-Length")) {
@@ -833,6 +842,11 @@ void HTTPFileHandle::LoadFileInfo() {
 	if (res->headers.HasHeader("ETag")) {
 		etag = res->headers.GetHeaderValue("ETag");
 	}
+	// Capture S3 version ID for versioned buckets - this allows consistent reads
+	// even when the file is updated during incremental reading
+	if (res->headers.HasHeader("x-amz-version-id")) {
+		version_id = res->headers.GetHeaderValue("x-amz-version-id");
+	}
 	initialized = true;
 }
 
@@ -884,6 +898,7 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 				last_modified = value.last_modified;
 				length = value.length;
 				etag = value.etag;
+				version_id = value.version_id;
 
 				if (flags.OpenForReading() && !SkipBuffer()) {
 					AllocateReadBuffer(opener);
@@ -901,7 +916,7 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			FullDownload(hfs, should_write_cache);
 		}
 		if (should_write_cache) {
-			current_cache->Insert(path, {length, last_modified, etag});
+			current_cache->Insert(path, {length, last_modified, etag, version_id});
 		}
 
 		if (!SkipBuffer()) {
