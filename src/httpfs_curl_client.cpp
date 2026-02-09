@@ -118,9 +118,6 @@ public:
 		curl_url_set(base_url, CURLUPART_URL, proto_host_port.c_str(), 0);
 		stored_bearer_token = "";
 		stored_cert_file_path = "";
-		if (StringUtil::StartsWith(proto_host_port, "https://")) {
-			https_connection = true;
-		}
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
@@ -162,7 +159,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_FORBID_REUSE, 0L);
 		}
 
-		if (https_connection && http_params.enable_curl_server_cert_verification) {
+		if (http_params.enable_curl_server_cert_verification) {
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYPEER, 1L); // Verify the cert
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYHOST, 2L); // Verify that the cert matches the hostname
 		} else {
@@ -474,7 +471,6 @@ private:
 	CURLU *base_url = nullptr;
 	string stored_bearer_token;
 	string stored_cert_file_path;
-	bool https_connection = false;
 
 	static std::mutex &GetRefLock() {
 		static std::mutex mtx;
