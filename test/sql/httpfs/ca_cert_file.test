@@ -20,6 +20,10 @@ Invalid Input Error: NULL it's not a valid option for ca_cert_file
 statement ok
 SET ca_cert_file = 'README.md';
 
+# FIXME: There are some inconsistencies between curl global options set by spatial AND httpfs on Windows, to be investigated
+# Also, the test relies now on path that are inconsisten on Windows machines
+require notwindows
+
 query I
 SELECT current_setting('ca_cert_file') ILIKE '%/README.md';
 ----
@@ -51,9 +55,6 @@ SELECT current_setting('ca_cert_file');
 
 statement ok
 SET ca_cert_file = 'README.md';
-
-# FIXME: There are some inconsistencies between curl global options set by spatial AND httpfs on Windows, to be investigated
-require notwindows
 
 statement error
 FROM read_blob('https://duckdb.org/')
