@@ -9,9 +9,6 @@ class HTTPFSClient : public HTTPClient {
 public:
 	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
 		client = make_uniq<duckdb_httplib_openssl::Client>(proto_host_port);
-		if (StringUtil::StartsWith(proto_host_port, "https://")) {
-			https_connection = true;
-		}
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
@@ -21,7 +18,7 @@ public:
 		if (!http_params.ca_cert_file.empty()) {
 			client->set_ca_cert_path(http_params.ca_cert_file.c_str());
 		}
-		client->enable_server_certificate_verification(https_connection && http_params.enable_server_cert_verification);
+		client->enable_server_certificate_verification(http_params.enable_server_cert_verification);
 		client->set_write_timeout(http_params.timeout, http_params.timeout_usec);
 		client->set_read_timeout(http_params.timeout, http_params.timeout_usec);
 		client->set_connection_timeout(http_params.timeout, http_params.timeout_usec);
@@ -162,7 +159,6 @@ private:
 private:
 	unique_ptr<duckdb_httplib_openssl::Client> client;
 	optional_ptr<HTTPState> state;
-	bool https_connection = false;
 };
 
 unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
