@@ -5,6 +5,8 @@
 #include "duckdb.hpp"
 #include "s3fs.hpp"
 #include "hffs.hpp"
+#include "duckdb/common/local_file_system.hpp"
+#include "duckdb/main/client_context_file_opener.hpp"
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 #include "crypto.hpp"
 #endif // OVERRIDE_ENCRYPTION_UTILS
@@ -50,8 +52,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          Value(true));
 	config.AddExtensionOption("enable_server_cert_verification", "Enable server side certificate verification.",
 	                          LogicalType::BOOLEAN, Value(false));
+	auto callback_ca_cert_file = [](ClientContext &context, SetScope scope, Value &parameter) {
+		LocalFileSystem fs;
+		string value = StringValue::Get(parameter);
+		ClientContextFileOpener opener(context);
+		auto &config = DBConfig::GetConfig(context);
+		// Normalize ca_cert_file to absolute path
+		parameter = Value(fs.CanonicalizePath(value, opener));
+	};
 	config.AddExtensionOption("ca_cert_file", "Path to a custom certificate file for self-signed certificates.",
-	                          LogicalType::VARCHAR, Value(""));
+	                          LogicalType::VARCHAR, Value(""), callback_ca_cert_file);
 	// Global S3 config
 	config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR);
 	config.AddExtensionOption("s3_access_key_id", "S3 Access Key ID", LogicalType::VARCHAR);
