@@ -63,6 +63,7 @@ public:
 	idx_t length;
 	timestamp_t last_modified;
 	string etag;
+	string version_id;
 	bool force_full_download;
 	bool initialized = false;
 

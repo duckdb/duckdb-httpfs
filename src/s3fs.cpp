@@ -802,9 +802,16 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, string s3
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map) {
-	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
+	auto &s3_handle = handle.Cast<S3FileHandle>();
+	auto auth_params = s3_handle.auth_params;
 	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params);
+
+	string query_string;
+	if (!s3_handle.version_id.empty()) {
+		query_string = "versionId=" + UrlEncode(s3_handle.version_id, true);
+	}
+
+	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, query_string);
 
 	HTTPHeaders headers;
 	if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
@@ -813,7 +820,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
-		headers = CreateS3Header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
+		headers = CreateS3Header(parsed_s3_url.path, query_string, parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
 
 	return HTTPFileSystem::GetRequest(handle, http_url, headers);
@@ -821,9 +828,16 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 
 unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                        idx_t file_offset, char *buffer_out, idx_t buffer_out_len) {
-	auto auth_params = handle.Cast<S3FileHandle>().auth_params;
+	auto &s3_handle = handle.Cast<S3FileHandle>();
+	auto auth_params = s3_handle.auth_params;
 	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params);
+
+	string query_string;
+	if (!s3_handle.version_id.empty()) {
+		query_string = "versionId=" + UrlEncode(s3_handle.version_id, true);
+	}
+
+	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, query_string);
 
 	HTTPHeaders headers;
 	if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
@@ -832,7 +846,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 		headers["Host"] = parsed_s3_url.host;
 	} else {
 		// Use existing S3 authentication
-		headers = CreateS3Header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
+		headers = CreateS3Header(parsed_s3_url.path, query_string, parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
 	}
 
 	return HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);
