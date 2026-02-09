@@ -4,14 +4,57 @@
 
 require httpfs
 
+query I
+SELECT current_setting('ca_cert_file');
+----
+(empty)
+
 statement ok
 SET enable_server_cert_verification = true;
+
+statement error
+SET ca_cert_file = NULL;
+----
+Invalid Input Error: NULL it's not a valid option for ca_cert_file
 
 statement ok
 SET ca_cert_file = 'README.md';
 
 # FIXME: There are some inconsistencies between curl global options set by spatial AND httpfs on Windows, to be investigated
+# Also, the test relies now on path that are inconsisten on Windows machines
 require notwindows
+
+query I
+SELECT current_setting('ca_cert_file') ILIKE '%/README.md';
+----
+true
+
+statement ok
+RESET ca_cert_file;
+
+query I
+SELECT current_setting('ca_cert_file');
+----
+(empty)
+
+statement ok
+SET ca_cert_file = 'README.md';
+
+query I
+SELECT current_setting('ca_cert_file') ILIKE '%/README.md';
+----
+true
+
+statement ok
+SET ca_cert_file = '';
+
+query I
+SELECT current_setting('ca_cert_file');
+----
+(empty)
+
+statement ok
+SET ca_cert_file = 'README.md';
 
 statement error
 FROM read_blob('https://duckdb.org/')
