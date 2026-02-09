@@ -4,8 +4,50 @@
 
 require httpfs
 
+query I
+SELECT current_setting('ca_cert_file');
+----
+(empty)
+
 statement ok
 SET enable_server_cert_verification = true;
+
+statement error
+SET ca_cert_file = NULL;
+----
+Invalid Input Error: NULL it's not a valid option for ca_cert_file
+
+statement ok
+SET ca_cert_file = 'README.md';
+
+query I
+SELECT current_setting('ca_cert_file') ILIKE '%/README.md';
+----
+true
+
+statement ok
+RESET ca_cert_file;
+
+query I
+SELECT current_setting('ca_cert_file');
+----
+(empty)
+
+statement ok
+SET ca_cert_file = 'README.md';
+
+query I
+SELECT current_setting('ca_cert_file') ILIKE '%/README.md';
+----
+true
+
+statement ok
+SET ca_cert_file = '';
+
+query I
+SELECT current_setting('ca_cert_file');
+----
+(empty)
 
 statement ok
 SET ca_cert_file = 'README.md';

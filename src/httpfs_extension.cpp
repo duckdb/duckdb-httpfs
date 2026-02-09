@@ -53,8 +53,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("enable_server_cert_verification", "Enable server side certificate verification.",
 	                          LogicalType::BOOLEAN, Value(false));
 	auto callback_ca_cert_file = [](ClientContext &context, SetScope scope, Value &parameter) {
-		LocalFileSystem fs;
+		if (parameter.IsNull()) {
+			throw InvalidInputException("NULL it's not a valid option for ca_cert_file");
+		}
 		string value = StringValue::Get(parameter);
+		if (value.empty()) {
+			parameter = Value("");
+			return;
+		}
+		LocalFileSystem fs;
 		ClientContextFileOpener opener(context);
 		auto &config = DBConfig::GetConfig(context);
 		// Normalize ca_cert_file to absolute path
