@@ -30,7 +30,7 @@ services:
     entrypoint: >
       /bin/sh -c "
         until (
-          /usr/bin/mc config host add myminio http://duckdb-minio.com:9000 duckdb_minio_admin duckdb_minio_admin_password
+          /usr/bin/mc alias set myminio http://duckdb-minio.com:9000 duckdb_minio_admin duckdb_minio_admin_password
         ) do
           echo '...waiting...' && sleep 1;
         done;
@@ -38,12 +38,12 @@ services:
         /usr/bin/mc admin user add myminio minio_duckdb_user minio_duckdb_user_password
         /usr/bin/mc admin user list myminio
         /usr/bin/mc admin user info myminio minio_duckdb_user
-        /usr/bin/mc admin policy set myminio readwrite user=minio_duckdb_user
+        /usr/bin/mc admin policy attach myminio readwrite --user minio_duckdb_user
 
         /usr/bin/mc admin user add myminio minio_duckdb_user_2 minio_duckdb_user_2_password
         /usr/bin/mc admin user list myminio
         /usr/bin/mc admin user info myminio minio_duckdb_user_2
-        /usr/bin/mc admin policy set myminio readwrite user=minio_duckdb_user_2
+        /usr/bin/mc admin policy attach myminio readwrite --user minio_duckdb_user_2
 
         /usr/bin/mc rb --force myminio/test-bucket
         /usr/bin/mc mb myminio/test-bucket
