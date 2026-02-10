@@ -5,17 +5,33 @@ The httpfs extension is an autoloadable extension implementing a file system tha
 ## Building & Loading the Extension
 
 The DuckDB submodule must be initialized prior to building.
-
 ```bash
 git submodule init
 git pull --recurse-submodules
 ```
 
-To build, type
+To build, type:
 ```
-make
+make vcpkg-setup
+VCPKG_TOOLCHAIN_PATH=$pwd/vcpkg/scripts/buildsystems/vcpkg.cmake GEN=ninja make
+```
+
+Consider `GEN=ninja` and having `ccache` or equivalent software installed.
+`vcpkg`, a package manager for C++, it's highly reccomended to generate reproducible and stable builds, in particular here it serves to build the `openssl` and `curl` dependencies.
+Without the `VCPKG_TOOLCHAIN_PATH` option, locally available libraries will be used from default search paths.
+
+To try out the resulting binary that will have a statically linked (and already loaded `httfps` extension), try:
+```
+./build/release/duckdb
+```
+```sql
+FROM read_blob('https://duckdb.org/');
 ```
 
 ## Testing
 
-Testing uses a local MinIO setup using Docker. See the [testing documentation for more information on how to set this up locally](test).
+Some tests querying remote resources can be run already without further setup:
+```
+./build/release/test/unittest
+```
+Further integration testing uses a local MinIO setup using Docker. See the [testing documentation for more information on how to set this up locally](test).
