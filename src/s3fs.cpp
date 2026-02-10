@@ -878,7 +878,6 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		// Use existing S3 authentication
 		headers = CreateS3Header(parsed_s3_url.path, query_string, parsed_s3_url.host, "s3", "GET", auth_params, "", "",
 		                         "", "");
-
 	}
 
 	return HTTPFileSystem::GetRequest(handle, http_url, headers);
@@ -906,7 +905,6 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 		// Use existing S3 authentication
 		headers = CreateS3Header(parsed_s3_url.path, query_string, parsed_s3_url.host, "s3", "GET", auth_params, "", "",
 		                         "", "");
-
 	}
 
 	return HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);

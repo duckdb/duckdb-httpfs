@@ -238,7 +238,8 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 			    }
 			    throw HTTPException(error);
 		    }
-		    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() && response.HasHeader("x-amz-version-id")) {
+		    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() &&
+		        response.HasHeader("x-amz-version-id")) {
 			    hfh.version_id = response.GetHeaderValue("x-amz-version-id");
 		    }
 		    return true;
@@ -315,7 +316,8 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 				    }
 			    }
 
-			    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() && response.HasHeader("x-amz-version-id")) {
+			    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() &&
+			        response.HasHeader("x-amz-version-id")) {
 				    hfh.version_id = response.GetHeaderValue("x-amz-version-id");
 			    }
 
