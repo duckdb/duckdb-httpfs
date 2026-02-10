@@ -15,12 +15,14 @@ To build, type:
 make vcpkg-setup
 VCPKG_TOOLCHAIN_PATH=$pwd/vcpkg/scripts/buildsystems/vcpkg.cmake GEN=ninja make
 ```
+Consider adding `GEN=ninja` and having `ccache` installed to speed up recompilations.
 
-Consider `GEN=ninja` and having `ccache` or equivalent software installed.
+### VCPKG
 `vcpkg`, a package manager for C++, it's highly reccomended to generate reproducible and stable builds, in particular here it serves to build the `openssl` and `curl` dependencies.
 Without the `VCPKG_TOOLCHAIN_PATH` option, locally available libraries will be used from default search paths.
 
-To try out the resulting binary that will have a statically linked (and already loaded `httfps` extension), try:
+## Running
+The resulting binary, that will also statically link and load the `httfps`, it's available like:
 ```
 ./build/release/duckdb
 ```
@@ -29,7 +31,6 @@ FROM read_blob('https://duckdb.org/');
 ```
 
 ## Testing
-
 Some tests querying remote resources can be run already without further setup:
 ```
 ./build/release/test/unittest
