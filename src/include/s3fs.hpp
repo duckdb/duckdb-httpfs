@@ -160,6 +160,7 @@ public:
 protected:
 	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
 	HTTPMetadataCacheEntry GetCacheEntry() const override;
+	void SetRegion(string region_p);
 
 protected:
 	string multipart_upload_id;
@@ -262,6 +263,7 @@ public:
 	static string GetGCSAuthError(const S3AuthParams &s3_auth_params);
 	static HTTPException GetS3Error(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
 	                                const string &url);
+	HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url) override;
 
 protected:
 	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
@@ -283,8 +285,6 @@ protected:
 
 	void FlushBuffer(S3FileHandle &handle, shared_ptr<S3WriteBuffer> write_buffer);
 	string GetPayloadHash(char *buffer, idx_t buffer_len);
-
-	HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url) override;
 };
 
 // Helper class to do s3 ListObjectV2 api call https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html

@@ -130,6 +130,11 @@ void HTTPClientCache::StoreClient(unique_ptr<HTTPClient> client) {
 	clients.push_back(std::move(client));
 }
 
+void HTTPClientCache::Clear() {
+	lock_guard<mutex> lck(lock);
+	clients.clear();
+}
+
 static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &header_map) {
 	if (!http_params.user_agent.empty()) {
 		header_map.Insert("User-Agent", http_params.user_agent);
@@ -793,8 +798,8 @@ void HTTPFileHandle::LoadFileInfo() {
 	if (res->status != HTTPStatusCode::OK_200) {
 		if (flags.OpenForWriting() && res->status == HTTPStatusCode::NotFound_404) {
 			if (!flags.CreateFileIfNotExists() && !flags.OverwriteExistingFile()) {
-				throw IOException("Unable to open URL \"" + path +
-				                  "\" for writing: file does not exist and CREATE flag is not set");
+				throw IOException(
+				    "Unable to open URL \"%s\" for writing: file does not exist and CREATE flag is not set", path);
 			}
 			length = 0;
 			return;
@@ -806,13 +811,11 @@ void HTTPFileHandle::LoadFileInfo() {
 				if (range_res->status != HTTPStatusCode::PartialContent_206 &&
 				    range_res->status != HTTPStatusCode::Accepted_202 && range_res->status != HTTPStatusCode::OK_200) {
 					// It failed again
-					throw HTTPException(*range_res, "Unable to connect to URL \"%s\": %d (%s).", path,
-					                    static_cast<int>(res->status), res->GetError());
+					throw hfs.GetHTTPError(*this, *range_res, path);
 				}
 				res = std::move(range_res);
 			} else {
-				throw HTTPException(*res, "Unable to connect to URL \"%s\": %d (%s).", path,
-				                    static_cast<int>(res->status), res->GetError());
+				throw hfs.GetHTTPError(*this, *res, path);
 			}
 		}
 	}
