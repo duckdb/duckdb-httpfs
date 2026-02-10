@@ -1,6 +1,6 @@
 services:
   minio:
-    image: minio/minio:RELEASE.2021-11-03T03-36-36Z
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
     hostname: duckdb-minio.com
     ports:
       - "9000:9000"
@@ -18,7 +18,7 @@ services:
     command: server /data --console-address ":9001"
 
   minio_setup:
-    image: minio/mc:RELEASE.2021-11-05T10-05-06Z
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
     depends_on:
       - minio
     links:
@@ -30,7 +30,7 @@ services:
     entrypoint: >
       /bin/sh -c "
         until (
-          /usr/bin/mc config host add myminio http://duckdb-minio.com:9000 duckdb_minio_admin duckdb_minio_admin_password
+          /usr/bin/mc alias set myminio http://duckdb-minio.com:9000 duckdb_minio_admin duckdb_minio_admin_password
         ) do
           echo '...waiting...' && sleep 1;
         done;
@@ -38,12 +38,12 @@ services:
         /usr/bin/mc admin user add myminio minio_duckdb_user minio_duckdb_user_password
         /usr/bin/mc admin user list myminio
         /usr/bin/mc admin user info myminio minio_duckdb_user
-        /usr/bin/mc admin policy set myminio readwrite user=minio_duckdb_user
+        /usr/bin/mc admin policy attach myminio readwrite --user minio_duckdb_user
 
         /usr/bin/mc admin user add myminio minio_duckdb_user_2 minio_duckdb_user_2_password
         /usr/bin/mc admin user list myminio
         /usr/bin/mc admin user info myminio minio_duckdb_user_2
-        /usr/bin/mc admin policy set myminio readwrite user=minio_duckdb_user_2
+        /usr/bin/mc admin policy attach myminio readwrite --user minio_duckdb_user_2
 
         /usr/bin/mc rb --force myminio/test-bucket
         /usr/bin/mc mb myminio/test-bucket
@@ -55,7 +55,7 @@ services:
 
         /usr/bin/mc rb --force myminio/test-bucket-public
         /usr/bin/mc mb myminio/test-bucket-public
-        /usr/bin/mc policy set download myminio/test-bucket-public
+        /usr/bin/mc anonymous set public myminio/test-bucket-public
         /usr/bin/mc policy get myminio/test-bucket-public
 
         # This is for the test of presigned URLs
