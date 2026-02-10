@@ -17,6 +17,8 @@ VCPKG_TOOLCHAIN_PATH=$pwd/vcpkg/scripts/buildsystems/vcpkg.cmake GEN=ninja make
 ```
 
 Consider `GEN=ninja` and having `ccache` or equivalent software installed.
+`vcpkg`, a package manager for C++, it's highly reccomended to generate reproducible and stable builds, in particular here it serves to build the `openssl` and `curl` dependencies.
+Without the `VCPKG_TOOLCHAIN_PATH` option, locally available libraries will be used from default search paths.
 
 To try out the resulting binary that will have a statically linked (and already loaded `httfps` extension), try:
 ```
