@@ -55,6 +55,7 @@ services:
 
         /usr/bin/mc rb --force myminio/test-bucket-public
         /usr/bin/mc mb myminio/test-bucket-public
+        /usr/bin/mc version enable myminio/test-bucket-public
         /usr/bin/mc policy set download myminio/test-bucket-public
         /usr/bin/mc policy get myminio/test-bucket-public
 
