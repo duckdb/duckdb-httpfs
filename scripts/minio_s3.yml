@@ -1,6 +1,6 @@
 services:
   minio:
-    image: minio/minio:RELEASE.2021-11-03T03-36-36Z
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
     hostname: duckdb-minio.com
     ports:
       - "9000:9000"
@@ -18,7 +18,7 @@ services:
     command: server /data --console-address ":9001"
 
   minio_setup:
-    image: minio/mc:RELEASE.2021-11-05T10-05-06Z
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
     depends_on:
       - minio
     links:
