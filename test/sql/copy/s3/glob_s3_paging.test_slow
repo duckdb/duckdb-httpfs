@@ -61,6 +61,55 @@ endloop
 
 endloop
 
+statement ok
+SET allow_s3_recursive_globbing = false;
+
+statement ok
+CALL enable_logging('HTTP');
+
+query I
+FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
+----
+
+
+query I
+FROM duckdb_logs_parsed('http') SELECT count(request.url);
+----
+5
+
+# first to /?encoding-type=url&list-type=2&prefix=parquet_glob
+# then next 5 via continuation
+
+statement ok
+SET allow_s3_recursive_globbing = true;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
+----
+
+
+query I
+FROM duckdb_logs_parsed('http') SELECT count(request.url);
+----
+2
+
+# first to  /?encoding-type=url&list-type=2&prefix=parquet_glob (listing only at that level)
+# second to /?delimiter=%2F&encoding-type=url&list-type=2&prefix=parquet_glob_s3_paging%2F (to list one level up the subdirectories)
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
+
+query I
+FROM duckdb_logs_parsed('http') SELECT count(request.url);
+----
+6
+
 # Begin tests
 query I
 select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*-${urlstyle}-urls.${format}'
