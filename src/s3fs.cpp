@@ -1201,23 +1201,24 @@ void S3FileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx
 static bool Match(vector<string>::const_iterator key, vector<string>::const_iterator key_end,
                   vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end, bool completed) {
 
-		if (key == key_end && !completed) {
-			return true;
-		}
+	if (key == key_end && !completed) {
+		return true;
+	}
 
 	while (key != key_end && pattern != pattern_end) {
 		if (*pattern == "**") {
 			if (std::next(pattern) == pattern_end) {
 				return true;
 			}
-			pattern ++;
+			pattern++;
 			while (key != key_end) {
 				if (Match(key, key_end, pattern, pattern_end, completed)) {
 					return true;
 				}
 				key++;
 			}
-			if (!completed) return true;
+			if (!completed)
+				return true;
 			return false;
 		}
 		if (!Glob(key->data(), key->length(), pattern->data(), pattern->length())) {
@@ -1299,22 +1300,22 @@ bool S3GlobResult::ExpandNextPath() const {
 		// we have common prefixes left to scan - perform the request
 		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
 
-current_common_prefix = S3FileSystem::UrlDecode(current_common_prefix);
-               vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
-               vector<string> key_splits = StringUtil::Split(current_common_prefix, "/");
-               //pattern_splits.resize(key_splits.size());
-               const bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(), false);
-               if (is_match) {
-	prefix_path = S3FileSystem::UrlDecode(prefix_path);
-                       auto prefix_res = AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params,
-                                                                  common_prefix_continuation_token, true);
+		current_common_prefix = S3FileSystem::UrlDecode(current_common_prefix);
+		vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
+		vector<string> key_splits = StringUtil::Split(current_common_prefix, "/");
+		const bool is_match =
+		    Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(), false);
+		if (is_match) {
+			prefix_path = S3FileSystem::UrlDecode(prefix_path);
+			auto prefix_res = AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params,
+			                                           common_prefix_continuation_token, true);
 
-                       AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
-                       auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
-                       common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
+			AWSListObjectV2::ParseFileList(prefix_res, s3_keys);
+			auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
+			common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
 
-                       common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
-               }
+			common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
+		}
 
 		if (common_prefix_continuation_token.empty()) {
 			// we are done with the current common prefix
@@ -1544,14 +1545,14 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		// Construct the ListObjectsV2 call
 		string req_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
 
-		map<string,string> req_params;
+		map<string, string> req_params;
 		// NOTE: req_params needs to be sorted before passing to sigv4 code
 		if (!continuation_token.empty()) {
 			req_params["continuation-token"] = S3FileSystem::UrlEncode(continuation_token, true);
 		}
 
 		if (use_delimiter) {
-			req_params["delimiter"] ="%2F";
+			req_params["delimiter"] = "%2F";
 		}
 
 		req_params["encoding-type"] = "url";
@@ -1562,7 +1563,7 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		req_params["prefix"] = S3FileSystem::UrlEncode(parsed_url.key, true);
 
 		string encoded_params = "";
-		for (const auto & p : req_params) {
+		for (const auto &p : req_params) {
 			encoded_params += p.first + "=" + p.second + "&";
 		}
 		if (!encoded_params.empty()) {
