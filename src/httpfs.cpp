@@ -407,13 +407,12 @@ shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string 
 	string identifier = path + " " + options.ToString();
 
 	lock_guard<mutex> lock(client_cache_map_lock);
-	std::cout << identifier << "\n";
 
 	auto retrived = lru_client_cache.Get(identifier);
 
 	if (!retrived) {
 		auto client_cache = make_shared_ptr<HTTPClientCache>();
-		lru_client_cache.Put(path, client_cache);
+		lru_client_cache.Put(identifier, client_cache);
 		return std::move(client_cache);
 	}
 
