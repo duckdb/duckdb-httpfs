@@ -1333,9 +1333,10 @@ bool S3GlobResult::ExpandNextPath() const {
 		if (!common_prefixes.empty()) {
 			throw InternalException("We have common prefixes but we are doing a top-level request");
 		}
+		const bool use_recursive_glob = !StringUtil::Contains(parsed_s3_url.key, "**");
 		// issue the main request
-		string response_str =
-		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token, true);
+		string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
+		                                               main_continuation_token, use_recursive_glob);
 		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
 		AWSListObjectV2::ParseFileList(response_str, s3_keys);
 
