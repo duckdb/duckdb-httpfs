@@ -137,6 +137,10 @@ unique_ptr<HTTPClient> HTTPClientCache::GetClient() {
 }
 
 void HTTPClientCache::StoreClient(unique_ptr<HTTPClient> client) {
+	if (!client) {
+		return;
+	}
+	client->Cleanup();
 	lock_guard<mutex> lck(lock);
 	clients.push_back(std::move(client));
 }
@@ -413,7 +417,7 @@ shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string 
 	if (!retrived) {
 		auto client_cache = make_shared_ptr<HTTPClientCache>();
 		lru_client_cache.Put(identifier, client_cache);
-		return std::move(client_cache);
+		return client_cache;
 	}
 
 	return retrived;
@@ -454,15 +458,18 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 	return handle;
 }
 
-void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle) {
+void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle, optional_ptr<FileOpener> opener) {
 	if (handle) {
-		FinalizeHandleCreate(*handle);
+		FinalizeHandleCreate(*handle, opener);
 	}
 }
 
-void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle) {
+void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle, optional_ptr<FileOpener> opener) {
+	handle.http_params.state = nullptr;
 	ClientOptions options(handle);
-	handle.InitializeClientCache(*this, options);
+	if (!handle.client_cache) {
+		handle.InitializeClientCache(*this, options);
+	}
 }
 
 unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
@@ -472,7 +479,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	if (flags.ReturnNullIfNotExists()) {
 		try {
 			auto handle = CreateHandle(file, flags, opener);
-			FinalizeHandleCreate(handle);
+			FinalizeHandleCreate(handle, opener);
 			handle->Initialize(opener);
 			return std::move(handle);
 		} catch (...) {
@@ -481,7 +488,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	}
 
 	auto handle = CreateHandle(file, flags, opener);
-	FinalizeHandleCreate(handle);
+	FinalizeHandleCreate(handle, opener);
 
 	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
 		handle->write_overwrite_mode = true;

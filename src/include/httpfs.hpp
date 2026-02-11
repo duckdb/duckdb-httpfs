@@ -229,8 +229,8 @@ public:
 
 	SharedLruCache<string, HTTPClientCache, DefaultPayload> lru_client_cache {256};
 	mutex client_cache_map_lock;
-	void FinalizeHandleCreate(duckdb::unique_ptr<HTTPFileHandle> &);
-	void FinalizeHandleCreate(HTTPFileHandle &);
+	void FinalizeHandleCreate(duckdb::unique_ptr<HTTPFileHandle> &, optional_ptr<FileOpener> opener);
+	void FinalizeHandleCreate(HTTPFileHandle &, optional_ptr<FileOpener> opener);
 
 protected:
 	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,

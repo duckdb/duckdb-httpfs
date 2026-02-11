@@ -332,7 +332,9 @@ S3FileHandle::~S3FileHandle() {
 
 void S3FileHandle::SetRegion(string region_p) {
 	auth_params.SetRegion(std::move(region_p));
-	client_cache->Clear();
+	if (client_cache) {
+		client_cache->Clear();
+	}
 }
 
 S3ConfigParams S3ConfigParams::ReadFrom(optional_ptr<FileOpener> opener) {
@@ -969,9 +971,9 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 
 void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	auto &s3fs = (S3FileSystem &)file_system;
+	s3fs.FinalizeHandleCreate(*this, opener);
 	try {
 		HTTPFileHandle::Initialize(opener);
-		s3fs.FinalizeHandleCreate(*this);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		bool refreshed_secret = false;
@@ -1026,7 +1028,6 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			SetRegion(std::move(correct_region));
 		}
 		HTTPFileHandle::Initialize(opener);
-		s3fs.FinalizeHandleCreate(*this);
 	}
 
 	if (flags.OpenForWriting()) {
