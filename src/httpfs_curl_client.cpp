@@ -159,7 +159,9 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_FORBID_REUSE, 0L);
 		}
 
-		if (http_params.enable_curl_server_cert_verification) {
+		const bool verify_ssl =
+		    http_params.override_verify_ssl ? http_params.verify_ssl : http_params.enable_curl_server_cert_verification;
+		if (verify_ssl) {
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYPEER, 1L); // Verify the cert
 			curl_easy_setopt(*curl, CURLOPT_SSL_VERIFYHOST, 2L); // Verify that the cert matches the hostname
 		} else {
