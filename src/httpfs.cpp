@@ -24,14 +24,14 @@
 
 namespace duckdb {
 
-	ClientOptions::ClientOptions(HTTPFileHandle &handle) {
-		identifier = "";
-		identifier += handle.params->http_proxy + " ";
-		identifier += handle.params->http_proxy_username + " ";
-		identifier += handle.params->http_proxy_password + " ";
-		//identifier += handle.params->http_proxy_port + " ";
-		identifier += handle.params->http_util.GetName();
-	}
+ClientOptions::ClientOptions(HTTPFileHandle &handle) {
+	identifier = "";
+	identifier += handle.params->http_proxy + " ";
+	identifier += handle.params->http_proxy_username + " ";
+	identifier += handle.params->http_proxy_password + " ";
+	// identifier += handle.params->http_proxy_port + " ";
+	identifier += handle.params->http_util.GetName();
+}
 
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {

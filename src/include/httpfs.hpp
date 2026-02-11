@@ -23,6 +23,7 @@ struct ClientOptions {
 	string ToString() const {
 		return identifier;
 	}
+
 private:
 	string identifier;
 };
