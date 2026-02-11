@@ -1,5 +1,5 @@
 # name: test/sql/httpfs/globbing.test
-# description: Ensure the HuggingFace filesystem works as expected
+# description: Test remote globbing
 # group: [httpfs]
 
 require parquet
@@ -17,7 +17,7 @@ SET allow_asterisks_in_http_paths = true;
 statement error
 select parse_path(filename), size, part, date from read_parquet('https://raw.githubusercontent.com/duckdb/duckdb/main/data/parquet-testing/hive-partitioning/simple/*/*/test.parquet') order by filename;
 ----
-HTTP Error: Unable to connect to URL
+404 Not Found
 
 statement ok
 SET allow_asterisks_in_http_paths = false;

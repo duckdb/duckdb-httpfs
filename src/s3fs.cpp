@@ -312,7 +312,7 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 	if (file.extended_info) {
 		auto entry = file.extended_info->options.find("s3_region");
 		if (entry != file.extended_info->options.end()) {
-			auth_params.SetRegion(entry->second.ToString());
+			SetRegion(entry->second.ToString());
 		}
 	}
 }
@@ -327,6 +327,11 @@ S3FileHandle::~S3FileHandle() {
 		Close();
 	} catch (...) { // NOLINT
 	}
+}
+
+void S3FileHandle::SetRegion(string region_p) {
+	auth_params.SetRegion(std::move(region_p));
+	client_cache.Clear();
 }
 
 S3ConfigParams S3ConfigParams::ReadFrom(optional_ptr<FileOpener> opener) {
@@ -933,7 +938,7 @@ void S3FileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_
 	HTTPFileHandle::InitializeFromCacheEntry(cache_entry);
 	auto entry = cache_entry.properties.find("s3_region");
 	if (entry != cache_entry.properties.end()) {
-		auth_params.SetRegion(entry->second);
+		SetRegion(entry->second);
 	}
 }
 
@@ -999,7 +1004,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			    "Read S3 file \"%s\" from incorrect region \"%s\" - retrying with updated region \"%s\".\n"
 			    "Consider setting the S3 region to this explicitly to avoid extra round-trips.",
 			    path, auth_params.region, correct_region);
-			auth_params.SetRegion(std::move(correct_region));
+			SetRegion(std::move(correct_region));
 		}
 		HTTPFileHandle::Initialize(opener);
 	}

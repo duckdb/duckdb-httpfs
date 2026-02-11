@@ -35,6 +35,8 @@ public:
 	unique_ptr<HTTPClient> GetClient();
 	//! Store a client in the cache for reuse
 	void StoreClient(unique_ptr<HTTPClient> client);
+	//! Clear the stored clients
+	void Clear();
 
 protected:
 	//! The cached clients
@@ -200,6 +202,7 @@ public:
 	static void Verify();
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
+	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
 
 protected:
 	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
@@ -208,7 +211,6 @@ protected:
 		return true;
 	}
 
-	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
 	bool TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out,
 	                     idx_t buffer_out_len);
 	bool ReadInternal(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location);
