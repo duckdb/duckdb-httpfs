@@ -7,8 +7,12 @@ namespace duckdb {
 
 class HTTPFSClient : public HTTPClient {
 public:
-	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
+	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port,
+	             const string &basic_auth_username, const string &basic_auth_password) {
 		client = make_uniq<duckdb_httplib_openssl::Client>(proto_host_port);
+		if (!basic_auth_username.empty() || !basic_auth_password.empty()) {
+			client->set_basic_auth(basic_auth_username, basic_auth_password);
+		}
 		Initialize(http_params);
 	}
 	void Initialize(HTTPParams &http_p) override {
@@ -164,8 +168,53 @@ private:
 };
 
 unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
-	auto client = make_uniq<HTTPFSClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
+	auto client = make_uniq<HTTPFSClient>(http_params.Cast<HTTPFSParams>(), proto_host_port, "", "");
 	return std::move(client);
+}
+
+unique_ptr<HTTPClient> HTTPFSUtil::InitializeClientWithAuth(HTTPParams &http_params, const string &proto_host_port,
+                                                            const string &basic_auth_username,
+                                                            const string &basic_auth_password) {
+	auto client = make_uniq<HTTPFSClient>(http_params.Cast<HTTPFSParams>(), proto_host_port,
+	                                      basic_auth_username, basic_auth_password);
+	return std::move(client);
+}
+
+void HTTPFSUtil::ParseBasicAuth(const string &url, string &username_out, string &password_out) {
+	username_out.clear();
+	password_out.clear();
+
+	// Find the scheme end (://)
+	auto scheme_end = url.find("://");
+	if (scheme_end == string::npos) {
+		return;
+	}
+
+	// Find the path start
+	auto path_start = url.find('/', scheme_end + 3);
+	if (path_start == string::npos) {
+		path_start = url.length();
+	}
+
+	// Extract the authority part (between scheme:// and path)
+	string authority = url.substr(scheme_end + 3, path_start - scheme_end - 3);
+
+	// Check for @ which indicates userinfo
+	auto at_pos = authority.find('@');
+	if (at_pos == string::npos) {
+		return;
+	}
+
+	string userinfo = authority.substr(0, at_pos);
+
+	// Parse username:password
+	auto colon_pos = userinfo.find(':');
+	if (colon_pos != string::npos) {
+		username_out = userinfo.substr(0, colon_pos);
+		password_out = userinfo.substr(colon_pos + 1);
+	} else {
+		username_out = userinfo;
+	}
 }
 
 unordered_map<string, string> HTTPFSUtil::ParseGetParameters(const string &text) {
