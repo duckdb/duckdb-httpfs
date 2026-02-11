@@ -17,7 +17,7 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
       extension_name: httpfs
-      duckdb_version: v895a60bdbe000bbe839418f21c63c4a6c1a0f73e
+      duckdb_version: 895a60bdbe000bbe839418f21c63c4a6c1a0f73e
       ci_tools_version: main
 
   duckdb-stable-deploy:
