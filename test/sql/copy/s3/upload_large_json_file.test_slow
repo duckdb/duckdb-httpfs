@@ -30,6 +30,9 @@ set ignore_error_messages
 statement ok
 set http_timeout=120000;
 
+statement ok
+call inherit_aws_config_from_environment();
+
 # More retries (longest wait will be 25600ms)
 statement ok
 set http_retries=6;

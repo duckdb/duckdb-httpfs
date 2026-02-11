@@ -23,6 +23,9 @@ require-env DUCKDB_S3_USE_SSL
 set ignore_error_messages
 
 statement ok
+call inherit_aws_config_from_environment();
+
+statement ok
 CREATE TABLE test as SELECT * FROM range(0,10) tbl(i);
 
 foreach url_style path vhost

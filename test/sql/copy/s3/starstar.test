@@ -22,11 +22,12 @@ require-env DUCKDB_S3_USE_SSL
 # override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
 set ignore_error_messages
 
+statement ok
+call inherit_aws_config_from_environment();
+
 # create a table
 statement ok
 CREATE TABLE mytable AS SELECT i as a, (i*2) as b, power(i,2) as c from range(0,10) tbl(i);
-
-
 
 # sanity check: the bucket is empty
 query I
