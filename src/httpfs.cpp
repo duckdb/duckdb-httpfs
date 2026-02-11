@@ -24,6 +24,15 @@
 
 namespace duckdb {
 
+	ClientOptions::ClientOptions(HTTPFileHandle &handle) {
+		identifier = "";
+		identifier += handle.params->http_proxy + " ";
+		identifier += handle.params->http_proxy_username + " ";
+		identifier += handle.params->http_proxy_password + " ";
+		//identifier += handle.params->http_proxy_port + " ";
+		identifier += handle.params->http_util.GetName();
+	}
+
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		return opener->GetHTTPUtil();
@@ -394,20 +403,25 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 	}
 }
 
-shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string &path) {
-	lock_guard<mutex> lock(client_cache_map_lock);
+shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string &path, const ClientOptions &options) {
+	string identifier = path + " " + options.ToString();
 
-	if (auto existing = lru_client_cache.Get(path)) {
-		return existing;
+	lock_guard<mutex> lock(client_cache_map_lock);
+	std::cout << identifier << "\n";
+
+	auto retrived = lru_client_cache.Get(identifier);
+
+	if (!retrived) {
+		auto client_cache = make_shared_ptr<HTTPClientCache>();
+		lru_client_cache.Put(path, client_cache);
+		return std::move(client_cache);
 	}
 
-	auto client_cache = make_uniq<HTTPClientCache>();
-	lru_client_cache.Put(path, std::move(client_cache));
-	return lru_client_cache.Get(path);
+	return retrived;
 }
 
-void HTTPFileHandle::InitializeClientCache(HTTPFileSystem &file_system) {
-	client_cache = file_system.GetOrCreateClientCache(BaseUrl());
+void HTTPFileHandle::InitializeClientCache(HTTPFileSystem &file_system, const ClientOptions &options) {
+	client_cache = file_system.GetOrCreateClientCache(BaseUrl(), options);
 }
 
 string HTTPFileHandle::BaseUrl() const {
@@ -448,7 +462,8 @@ void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle) {
 }
 
 void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle) {
-	handle.InitializeClientCache(*this);
+	ClientOptions options(handle);
+	handle.InitializeClientCache(*this, options);
 }
 
 unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,

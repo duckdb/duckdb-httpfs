@@ -3,6 +3,7 @@
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "http_state.hpp"
+#include "duckdb/main/secret/secret.hpp"
 #include "duckdb/common/lru_cache.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -14,6 +15,17 @@
 #include <mutex>
 
 namespace duckdb {
+
+class HTTPFileHandle;
+
+struct ClientOptions {
+	ClientOptions(HTTPFileHandle &handle);
+	string ToString() const {
+		return identifier;
+	}
+private:
+	string identifier;
+};
 
 class RangeRequestNotSupportedException {
 public:
@@ -108,7 +120,7 @@ public:
 	bool SkipBuffer() const {
 		return flags.DirectIO() || flags.RequireParallelAccess();
 	}
-	void InitializeClientCache(HTTPFileSystem &file_system);
+	void InitializeClientCache(HTTPFileSystem &file_system, const ClientOptions &opts);
 	virtual string BaseUrl() const;
 
 private:
@@ -207,7 +219,7 @@ public:
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
-	shared_ptr<HTTPClientCache> GetOrCreateClientCache(const string &path);
+	shared_ptr<HTTPClientCache> GetOrCreateClientCache(const string &path, const ClientOptions &options);
 
 	struct NopCleanup {
 		void operator()(unique_ptr<int> &) {
