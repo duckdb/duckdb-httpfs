@@ -12,7 +12,7 @@ git pull --recurse-submodules
 
 To build, type:
 ```
-make vcpkg-setup
+make setup-vcpkg
 VCPKG_TOOLCHAIN_PATH=$pwd/vcpkg/scripts/buildsystems/vcpkg.cmake GEN=ninja make
 ```
 Consider adding `GEN=ninja` and having `ccache` installed to speed up recompilations.
