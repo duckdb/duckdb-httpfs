@@ -97,6 +97,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 		result->http_proxy = host;
 		result->http_proxy_port = port;
 	}
+	result->override_verify_ssl = settings_reader->TryGetSecretKey<bool>("verify_ssl", result->verify_ssl);
 	settings_reader->TryGetSecretKey<string>("http_proxy_username", result->http_proxy_username);
 	settings_reader->TryGetSecretKey<string>("http_proxy_password", result->http_proxy_password);
 	settings_reader->TryGetSecretKey<string>("bearer_token", result->bearer_token);

@@ -18,7 +18,9 @@ public:
 		if (!http_params.ca_cert_file.empty()) {
 			client->set_ca_cert_path(http_params.ca_cert_file.c_str());
 		}
-		client->enable_server_certificate_verification(http_params.enable_server_cert_verification);
+		const bool verify_ssl =
+		    http_params.override_verify_ssl ? http_params.verify_ssl : http_params.enable_server_cert_verification;
+		client->enable_server_certificate_verification(verify_ssl);
 		client->set_write_timeout(http_params.timeout, http_params.timeout_usec);
 		client->set_read_timeout(http_params.timeout, http_params.timeout_usec);
 		client->set_connection_timeout(http_params.timeout, http_params.timeout_usec);
