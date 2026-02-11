@@ -160,6 +160,18 @@ EXPLAIN ANALYZE SELECT COUNT(*) FROM 's3://test-bucket/parquet_glob_s3/g*/*.parq
 analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 0.*GET\: 6.*PUT\: 0.*\#POST\: 0.*
 
 statement ok
+SET allow_s3_recursive_globbing = false;
+
+# S3 glob gives us information necessary to skip HEAD requests
+query II
+EXPLAIN ANALYZE SELECT COUNT(*) FROM 's3://test-bucket/parquet_glob_s3/g*/*.parquet';
+----
+analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 0.*GET\: 4.*PUT\: 0.*\#POST\: 0.*
+
+statement ok
+SET allow_s3_recursive_globbing = true;
+
+statement ok
 SET VARIABLE file_list = (SELECT LIST(file) FROM GLOB('s3://test-bucket/parquet_glob_s3/g*/*.parquet'))
 
 # sanity check for request count
