@@ -205,6 +205,9 @@ public:
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
+	shared_ptr<HTTPClientCache> GetOrCreateClientCache(const string &path);
+
+	map<string, shared_ptr<HTTPClientCache>> client_cache_map;
 
 protected:
 	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,

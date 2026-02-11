@@ -394,8 +394,12 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 	}
 }
 
+shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string &path) {
+	return make_uniq<HTTPClientCache>();
+}
+
 void HTTPFileHandle::InitializeClientCache(HTTPFileSystem &file_system) {
-	client_cache = make_uniq<HTTPClientCache>();
+	client_cache = file_system.GetOrCreateClientCache(path);
 }
 
 unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
