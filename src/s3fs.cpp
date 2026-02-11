@@ -1299,7 +1299,7 @@ bool S3GlobResult::ExpandNextPath() const {
 		// we have common prefixes left to scan - perform the request
 		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
 
-
+current_common_prefix = S3FileSystem::UrlDecode(current_common_prefix);
                vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
                vector<string> key_splits = StringUtil::Split(current_common_prefix, "/");
                //pattern_splits.resize(key_splits.size());
