@@ -1335,7 +1335,7 @@ bool S3GlobResult::ExpandNextPath() const {
 		}
 
 		Value value;
-		bool allow_s3_recursive_globbing;
+		bool allow_s3_recursive_globbing = true;
 		if (FileOpener::TryGetCurrentSetting(opener, "allow_s3_recursive_globbing", value)) {
 			allow_s3_recursive_globbing = value.GetValue<bool>();
 		}
