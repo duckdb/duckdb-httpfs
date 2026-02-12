@@ -108,7 +108,7 @@ FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
 query I
 FROM duckdb_logs_parsed('http') SELECT count(request.url);
 ----
-6
+10
 
 # Begin tests
 query I
