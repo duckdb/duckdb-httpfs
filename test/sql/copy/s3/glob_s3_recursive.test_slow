@@ -9,7 +9,7 @@ require httpfs
 set ignore_error_messages
 
 statement ok
-CREATE SECRET coiled (TYPE s3, SCOPE 's3://coiled-datasets', endpoint 's3.amazonaws.com', key_id '', secret '');
+CREATE SECRET coiled (TYPE s3, SCOPE 's3://coiled-datasets', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-east-2');
 
 statement ok
 CALL enable_logging('HTTP');
