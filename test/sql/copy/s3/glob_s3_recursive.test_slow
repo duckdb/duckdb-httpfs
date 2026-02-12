@@ -114,8 +114,6 @@ FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), su
 1	0	1	0	0
 1	0	1	0	0
 
-mode unskip
-
 #
 # Querying with a ** glob have the same performances
 #

@@ -61,61 +61,6 @@ endloop
 
 endloop
 
-statement ok
-SET allow_s3_recursive_globbing = false;
-
-statement ok
-CALL enable_logging('HTTP');
-
-statement ok
-CALL truncate_duckdb_logs();
-
-query I
-FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
-----
-
-
-query I
-FROM duckdb_logs_parsed('http') SELECT count(request.url);
-----
-6
-
-# first to /?encoding-type=url&list-type=2&prefix=parquet_glob
-# then next 5 via continuation
-
-statement ok
-SET allow_s3_recursive_globbing = true;
-
-statement ok
-CALL truncate_duckdb_logs();
-
-query I
-FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
-----
-
-
-query I
-FROM duckdb_logs_parsed('http') SELECT count(request.url);
-----
-2
-
-# first to  /?encoding-type=url&list-type=2&prefix=parquet_glob (listing only at that level)
-# second to /?delimiter=%2F&encoding-type=url&list-type=2&prefix=parquet_glob_s3_paging%2F (to list one level up the subdirectories)
-
-statement ok
-CALL enable_logging('HTTP');
-
-statement ok
-CALL truncate_duckdb_logs();
-
-statement ok
-FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
-
-query I
-FROM duckdb_logs_parsed('http') SELECT count(request.url);
-----
-2
-
 # Begin tests
 query I
 select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*-${urlstyle}-urls.${format}'
@@ -147,3 +92,32 @@ endloop
 endloop
 
 endloop
+
+statement ok
+CALL enable_logging('HTTP');
+
+foreach allow_s3_recursive_globs true false
+
+statement ok
+SET allow_s3_recursive_globbing = ${allow_s3_recursive_globs}
+
+query I
+SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder/*');
+----
+0
+
+query I
+SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/paging/*');
+----
+8000
+
+endloop
+
+query IIIII
+FROM (FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD') head, sum(request.type == 'GET') get, sum(request.type == 'POST') post, sum(request.type == 'PUT') put GROUP BY context_id ORDER BY context_id) WHERE post == 0;
+----
+5	0	5	0	0
+13	0	13	0	0
+11	0	11	0	0
+11	0	11	0	0
+
