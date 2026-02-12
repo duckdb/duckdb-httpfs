@@ -224,6 +224,7 @@ public:
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
+			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			res = curl->Execute();
@@ -441,6 +442,8 @@ private:
 		request_info->body = "";
 		request_info->url = "";
 		request_info->response_code = 0;
+		// reset customrequest, it will override CURLOPT otherwise
+		curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
 	}
 
 	unique_ptr<HTTPResponse> TransformResponseCurl(CURLcode res) {
