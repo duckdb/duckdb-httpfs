@@ -872,6 +872,8 @@ void HTTPFileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cach
 	length = cache_entry.length;
 	etag = cache_entry.etag;
 	version_id = cache_entry.version_id;
+
+	// TODO: handle properties
 }
 
 HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
@@ -879,6 +881,8 @@ HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
 	result.length = length;
 	result.last_modified = last_modified;
 	result.etag = etag;
+	result.version_id = version_id;
+	// TODO: handle properties
 	return result;
 }
 
