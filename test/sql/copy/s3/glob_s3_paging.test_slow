@@ -94,7 +94,7 @@ FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
 query I
 FROM duckdb_logs_parsed('http') SELECT count(request.url);
 ----
-2
+5
 
 # first to  /?encoding-type=url&list-type=2&prefix=parquet_glob (listing only at that level)
 # second to /?delimiter=%2F&encoding-type=url&list-type=2&prefix=parquet_glob_s3_paging%2F (to list one level up the subdirectories)
