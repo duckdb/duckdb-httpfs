@@ -47,6 +47,7 @@ services:
 
         /usr/bin/mc rb --force myminio/test-bucket
         /usr/bin/mc mb myminio/test-bucket
+        /usr/bin/mc version enable myminio/test-bucket
         /usr/bin/mc policy get myminio/test-bucket
 
         /usr/bin/mc rb --force myminio/test-bucket-2
@@ -55,7 +56,6 @@ services:
 
         /usr/bin/mc rb --force myminio/test-bucket-public
         /usr/bin/mc mb myminio/test-bucket-public
-        /usr/bin/mc version enable myminio/test-bucket-public
         /usr/bin/mc anonymous set public myminio/test-bucket-public
         /usr/bin/mc policy get myminio/test-bucket-public
 
