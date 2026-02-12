@@ -149,8 +149,6 @@ public:
 		request_info = make_uniq<RequestInfo>();
 
 		// set curl options
-		// follow redirects
-		curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
 
 		// Curl re-uses connections by default
 		if (!http_params.keep_alive) {
@@ -177,7 +175,7 @@ public:
 		// accept content as-is (i.e no decompressing)
 		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, "identity");
 		// follow redirects
-		curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
+		curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, http_params.follow_location ? 1L : 0L);
 
 		// define the header callback
 		curl_easy_setopt(*curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
@@ -289,6 +287,9 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			res = curl->Execute();
+			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, 0);
 			curl_url_cleanup(url);
 		}
 
@@ -324,6 +325,8 @@ public:
 
 			// Execute HEAD request
 			res = curl->Execute();
+			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
+			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
 			curl_url_cleanup(url);
 		}
 
@@ -352,14 +355,12 @@ public:
 			// Set DELETE request method
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "DELETE");
 
-			// Follow redirects
-			curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, 1L);
-
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
 			// Execute DELETE request
 			res = curl->Execute();
+			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
 			curl_url_cleanup(url);
 		}
 
@@ -404,6 +405,10 @@ public:
 
 			// Execute POST request
 			res = curl->Execute();
+			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
+			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, 0);
+			curl_easy_setopt(*curl, CURLOPT_POST, 0L);
 			curl_url_cleanup(url);
 		}
 
