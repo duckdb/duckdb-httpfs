@@ -67,6 +67,9 @@ SET allow_s3_recursive_globbing = false;
 statement ok
 CALL enable_logging('HTTP');
 
+statement ok
+CALL truncate_duckdb_logs();
+
 query I
 FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
 ----
@@ -75,7 +78,7 @@ FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
 query I
 FROM duckdb_logs_parsed('http') SELECT count(request.url);
 ----
-5
+6
 
 # first to /?encoding-type=url&list-type=2&prefix=parquet_glob
 # then next 5 via continuation
@@ -94,7 +97,7 @@ FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
 query I
 FROM duckdb_logs_parsed('http') SELECT count(request.url);
 ----
-5
+2
 
 # first to  /?encoding-type=url&list-type=2&prefix=parquet_glob (listing only at that level)
 # second to /?delimiter=%2F&encoding-type=url&list-type=2&prefix=parquet_glob_s3_paging%2F (to list one level up the subdirectories)
@@ -103,12 +106,15 @@ statement ok
 CALL enable_logging('HTTP');
 
 statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
 FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder');
 
 query I
 FROM duckdb_logs_parsed('http') SELECT count(request.url);
 ----
-10
+2
 
 # Begin tests
 query I
