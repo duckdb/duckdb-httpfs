@@ -444,13 +444,14 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 	return handle;
 }
 
-void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle) {
+void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle, optional_ptr<FileOpener> opener) {
 	if (handle) {
-		FinalizeHandleCreate(*handle);
+		FinalizeHandleCreate(*handle, opener);
 	}
 }
 
-void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle) {
+void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle, optional_ptr<FileOpener> opener) {
+	handle.http_params.state = HTTPState::TryGetState(opener);
 	ClientOptions options(handle);
 	handle.InitializeClientCache(*this, options);
 }
@@ -462,7 +463,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	if (flags.ReturnNullIfNotExists()) {
 		try {
 			auto handle = CreateHandle(file, flags, opener);
-			FinalizeHandleCreate(handle);
+			FinalizeHandleCreate(handle, opener);
 			handle->Initialize(opener);
 			return std::move(handle);
 		} catch (...) {
@@ -471,7 +472,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	}
 
 	auto handle = CreateHandle(file, flags, opener);
-	FinalizeHandleCreate(handle);
+	FinalizeHandleCreate(handle, opener);
 
 	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
 		handle->write_overwrite_mode = true;

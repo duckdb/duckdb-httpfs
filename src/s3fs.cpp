@@ -956,7 +956,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	auto &s3fs = (S3FileSystem &)file_system;
 	try {
 		HTTPFileHandle::Initialize(opener);
-		s3fs.FinalizeHandleCreate(*this);
+		s3fs.FinalizeHandleCreate(*this, opener);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		bool refreshed_secret = false;
@@ -1011,7 +1011,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			SetRegion(std::move(correct_region));
 		}
 		HTTPFileHandle::Initialize(opener);
-		s3fs.FinalizeHandleCreate(*this);
+		s3fs.FinalizeHandleCreate(*this, opener);
 	}
 
 	if (flags.OpenForWriting()) {
