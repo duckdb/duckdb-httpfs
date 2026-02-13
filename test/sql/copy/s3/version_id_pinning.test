@@ -97,6 +97,13 @@ SET enable_http_metadata_cache=false;
 statement ok
 SET s3_version_id_pinning=false;
 
+query I
+SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE request.url ILIKE '%versionId=%');
+----
+GET
+GET
+GET
+
 # Read the file again. The global cache provides the V1 version_id,
 # so the GET request includes ?versionId=V1 and returns the original T1 data.
 query I
@@ -108,7 +115,7 @@ SELECT * FROM 's3://test-bucket/root-dir/version_pinning/test.parquet' LIMIT 5;
 9
 16
 
-query II
+query I
 SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE response.headers['x-amz-version-id'] IS NOT NULL);
 ----
 HEAD
@@ -119,3 +126,13 @@ GET
 HEAD
 GET
 GET
+
+query I
+SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE request.url ILIKE '%versionId=%');
+----
+GET
+GET
+GET
+
+statement ok
+SET s3_version_id_pinning=true;
