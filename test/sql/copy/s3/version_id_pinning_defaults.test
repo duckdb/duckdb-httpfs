@@ -1,0 +1,117 @@
+# name: test/sql/copy/s3/version_id_pinning_defaults.test
+# description: Test S3 version ID pinning using regular defaults
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
+set ignore_error_messages
+
+# Create two tables with different content, so we can distinguish them
+statement ok
+CREATE TABLE T1 AS SELECT i FROM range(100) tbl(i);
+
+statement ok
+CREATE TABLE T2 AS SELECT i*i FROM range(200) tbl(i);
+
+# Write T1 to S3 (bucket must have versioning enabled)
+statement ok
+COPY T1 TO 's3://test-bucket/root-dir/version_pinning/test.parquet';
+
+statement ok
+CALL enable_logging('HTTP');
+
+# Read the file. This performs a HEAD request that captures version_id V1
+# and stores it in the global metadata cache.
+query I
+SELECT COUNT(*) FROM 's3://test-bucket/root-dir/version_pinning/test.parquet';
+----
+100
+
+query I
+SELECT request.type FROM duckdb_logs_parsed('HTTP') WHERE response.headers['x-amz-version-id'] IS NOT NULL
+----
+HEAD
+GET
+
+# Overwrite the file with T2 (200 rows), creating a new version V2.
+# Because the global metadata cache is disabled, the write erases from
+# the per-context cache, not the global cache.
+statement ok
+COPY T2 TO 's3://test-bucket/root-dir/version_pinning/test.parquet';
+
+# Read the file again. The global cache now has been cleaned by write provides the V2 version_id
+query I
+SELECT * FROM 's3://test-bucket/root-dir/version_pinning/test.parquet' LIMIT 5;
+----
+0
+1
+4
+9
+16
+
+query I
+SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE request.url ILIKE '%versionId=%');
+----
+GET
+GET
+
+# Read the file again. The global cache provides the V1 version_id,
+# so the GET request includes ?versionId=V1 and returns the original T1 data.
+query I
+SELECT * FROM 's3://test-bucket/root-dir/version_pinning/test.parquet' LIMIT 5;
+----
+0
+1
+4
+9
+16
+
+query I
+SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE response.headers['x-amz-version-id'] IS NOT NULL);
+----
+HEAD
+GET
+PUT
+HEAD
+GET
+HEAD
+
+query I
+SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE request.url ILIKE '%versionId=%');
+----
+GET
+GET
+
+statement ok
+COPY T1 TO 's3://test-bucket/root-dir/version_pinning/test.parquet';
+
+query I
+SELECT * FROM 's3://test-bucket/root-dir/version_pinning/test.parquet' LIMIT 5;
+----
+0
+1
+2
+3
+4
+
+query I
+SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE request.url ILIKE '%versionId=%');
+----
+GET
+GET
+GET

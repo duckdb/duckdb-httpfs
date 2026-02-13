@@ -136,3 +136,24 @@ GET
 
 statement ok
 SET s3_version_id_pinning=true;
+
+statement ok
+COPY T1 TO 's3://test-bucket/root-dir/version_pinning/test.parquet';
+
+query I
+SELECT * FROM 's3://test-bucket/root-dir/version_pinning/test.parquet' LIMIT 5;
+----
+0
+1
+2
+3
+4
+
+query I
+SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE request.url ILIKE '%versionId=%');
+----
+GET
+GET
+GET
+GET
+GET
