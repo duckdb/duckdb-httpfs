@@ -96,10 +96,10 @@ endloop
 statement ok
 CALL enable_logging('HTTP');
 
-foreach allow_s3_recursive_globs true false
+foreach s3_allow_recursive_globs true false
 
 statement ok
-SET allow_s3_recursive_globbing = ${allow_s3_recursive_globs}
+SET s3_allow_recursive_globbing = ${s3_allow_recursive_globs}
 
 query I
 SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder/*');

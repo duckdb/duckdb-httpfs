@@ -82,7 +82,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption(
-	    "allow_s3_recursive_globbing",
+	    "s3_allow_recursive_globbing",
 	    "Whether globs on S3-like storage are optimized with recursive strategy (alterative is listing)",
 	    LogicalType::BOOLEAN, Value(true));
 

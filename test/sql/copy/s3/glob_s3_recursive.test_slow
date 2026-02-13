@@ -24,7 +24,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET allow_s3_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = ${allow_globbing};
 
 query I
 SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/*s/non-existing-folder/*');
@@ -49,7 +49,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET allow_s3_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = ${allow_globbing};
 
 query I
 SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/*s/parquet/*');
@@ -74,7 +74,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET allow_s3_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = ${allow_globbing};
 
 query I
 SELECT count(*) FROM (FROM glob('s3://coiled-datasets/timeseries/*s/parquet/*.parquet') LIMIT 100);
@@ -99,7 +99,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET allow_s3_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = ${allow_globbing};
 
 query I
 SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/1990s/parquet/*');
@@ -124,7 +124,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET allow_s3_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = ${allow_globbing};
 
 query I
 SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/1990s/**/*.parquet');
