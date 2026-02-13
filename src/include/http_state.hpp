@@ -96,6 +96,10 @@ public:
 		Reset();
 	}
 	void WriteProfilingInformation(std::ostream &ss) override;
+	//! Write HTTP profiling information to JSON format
+	//! NOTE: This method is intended to override ClientContextState::WriteProfilingInformationToJSON
+	//! when DuckDB adds it to the base class. Until then, it's implemented without override.
+	void WriteProfilingInformationToJSON(duckdb_yyjson::yyjson_mut_doc *doc, duckdb_yyjson::yyjson_mut_val *obj);
 
 private:
 	//! Mutex to lock when getting the cached file(Parallel Only)
