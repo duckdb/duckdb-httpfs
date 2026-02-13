@@ -1,0 +1,140 @@
+# name: test/sql/copy/s3/glob_s3_recursive.test_slow
+# description: Test globbing of a large number of parquet files to test the paging mechanism
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+set ignore_error_messages
+
+statement ok
+CREATE SECRET coiled (TYPE s3, SCOPE 's3://coiled-datasets', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-east-2');
+
+statement ok
+CALL enable_logging('HTTP');
+
+#
+# Querying non existent path (after a glob), should be fail fast
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/*s/non-existing-folder/*');
+----
+0
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+3	0	3	0	0
+46	0	46	0	0
+
+#
+# Querying a selective path (after a glob), should be fail faster
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/*s/parquet/*');
+----
+1620
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+6	0	6	0	0
+46	0	46	0	0
+
+#
+# Querying a selective path (after a glob) with a limit should be fail faster in both modes
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM (FROM glob('s3://coiled-datasets/timeseries/*s/parquet/*.parquet') LIMIT 100);
+----
+100
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+3	0	3	0	0
+1	0	1	0	0
+
+#
+# Querying with a final glob should give same performances
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/1990s/parquet/*');
+----
+523
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+1	0	1	0	0
+1	0	1	0	0
+
+#
+# Querying with a ** glob have the same performances
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/1990s/**/*.parquet');
+----
+521
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+2	0	2	0	0
+2	0	2	0	0

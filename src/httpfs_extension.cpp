@@ -81,6 +81,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("s3_url_compatibility_mode", "Disable Globs and Query Parameters on S3 URLs",
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption(
+	    "s3_allow_recursive_globbing",
+	    "Whether globs on S3-like storage are optimized with recursive strategy (alterative is listing)",
+	    LogicalType::BOOLEAN, Value(true));
 
 	// S3 Uploader config
 	config.AddExtensionOption("s3_uploader_max_filesize", "S3 Uploader max filesize (between 50GB and 5TB)",

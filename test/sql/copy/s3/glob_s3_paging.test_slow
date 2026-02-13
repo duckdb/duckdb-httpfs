@@ -92,3 +92,32 @@ endloop
 endloop
 
 endloop
+
+statement ok
+CALL enable_logging('HTTP');
+
+foreach s3_allow_recursive_globs true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${s3_allow_recursive_globs}
+
+query I
+SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder/*');
+----
+0
+
+query I
+SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/paging/*');
+----
+8000
+
+endloop
+
+query IIIII
+FROM (FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD') head, sum(request.type == 'GET') get, sum(request.type == 'POST') post, sum(request.type == 'PUT') put GROUP BY context_id ORDER BY context_id) WHERE post == 0;
+----
+5	0	5	0	0
+13	0	13	0	0
+11	0	11	0	0
+11	0	11	0	0
+
