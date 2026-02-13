@@ -25,6 +25,7 @@ struct HTTPFSParams : public HTTPParams {
 	string ca_cert_file;
 	string bearer_token;
 	bool unsafe_disable_etag_checks {false};
+	bool s3_version_id_pinning {false};
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
 	bool pre_merged_headers = false;

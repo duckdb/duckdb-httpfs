@@ -19,6 +19,7 @@ struct HTTPMetadataCacheEntry {
 	idx_t length;
 	timestamp_t last_modified;
 	string etag;
+	string version_id;
 	unordered_map<string, string> properties;
 };
 

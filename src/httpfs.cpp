@@ -60,6 +60,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);
 	FileOpener::TryGetCurrentSetting(opener, "hf_max_per_page", result->hf_max_per_page, info);
 	FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks, info);
+	FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
 
 	{
 		auto db = FileOpener::TryGetDatabase(opener);
@@ -243,6 +244,10 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 			    }
 			    throw HTTPException(error);
 		    }
+		    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() &&
+		        response.HasHeader("x-amz-version-id")) {
+			    hfh.version_id = response.GetHeaderValue("x-amz-version-id");
+		    }
 		    return true;
 	    },
 	    [&](const_data_ptr_t data, idx_t data_length) {
@@ -315,6 +320,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 					        "unsafe_disable_etag_checks = true;`",
 					        handle.path, hfh.etag, response.GetHeaderValue("ETag"));
 				    }
+			    }
+
+			    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() &&
+			        response.HasHeader("x-amz-version-id")) {
+				    hfh.version_id = response.GetHeaderValue("x-amz-version-id");
 			    }
 
 			    if (response.HasHeader("Content-Length")) {
@@ -835,6 +845,9 @@ void HTTPFileHandle::LoadFileInfo() {
 	if (res->headers.HasHeader("ETag")) {
 		etag = res->headers.GetHeaderValue("ETag");
 	}
+	if (http_params.s3_version_id_pinning && res->headers.HasHeader("x-amz-version-id")) {
+		version_id = res->headers.GetHeaderValue("x-amz-version-id");
+	}
 	initialized = true;
 }
 
@@ -862,6 +875,9 @@ void HTTPFileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cach
 	last_modified = cache_entry.last_modified;
 	length = cache_entry.length;
 	etag = cache_entry.etag;
+	version_id = cache_entry.version_id;
+
+	// TODO: handle properties
 }
 
 HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
@@ -869,6 +885,8 @@ HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
 	result.length = length;
 	result.last_modified = last_modified;
 	result.etag = etag;
+	result.version_id = version_id;
+	// TODO: handle properties
 	return result;
 }
 
@@ -915,7 +933,7 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			FullDownload(hfs, should_write_cache);
 		}
 		if (should_write_cache) {
-			current_cache->Insert(path, GetCacheEntry());
+			current_cache->Insert(path, {length, last_modified, etag, version_id});
 		}
 
 		if (!SkipBuffer()) {
