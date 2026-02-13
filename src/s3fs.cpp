@@ -954,8 +954,8 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 
 void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	auto &s3fs = (S3FileSystem &)file_system;
+	s3fs.FinalizeHandleCreate(*this, opener);
 	try {
-		s3fs.FinalizeHandleCreate(*this, opener);
 		HTTPFileHandle::Initialize(opener);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
@@ -1010,7 +1010,6 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			    path, auth_params.region, correct_region);
 			SetRegion(std::move(correct_region));
 		}
-		s3fs.FinalizeHandleCreate(*this, opener);
 		HTTPFileHandle::Initialize(opener);
 	}
 
