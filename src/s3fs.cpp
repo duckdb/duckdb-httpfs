@@ -56,6 +56,7 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/specifying-kms-encryption.html#sse-request-headers-kms
 	bool use_sse_kms = auth_params.kms_key_id.length() > 0 && (method == "POST" || method == "PUT") &&
 	                   query.find("uploadId") == std::string::npos;
+	bool use_sse_c = auth_params.sse_c_key.length() > 0 && auth_params.sse_c_key_md5.length() > 0;
 
 	res["x-amz-date"] = datetime_now;
 	res["x-amz-content-sha256"] = payload_hash;
@@ -65,6 +66,11 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	if (use_sse_kms) {
 		res["x-amz-server-side-encryption"] = "aws:kms";
 		res["x-amz-server-side-encryption-aws-kms-key-id"] = auth_params.kms_key_id;
+	}
+	if (use_sse_c) {
+		res["x-amz-server-side-encryption-customer-algorithm"] = "AES256";
+		res["x-amz-server-side-encryption-customer-key"] = auth_params.sse_c_key;
+		res["x-amz-server-side-encryption-customer-key-md5"] = auth_params.sse_c_key_md5;
 	}
 
 	bool use_requester_pays = auth_params.requester_pays;
@@ -95,6 +101,13 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	if (use_sse_kms) {
 		signed_headers += ";x-amz-server-side-encryption;x-amz-server-side-encryption-aws-kms-key-id";
 	}
+	if (use_sse_c) {
+		signed_headers += ";x-amz-server-side-encryption-customer-algorithm;x-amz-server-side-encryption-customer-key;"
+		                  "x-amz-server-side-encryption-customer-key-md5";
+	}
+	if (use_requester_pays) {
+		signed_headers += ";x-amz-request-payer";
+	}
 	auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
 	if (content_md5.length() > 0) {
 		canonical_request += "\ncontent-md5:" + content_md5;
@@ -112,6 +125,14 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	if (use_sse_kms) {
 		canonical_request += "\nx-amz-server-side-encryption:aws:kms";
 		canonical_request += "\nx-amz-server-side-encryption-aws-kms-key-id:" + auth_params.kms_key_id;
+	}
+	if (use_sse_c) {
+		canonical_request += "\nx-amz-server-side-encryption-customer-algorithm:AES256";
+		canonical_request += "\nx-amz-server-side-encryption-customer-key:" + auth_params.sse_c_key;
+		canonical_request += "\nx-amz-server-side-encryption-customer-key-md5:" + auth_params.sse_c_key_md5;
+	}
+	if (use_requester_pays) {
+		canonical_request += "\nx-amz-request-payer:requester";
 	}
 
 	canonical_request += "\n\n" + signed_headers + "\n" + payload_hash;
@@ -174,6 +195,8 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 	this->SetExtensionOptionValue("s3_endpoint", DUCKDB_ENDPOINT_ENV_VAR);
 	this->SetExtensionOptionValue("s3_use_ssl", DUCKDB_USE_SSL_ENV_VAR);
 	this->SetExtensionOptionValue("s3_kms_key_id", DUCKDB_KMS_KEY_ID_ENV_VAR);
+	this->SetExtensionOptionValue("s3_sse_c_key", DUCKDB_SSE_C_KEY_ENV_VAR);
+	this->SetExtensionOptionValue("s3_sse_c_key_md5", DUCKDB_SSE_C_KEY_MD5_ENV_VAR);
 	this->SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR);
 }
 
@@ -187,6 +210,8 @@ S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
 	params.session_token = SESSION_TOKEN_ENV_VAR;
 	params.endpoint = DUCKDB_ENDPOINT_ENV_VAR;
 	params.kms_key_id = DUCKDB_KMS_KEY_ID_ENV_VAR;
+	params.sse_c_key = DUCKDB_SSE_C_KEY_ENV_VAR;
+	params.sse_c_key_md5 = DUCKDB_SSE_C_KEY_MD5_ENV_VAR;
 	params.use_ssl = DUCKDB_USE_SSL_ENV_VAR;
 	params.requester_pays = DUCKDB_REQUESTER_PAYS_ENV_VAR;
 
@@ -244,6 +269,8 @@ S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const strin
 	secret_reader.TryGetSecretKeyOrSetting("region", "s3_region", result.region);
 	secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", result.use_ssl);
 	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", result.kms_key_id);
+	secret_reader.TryGetSecretKeyOrSetting("sse_c_key", "s3_sse_c_key", result.sse_c_key);
+	secret_reader.TryGetSecretKeyOrSetting("sse_c_key_md5", "s3_sse_c_key_md5", result.sse_c_key_md5);
 	secret_reader.TryGetSecretKeyOrSetting("s3_url_compatibility_mode", "s3_url_compatibility_mode",
 	                                       result.s3_url_compatibility_mode);
 	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays", result.requester_pays);
@@ -285,12 +312,14 @@ unique_ptr<KeyValueSecret> CreateSecret(vector<string> &prefix_paths_p, string &
 	return_value->secret_map["url_style"] = params.url_style;
 	return_value->secret_map["use_ssl"] = params.use_ssl;
 	return_value->secret_map["kms_key_id"] = params.kms_key_id;
+	return_value->secret_map["sse_c_key"] = params.sse_c_key;
+	return_value->secret_map["sse_c_key_md5"] = params.sse_c_key_md5;
 	return_value->secret_map["s3_url_compatibility_mode"] = params.s3_url_compatibility_mode;
 	return_value->secret_map["requester_pays"] = params.requester_pays;
 	return_value->secret_map["bearer_token"] = params.oauth2_bearer_token;
 
 	//! Set redact keys
-	return_value->redact_keys = {"secret", "session_token"};
+	return_value->redact_keys = {"secret", "session_token", "sse_c_key", "sse_c_key_md5"};
 	if (!params.oauth2_bearer_token.empty()) {
 		return_value->redact_keys.insert("bearer_token");
 	}
