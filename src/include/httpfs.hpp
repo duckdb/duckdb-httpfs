@@ -3,6 +3,8 @@
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "http_state.hpp"
+#include "duckdb/main/secret/secret.hpp"
+#include "duckdb/common/lru_cache.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
@@ -13,6 +15,18 @@
 #include <mutex>
 
 namespace duckdb {
+
+class HTTPFileHandle;
+
+struct ClientOptions {
+	ClientOptions(HTTPFileHandle &handle);
+	string ToString() const {
+		return identifier;
+	}
+
+private:
+	string identifier;
+};
 
 class RangeRequestNotSupportedException {
 public:
@@ -55,7 +69,7 @@ public:
 	virtual void Initialize(optional_ptr<FileOpener> opener);
 
 	// We keep an http client stored for connection reuse with keep-alive headers
-	HTTPClientCache client_cache;
+	shared_ptr<HTTPClientCache> client_cache;
 
 	unique_ptr<HTTPParams> params;
 	HTTPFSParams &http_params;
@@ -107,6 +121,8 @@ public:
 	bool SkipBuffer() const {
 		return flags.DirectIO() || flags.RequireParallelAccess();
 	}
+	void InitializeClientCache(HTTPFileSystem &file_system, const ClientOptions &opts);
+	virtual string BaseUrl() const;
 
 private:
 	void AllocateReadBuffer(optional_ptr<FileOpener> opener);
@@ -125,7 +141,7 @@ public:
 
 protected:
 	//! Create a new Client
-	virtual unique_ptr<HTTPClient> CreateClient();
+	unique_ptr<HTTPClient> CreateClient();
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
 
@@ -204,6 +220,17 @@ public:
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, const string &url);
+	shared_ptr<HTTPClientCache> GetOrCreateClientCache(const string &path, const ClientOptions &options);
+
+	struct NopCleanup {
+		void operator()(unique_ptr<int> &) {
+		}
+	};
+
+	SharedLruCache<string, HTTPClientCache, DefaultPayload> lru_client_cache {256};
+	mutex client_cache_map_lock;
+	void FinalizeHandleCreate(duckdb::unique_ptr<HTTPFileHandle> &, optional_ptr<FileOpener> opener);
+	void FinalizeHandleCreate(HTTPFileHandle &, optional_ptr<FileOpener> opener);
 
 protected:
 	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,

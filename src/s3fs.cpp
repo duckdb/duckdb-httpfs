@@ -332,7 +332,9 @@ S3FileHandle::~S3FileHandle() {
 
 void S3FileHandle::SetRegion(string region_p) {
 	auth_params.SetRegion(std::move(region_p));
-	client_cache.Clear();
+	if (client_cache) {
+		client_cache->Clear();
+	}
 }
 
 S3ConfigParams S3ConfigParams::ReadFrom(optional_ptr<FileOpener> opener) {
@@ -372,11 +374,11 @@ void S3FileHandle::Close() {
 	}
 }
 
-unique_ptr<HTTPClient> S3FileHandle::CreateClient() {
+string S3FileHandle::BaseUrl() const {
 	auto parsed_url = S3FileSystem::S3UrlParse(path, this->auth_params);
 
 	string proto_host_port = parsed_url.http_proto + parsed_url.host;
-	return http_params.http_util.InitializeClient(http_params, proto_host_port);
+	return proto_host_port;
 }
 
 // Opens the multipart upload and returns the ID
@@ -716,7 +718,7 @@ ParsedS3Url S3FileSystem::S3UrlParse(string url, const S3AuthParams &params) {
 	auto prefix_end_pos = url.find("//") + 2;
 	auto slash_pos = url.find('/', prefix_end_pos);
 	if (slash_pos == string::npos) {
-		throw IOException("URL needs to contain a '/' after the host");
+		throw IOException("URL needs to contain a '/' after the host. Provided url is '%s'", url);
 	}
 	bucket = url.substr(prefix_end_pos, slash_pos - prefix_end_pos);
 	if (bucket.empty()) {
@@ -968,6 +970,8 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 }
 
 void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
+	auto &s3fs = (S3FileSystem &)file_system;
+	s3fs.FinalizeHandleCreate(*this, opener);
 	try {
 		HTTPFileHandle::Initialize(opener);
 	} catch (std::exception &ex) {
