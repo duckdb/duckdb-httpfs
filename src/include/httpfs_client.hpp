@@ -46,6 +46,8 @@ public:
 	string GetName() const override;
 };
 
+#ifndef EMSCRIPTEN
+
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
@@ -54,6 +56,8 @@ public:
 
 	string GetName() const override;
 };
+
+#endif
 
 struct HeaderCollector {
 	std::vector<HTTPHeaders> header_collection;
