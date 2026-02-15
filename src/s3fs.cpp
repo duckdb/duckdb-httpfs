@@ -1763,8 +1763,11 @@ vector<string> AWSListObjectV2::ParseCommonPrefix(string &aws_response) {
 }
 
 S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
-                                   idx_t secret_types_len)
-    : reader(opener_p, info, secret_types, secret_types_len) {
+                                   const idx_t secret_types_len)
+    : S3KeyValueReader(KeyValueSecretReader {opener_p, info, secret_types, secret_types_len}) {
+}
+
+S3KeyValueReader::S3KeyValueReader(const KeyValueSecretReader &_reader) : reader(_reader) {
 	Value use_env_vars_for_secret_info_setting;
 	reader.TryGetSecretKeyOrSetting("enable_global_s3_configuration", "enable_global_s3_configuration",
 	                                use_env_vars_for_secret_info_setting);
