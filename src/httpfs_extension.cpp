@@ -141,7 +141,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
 		// Already handled, do not override
 	} else {
+#ifndef EMSCRIPTEN
 		config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+#else
+		config.http_util = make_shared_ptr<HTTPFSUtil>();
+#endif
 	}
 
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
