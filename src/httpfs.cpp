@@ -465,7 +465,6 @@ void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle, op
 }
 
 void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle, optional_ptr<FileOpener> opener) {
-	handle.http_params.state = nullptr;
 	ClientOptions options(handle);
 	if (!handle.client_cache) {
 		handle.InitializeClientCache(*this, options);
