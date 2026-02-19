@@ -245,5 +245,5 @@ extern "C" {
 // Call the member function through the factory object
 DUCKDB_EXTENSION_API AESStateSSLFactory *CreateSSLFactory() {
 	return new AESStateSSLFactory();
-};
+}
 }
