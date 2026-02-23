@@ -4,6 +4,8 @@
 
 require httpfs
 
+require parquet
+
 # override MinIO setup
 statement ok
 SET s3_access_key_id='';
