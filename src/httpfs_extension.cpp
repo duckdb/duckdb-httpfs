@@ -96,7 +96,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency", LogicalType::BOOLEAN,
 	                          Value(false));
 	config.AddExtensionOption("s3_version_id_pinning", "Pin S3 reads to a specific object version for consistency",
-	                          LogicalType::BOOLEAN, Value(true));
+	                          LogicalType::BOOLEAN, Value(false));
 
 	// HuggingFace options
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
