@@ -21,6 +21,9 @@ SELECT COUNT(*) FROM (FROM glob('s3://overturemaps-us-west-2/**/*.parquet') LIMI
 10
 
 statement ok
+FROM parquet_scan('s3://overturemaps-us-west-2/bridgefiles/2025-03-19.0-beta.0/dataset=Esri Community Maps/theme=buildings/type=building/part-00000-947c2149-23db-4abc-a7ee-3a892aac90ff.c000.snappy.parquet') LIMIT 1;
+
+statement ok
 SET s3_region='${s3_region}'
 
 endloop
