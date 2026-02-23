@@ -933,7 +933,7 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			FullDownload(hfs, should_write_cache);
 		}
 		if (should_write_cache) {
-			current_cache->Insert(path, {length, last_modified, etag, version_id});
+			current_cache->Insert(path, GetCacheEntry());
 		}
 
 		if (!SkipBuffer()) {
