@@ -1,6 +1,6 @@
 # name: test/sql/curl_client/test_relative_path_parsing.test
 # description: test that parsing http url parts like /.//file works with localhost
-# group: [sql, curl_client]
+# group: [curl_client]
 
 require httpfs
 
