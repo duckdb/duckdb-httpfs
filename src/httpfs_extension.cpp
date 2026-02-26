@@ -63,7 +63,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 		}
 		LocalFileSystem fs;
 		ClientContextFileOpener opener(context);
-		auto &config = DBConfig::GetConfig(context);
 		// Normalize ca_cert_file to absolute path
 		parameter = Value(fs.CanonicalizePath(value, opener));
 	};
