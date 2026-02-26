@@ -173,7 +173,7 @@ public:
 		// set connection timeout
 		curl_easy_setopt(*curl, CURLOPT_CONNECTTIMEOUT, http_params.timeout);
 		// accept content as-is (i.e no decompressing)
-		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, "identity");
+		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, NULL);
 		// follow redirects
 		curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, http_params.follow_location ? 1L : 0L);
 
