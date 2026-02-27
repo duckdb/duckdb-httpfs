@@ -24,6 +24,15 @@
 
 namespace duckdb {
 
+ClientOptions::ClientOptions(HTTPFileHandle &handle) {
+	identifier = "";
+	identifier += handle.params->http_proxy + " ";
+	identifier += handle.params->http_proxy_username + " ";
+	identifier += handle.params->http_proxy_password + " ";
+	// identifier += handle.params->http_proxy_port + " ";
+	identifier += handle.params->http_util.GetName();
+}
+
 shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		return opener->GetHTTPUtil();
@@ -128,6 +137,10 @@ unique_ptr<HTTPClient> HTTPClientCache::GetClient() {
 }
 
 void HTTPClientCache::StoreClient(unique_ptr<HTTPClient> client) {
+	if (!client) {
+		return;
+	}
+	client->Cleanup();
 	lock_guard<mutex> lck(lock);
 	clients.push_back(std::move(client));
 }
@@ -393,6 +406,33 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		}
 	}
 }
+
+shared_ptr<HTTPClientCache> HTTPFileSystem::GetOrCreateClientCache(const string &path, const ClientOptions &options) {
+	string identifier = path + " " + options.ToString();
+
+	lock_guard<mutex> lock(client_cache_map_lock);
+
+	auto retrived = lru_client_cache.Get(identifier);
+
+	if (!retrived) {
+		auto client_cache = make_shared_ptr<HTTPClientCache>();
+		lru_client_cache.Put(identifier, client_cache);
+		return client_cache;
+	}
+
+	return retrived;
+}
+
+void HTTPFileHandle::InitializeClientCache(HTTPFileSystem &file_system, const ClientOptions &options) {
+	client_cache = file_system.GetOrCreateClientCache(BaseUrl(), options);
+}
+
+string HTTPFileHandle::BaseUrl() const {
+	string path_out, proto_host_port;
+	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
+	return proto_host_port;
+}
+
 unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                         optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
@@ -414,7 +454,21 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 			httpfs_params.bearer_token = kv_secret.TryGetValue("token", true).ToString();
 		}
 	}
-	return duckdb::make_uniq<HTTPFileHandle>(*this, file, flags, std::move(params));
+	auto handle = duckdb::make_uniq<HTTPFileHandle>(*this, file, flags, std::move(params));
+	return handle;
+}
+
+void HTTPFileSystem::FinalizeHandleCreate(unique_ptr<HTTPFileHandle> &handle, optional_ptr<FileOpener> opener) {
+	if (handle) {
+		FinalizeHandleCreate(*handle, opener);
+	}
+}
+
+void HTTPFileSystem::FinalizeHandleCreate(HTTPFileHandle &handle, optional_ptr<FileOpener> opener) {
+	ClientOptions options(handle);
+	if (!handle.client_cache) {
+		handle.InitializeClientCache(*this, options);
+	}
 }
 
 unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
@@ -424,6 +478,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	if (flags.ReturnNullIfNotExists()) {
 		try {
 			auto handle = CreateHandle(file, flags, opener);
+			FinalizeHandleCreate(handle, opener);
 			handle->Initialize(opener);
 			return std::move(handle);
 		} catch (...) {
@@ -432,6 +487,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	}
 
 	auto handle = CreateHandle(file, flags, opener);
+	FinalizeHandleCreate(handle, opener);
 
 	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
 		handle->write_overwrite_mode = true;
@@ -950,9 +1006,11 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 
 unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
 	// Try to fetch a cached client
-	auto cached_client = client_cache.GetClient();
-	if (cached_client) {
-		return cached_client;
+	if (client_cache) {
+		auto cached_client = client_cache->GetClient();
+		if (cached_client) {
+			return cached_client;
+		}
 	}
 
 	// Create a new client
@@ -961,13 +1019,13 @@ unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
 
 unique_ptr<HTTPClient> HTTPFileHandle::CreateClient() {
 	// Create a new client
-	string path_out, proto_host_port;
-	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
-	return http_params.http_util.InitializeClient(http_params, proto_host_port);
+	return http_params.http_util.InitializeClient(http_params, BaseUrl());
 }
 
 void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
-	client_cache.StoreClient(std::move(client));
+	if (client_cache) {
+		client_cache->StoreClient(std::move(client));
+	}
 }
 
 HTTPFileHandle::~HTTPFileHandle() {

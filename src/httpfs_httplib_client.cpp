@@ -157,9 +157,13 @@ private:
 			return result;
 		}
 	}
-
+public:
+	void Cleanup() override {
+		state = nullptr;
+	}
 private:
 	unique_ptr<duckdb_httplib_openssl::Client> client;
+public:
 	optional_ptr<HTTPState> state;
 };
 

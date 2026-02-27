@@ -62,7 +62,7 @@ public:
 	}
 	~HFFileHandle() override;
 
-	unique_ptr<HTTPClient> CreateClient() override;
+	string BaseUrl() const override;
 
 protected:
 	ParsedHFUrl parsed_url;

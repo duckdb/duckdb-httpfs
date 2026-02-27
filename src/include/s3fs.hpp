@@ -189,7 +189,7 @@ protected:
 	atomic<bool> uploader_has_error {false};
 	std::exception_ptr upload_exception;
 
-	unique_ptr<HTTPClient> CreateClient() override;
+	string BaseUrl() const override;
 
 	//! Rethrow IO Exception originating from an upload thread
 	void RethrowIOError() {
