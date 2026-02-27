@@ -963,7 +963,15 @@ unique_ptr<HTTPClient> HTTPFileHandle::CreateClient() {
 	// Create a new client
 	string path_out, proto_host_port;
 	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
-	return http_params.http_util.InitializeClient(http_params, proto_host_port);
+
+	// Parse basic auth credentials from URL if present (user:pass@host format)
+	string basic_auth_username, basic_auth_password;
+	HTTPFSUtil::ParseBasicAuth(path, basic_auth_username, basic_auth_password);
+
+	// Use HTTPFSUtil to create client with basic auth support
+	auto &httpfs_util = static_cast<HTTPFSUtil &>(http_params.http_util);
+	return httpfs_util.InitializeClientWithAuth(http_params, proto_host_port, basic_auth_username,
+	                                            basic_auth_password);
 }
 
 void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
