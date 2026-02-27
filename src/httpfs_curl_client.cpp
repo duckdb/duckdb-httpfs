@@ -488,7 +488,7 @@ private:
 	}
 
 	static void InitCurlGlobal() {
-		GetRefLock();
+		unique_lock<mutex> lck {GetRefLock()};
 		if (httpfs_client_count == 0) {
 			curl_global_init(CURL_GLOBAL_DEFAULT);
 		}
@@ -496,16 +496,14 @@ private:
 	}
 
 	static void DestroyCurlGlobal() {
-		// TODO: when to call curl_global_cleanup()
-		// calling it on client destruction causes SSL errors when verification is on (due to many requests).
-		// GetRefLock();
-		// if (httpfs_client_count == 0) {
-		// 	throw InternalException("Destroying Httpfs client that did not initialize CURL");
-		// }
-		// --httpfs_client_count;
-		// if (httpfs_client_count == 0) {
-		// 	curl_global_cleanup();
-		// }
+		unique_lock<mutex> lck {GetRefLock()};
+		if (httpfs_client_count == 0) {
+			throw InternalException("Destroying Httpfs client that did not initialize CURL");
+		}
+		--httpfs_client_count;
+		if (httpfs_client_count == 0) {
+			curl_global_cleanup();
+		}
 	}
 };
 
