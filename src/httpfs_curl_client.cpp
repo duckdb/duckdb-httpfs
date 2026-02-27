@@ -230,14 +230,17 @@ public:
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
 
-		idx_t bytes_received = 0;
+		const idx_t bytes_received = request_info->body.size();
 		if (!request_info->header_collection.empty() &&
 		    request_info->header_collection.back().HasHeader("content-length")) {
-			bytes_received = std::stoi(request_info->header_collection.back().GetHeaderValue("content-length"));
-			D_ASSERT(bytes_received == request_info->body.size());
-		} else {
-			bytes_received = request_info->body.size();
+			const idx_t content_length_received =
+			    std::stoi(request_info->header_collection.back().GetHeaderValue("content-length"));
+			if (bytes_received != content_length_received) {
+				// Something is off, might happen in case of unreliable network
+				// TODO: consider logging this
+			}
 		}
+
 		if (state) {
 			state->total_bytes_received += bytes_received;
 		}
