@@ -42,7 +42,8 @@ static string ParseNextUrlFromLinkHeader(const string &link_header_content) {
 	throw IOException("Failed to parse Link header for paginated response, pagination support");
 }
 
-HFFileHandle::~HFFileHandle() {};
+HFFileHandle::~HFFileHandle() {
+}
 
 unique_ptr<HTTPClient> HFFileHandle::CreateClient() {
 	return http_params.http_util.InitializeClient(http_params, parsed_url.endpoint);

@@ -972,7 +972,7 @@ void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
 
 HTTPFileHandle::~HTTPFileHandle() {
 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
-};
+}
 
 string HTTPFSUtil::GetName() const {
 	return "HTTPFS";
