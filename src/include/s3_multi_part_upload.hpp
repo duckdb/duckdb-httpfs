@@ -41,7 +41,9 @@ public:
 	static void UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
 	                                       string query_param, bool direct_throw);
 	void NotifyUploadsInProgress();
+
 	string InitializeMultipartUpload();
+	void FinalizeMultipartUpload();
 
 public:
 	shared_ptr<S3WriteBuffer> GetBuffer(uint16_t write_buffer_idx);

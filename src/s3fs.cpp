@@ -474,42 +474,6 @@ void S3FileHandle::RethrowIOError() {
 	}
 }
 
-void S3FileSystem::FinalizeMultipartUpload(S3FileHandle &file_handle) {
-	auto &s3fs = (S3FileSystem &)file_handle.file_system;
-	auto &multi_file_upload = *file_handle.multi_part_upload;
-	if (multi_file_upload.upload_finalized) {
-		return;
-	}
-
-	multi_file_upload.upload_finalized = true;
-
-	std::stringstream ss;
-	ss << "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
-
-	auto parts = multi_file_upload.parts_uploaded.load();
-	for (auto i = 0; i < parts; i++) {
-		auto etag_lookup = multi_file_upload.part_etags.find(i);
-		if (etag_lookup == multi_file_upload.part_etags.end()) {
-			throw IOException("Unknown part number");
-		}
-		ss << "<Part><ETag>" << etag_lookup->second << "</ETag><PartNumber>" << i + 1 << "</PartNumber></Part>";
-	}
-	ss << "</CompleteMultipartUpload>";
-	string body = ss.str();
-
-	// Response is around ~400 in AWS docs so this should be enough to not need a resize
-	string result;
-
-	string query_param = "uploadId=" + S3FileSystem::UrlEncode(multi_file_upload.multipart_upload_id, true);
-	auto res =
-	    s3fs.PostRequest(file_handle, file_handle.path, {}, result, (char *)body.c_str(), body.length(), query_param);
-	auto open_tag_pos = result.find("<CompleteMultipartUploadResult", 0);
-	if (open_tag_pos == string::npos) {
-		throw HTTPException(*res, "Unexpected response during S3 multipart upload finalization: %d\n\n%s",
-		                    static_cast<int>(res->status), result);
-	}
-}
-
 // Wrapper around the BufferManager::Allocate to that allows limiting the number of buffers that will be handed out
 BufferHandle S3FileSystem::Allocate(idx_t part_size, uint16_t max_threads) {
 	return buffer_manager.Allocate(MemoryTag::EXTENSION, part_size);
@@ -1045,10 +1009,7 @@ void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> 
 
 void S3FileSystem::FileSync(FileHandle &handle) {
 	auto &s3fh = handle.Cast<S3FileHandle>();
-	if (!s3fh.multi_part_upload->upload_finalized) {
-		FlushAllBuffers(s3fh);
-		FinalizeMultipartUpload(s3fh);
-	}
+	s3fh.FinalizeUpload();
 }
 
 void S3FileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {

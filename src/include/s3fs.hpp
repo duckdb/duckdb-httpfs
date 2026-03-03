@@ -178,8 +178,6 @@ public:
 	void FileSync(FileHandle &handle) override;
 	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
 
-	void FinalizeMultipartUpload(S3FileHandle &file_handle);
-
 	void FlushAllBuffers(S3FileHandle &handle);
 
 	void ReadQueryParams(const string &url_query_param, S3AuthParams &params);

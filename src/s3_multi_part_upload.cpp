@@ -15,7 +15,7 @@ void S3MultiPartUpload::Finalize() {
 	}
 	s3fs.FlushAllBuffers(s3_file_handle);
 	if (parts_uploaded) {
-		s3fs.FinalizeMultipartUpload(s3_file_handle);
+		FinalizeMultipartUpload();
 	}
 }
 
@@ -73,6 +73,40 @@ string S3MultiPartUpload::InitializeMultipartUpload() {
 	initialized_multipart_upload = true;
 
 	return result.substr(open_tag_pos, close_tag_pos - open_tag_pos);
+}
+
+void S3MultiPartUpload::FinalizeMultipartUpload() {
+	if (upload_finalized) {
+		return;
+	}
+
+	upload_finalized = true;
+
+	std::stringstream ss;
+	ss << "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
+
+	auto parts = parts_uploaded.load();
+	for (auto i = 0; i < parts; i++) {
+		auto etag_lookup = part_etags.find(i);
+		if (etag_lookup == part_etags.end()) {
+			throw IOException("Unknown part number");
+		}
+		ss << "<Part><ETag>" << etag_lookup->second << "</ETag><PartNumber>" << i + 1 << "</PartNumber></Part>";
+	}
+	ss << "</CompleteMultipartUpload>";
+	string body = ss.str();
+
+	// Response is around ~400 in AWS docs so this should be enough to not need a resize
+	string result;
+
+	string query_param = "uploadId=" + S3FileSystem::UrlEncode(multipart_upload_id, true);
+	auto res =
+		s3fs.PostRequest(s3_file_handle, path, {}, result, (char *)body.c_str(), body.length(), query_param);
+	auto open_tag_pos = result.find("<CompleteMultipartUploadResult", 0);
+	if (open_tag_pos == string::npos) {
+		throw HTTPException(*res, "Unexpected response during S3 multipart upload finalization: %d\n\n%s",
+							static_cast<int>(res->status), result);
+	}
 }
 
 void S3MultiPartUpload::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
