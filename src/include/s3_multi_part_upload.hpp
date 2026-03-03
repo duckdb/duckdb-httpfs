@@ -9,7 +9,7 @@ namespace duckdb {
 class S3WriteBuffer {
 public:
 	explicit S3WriteBuffer(idx_t buffer_start, size_t buffer_size, BufferHandle buffer_p)
-		: idx(0), buffer_start(buffer_start), buffer(std::move(buffer_p)) {
+	    : idx(0), buffer_start(buffer_start), buffer(std::move(buffer_p)) {
 		buffer_end = buffer_start + buffer_size;
 		part_no = buffer_start / buffer_size;
 		uploading = false;
@@ -29,7 +29,6 @@ public:
 	atomic<bool> uploading;
 };
 
-
 class S3MultiPartUpload {
 public:
 	S3MultiPartUpload(S3FileHandle &s3_file_handle);
@@ -40,8 +39,9 @@ public:
 	static void UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
 	static void UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
 	static void UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
-										   string query_param, bool direct_throw);
+	                                       string query_param, bool direct_throw);
 	void NotifyUploadsInProgress();
+	string InitializeMultipartUpload();
 
 public:
 	shared_ptr<S3WriteBuffer> GetBuffer(uint16_t write_buffer_idx);
@@ -49,6 +49,7 @@ public:
 
 	S3FileSystem &s3fs;
 	S3FileHandle &s3_file_handle;
+	string path;
 	const S3ConfigParams config_params;
 
 	bool initialized_multipart_upload = false;
@@ -78,4 +79,4 @@ public:
 	std::exception_ptr upload_exception;
 };
 
-}
+} // namespace duckdb

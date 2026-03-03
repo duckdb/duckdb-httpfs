@@ -382,34 +382,6 @@ unique_ptr<HTTPClient> S3FileHandle::CreateClient() {
 	return http_params.http_util.InitializeClient(http_params, proto_host_port);
 }
 
-// Opens the multipart upload and returns the ID
-string S3FileSystem::InitializeMultipartUpload(S3FileHandle &file_handle) {
-	auto &s3fs = (S3FileSystem &)file_handle.file_system;
-
-	// AWS response is around 300~ chars in docs so this should be enough to not need a resize
-	string result;
-	string query_param = "uploads=";
-	auto res = s3fs.PostRequest(file_handle, file_handle.path, {}, result, nullptr, 0, query_param);
-
-	if (res->status != HTTPStatusCode::OK_200) {
-		throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %d)", file_handle.path, res->GetError(),
-		                    static_cast<int>(res->status));
-	}
-
-	auto open_tag_pos = result.find("<UploadId>", 0);
-	auto close_tag_pos = result.find("</UploadId>", open_tag_pos);
-
-	if (open_tag_pos == string::npos || close_tag_pos == string::npos) {
-		throw HTTPException("Unexpected response while initializing S3 multipart upload");
-	}
-
-	open_tag_pos += 10; // Skip open tag
-
-	file_handle.multi_part_upload->initialized_multipart_upload = true;
-
-	return result.substr(open_tag_pos, close_tag_pos - open_tag_pos);
-}
-
 void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
 	if (write_buffer->idx == 0) {
 		return;
@@ -446,7 +418,7 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 		multi_file_upload.uploads_in_progress++;
 	}
 	if (multi_file_upload.initialized_multipart_upload == false) {
-		multi_file_upload.multipart_upload_id = InitializeMultipartUpload(file_handle);
+		multi_file_upload.multipart_upload_id = multi_file_upload.InitializeMultipartUpload();
 	}
 
 #ifdef SAME_THREAD_UPLOAD
@@ -479,7 +451,7 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 			multi_file_upload.upload_finalized = true;
 			return;
 		} else {
-			multi_file_upload.multipart_upload_id = InitializeMultipartUpload(file_handle);
+			multi_file_upload.multipart_upload_id = multi_file_upload.InitializeMultipartUpload();
 		}
 	}
 	// Flush all buffers that aren't already uploading
@@ -935,8 +907,9 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		auto minimum_part_size = MaxValue<idx_t>(aws_minimum_part_size, required_part_size);
 
 		// Round part size up to multiple of Storage::DEFAULT_BLOCK_SIZE
-		multi_part_upload->part_size = ((minimum_part_size + Storage::DEFAULT_BLOCK_SIZE - 1) / Storage::DEFAULT_BLOCK_SIZE) *
-		            Storage::DEFAULT_BLOCK_SIZE;
+		multi_part_upload->part_size =
+		    ((minimum_part_size + Storage::DEFAULT_BLOCK_SIZE - 1) / Storage::DEFAULT_BLOCK_SIZE) *
+		    Storage::DEFAULT_BLOCK_SIZE;
 		D_ASSERT(multi_part_upload->part_size * max_part_count >= config_params.max_file_size);
 	}
 }

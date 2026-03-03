@@ -178,7 +178,6 @@ public:
 	void FileSync(FileHandle &handle) override;
 	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
 
-	string InitializeMultipartUpload(S3FileHandle &file_handle);
 	void FinalizeMultipartUpload(S3FileHandle &file_handle);
 
 	void FlushAllBuffers(S3FileHandle &handle);

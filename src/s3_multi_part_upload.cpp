@@ -2,9 +2,10 @@
 
 namespace duckdb {
 
-
-S3MultiPartUpload::S3MultiPartUpload(S3FileHandle &s3_file_handle) : s3fs(s3_file_handle.file_system.Cast<S3FileSystem>()), s3_file_handle(s3_file_handle), config_params(s3_file_handle.config_params), uploads_in_progress(0), parts_uploaded(0), upload_finalized(false),
-	  uploader_has_error(false), upload_exception(nullptr) {
+S3MultiPartUpload::S3MultiPartUpload(S3FileHandle &s3_file_handle)
+    : s3fs(s3_file_handle.file_system.Cast<S3FileSystem>()), s3_file_handle(s3_file_handle), path(s3_file_handle.path),
+      config_params(s3_file_handle.config_params), uploads_in_progress(0), parts_uploaded(0), upload_finalized(false),
+      uploader_has_error(false), upload_exception(nullptr) {
 }
 
 void S3MultiPartUpload::Finalize() {
@@ -31,7 +32,7 @@ shared_ptr<S3WriteBuffer> S3MultiPartUpload::GetBuffer(uint16_t write_buffer_idx
 
 	auto buffer_handle = s3fs.Allocate(part_size, config_params.max_upload_threads);
 	auto new_write_buffer =
-		make_shared_ptr<S3WriteBuffer>(write_buffer_idx * part_size, part_size, std::move(buffer_handle));
+	    make_shared_ptr<S3WriteBuffer>(write_buffer_idx * part_size, part_size, std::move(buffer_handle));
 	{
 		unique_lock<mutex> lck(write_buffers_lock);
 		auto lookup_result = write_buffers.find(write_buffer_idx);
@@ -48,6 +49,31 @@ shared_ptr<S3WriteBuffer> S3MultiPartUpload::GetBuffer(uint16_t write_buffer_idx
 	return new_write_buffer;
 }
 
+// Opens the multipart upload and returns the ID
+string S3MultiPartUpload::InitializeMultipartUpload() {
+	// AWS response is around 300~ chars in docs so this should be enough to not need a resize
+	string result;
+	string query_param = "uploads=";
+	auto res = s3fs.PostRequest(s3_file_handle, path, {}, result, nullptr, 0, query_param);
+
+	if (res->status != HTTPStatusCode::OK_200) {
+		throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %d)", path, res->GetError(),
+		                    static_cast<int>(res->status));
+	}
+
+	auto open_tag_pos = result.find("<UploadId>", 0);
+	auto close_tag_pos = result.find("</UploadId>", open_tag_pos);
+
+	if (open_tag_pos == string::npos || close_tag_pos == string::npos) {
+		throw HTTPException("Unexpected response while initializing S3 multipart upload");
+	}
+
+	open_tag_pos += 10; // Skip open tag
+
+	initialized_multipart_upload = true;
+
+	return result.substr(open_tag_pos, close_tag_pos - open_tag_pos);
+}
 
 void S3MultiPartUpload::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
 	auto &multi_file_upload = *file_handle.multi_part_upload;
@@ -64,7 +90,7 @@ void S3MultiPartUpload::UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr
 }
 
 void S3MultiPartUpload::UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
-                                              string query_param, bool single_upload) {
+                                                   string query_param, bool single_upload) {
 	auto &s3fs = (S3FileSystem &)file_handle.file_system;
 	auto &multi_file_upload = *file_handle.multi_part_upload;
 
@@ -129,4 +155,4 @@ void S3MultiPartUpload::NotifyUploadsInProgress() {
 #endif
 }
 
-}
+} // namespace duckdb
