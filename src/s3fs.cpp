@@ -23,10 +23,6 @@
 
 #include <iostream>
 #include <iostream>
-#include <thread>
-#ifdef EMSCRIPTEN
-#define SAME_THREAD_UPLOAD
-#endif
 
 namespace duckdb {
 
@@ -380,98 +376,6 @@ unique_ptr<HTTPClient> S3FileHandle::CreateClient() {
 
 	string proto_host_port = parsed_url.http_proto + parsed_url.host;
 	return http_params.http_util.InitializeClient(http_params, proto_host_port);
-}
-
-void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
-	if (write_buffer->idx == 0) {
-		return;
-	}
-
-	auto uploading = write_buffer->uploading.load();
-	if (uploading) {
-		return;
-	}
-	bool can_upload = write_buffer->uploading.compare_exchange_strong(uploading, true);
-	if (!can_upload) {
-		return;
-	}
-	auto &multi_file_upload = *file_handle.multi_part_upload;
-
-	file_handle.RethrowIOError();
-
-	{
-		unique_lock<mutex> lck(multi_file_upload.write_buffers_lock);
-		multi_file_upload.write_buffers.erase(write_buffer->part_no);
-	}
-
-	{
-		unique_lock<mutex> lck(multi_file_upload.uploads_in_progress_lock);
-		// check if there are upload threads available
-#ifndef SAME_THREAD_UPLOAD
-		if (multi_file_upload.uploads_in_progress >= file_handle.config_params.max_upload_threads) {
-			// there are not - wait for one to become available
-			multi_file_upload.uploads_in_progress_cv.wait(lck, [&] {
-				return multi_file_upload.uploads_in_progress < file_handle.config_params.max_upload_threads;
-			});
-		}
-#endif
-		multi_file_upload.uploads_in_progress++;
-	}
-	if (multi_file_upload.initialized_multipart_upload == false) {
-		multi_file_upload.multipart_upload_id = multi_file_upload.InitializeMultipartUpload();
-	}
-
-#ifdef SAME_THREAD_UPLOAD
-	UploadBuffer(file_handle, write_buffer);
-	return;
-#endif
-
-	thread upload_thread(S3MultiPartUpload::UploadBuffer, std::ref(file_handle), write_buffer);
-	upload_thread.detach();
-}
-
-// Note that FlushAll currently does not allow to continue writing afterwards. Therefore, FinalizeMultipartUpload should
-// be called right after it!
-// TODO: we can fix this by keeping the last partially written buffer in memory and allow reuploading it with new data.
-void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
-	auto &multi_file_upload = *file_handle.multi_part_upload;
-	//  Collect references to all buffers to check
-	vector<shared_ptr<S3WriteBuffer>> to_flush;
-	multi_file_upload.write_buffers_lock.lock();
-	for (auto &item : multi_file_upload.write_buffers) {
-		to_flush.push_back(item.second);
-	}
-	multi_file_upload.write_buffers_lock.unlock();
-
-	if (multi_file_upload.initialized_multipart_upload == false) {
-		// TODO (carlo): unclear how to handle kms_key_id, but given currently they are custom, leave the multiupload
-		// codepath in that case
-		if (to_flush.size() == 1 && file_handle.auth_params.kms_key_id.empty()) {
-			S3MultiPartUpload::UploadSingleBuffer(file_handle, to_flush[0]);
-			multi_file_upload.upload_finalized = true;
-			return;
-		} else {
-			multi_file_upload.multipart_upload_id = multi_file_upload.InitializeMultipartUpload();
-		}
-	}
-	// Flush all buffers that aren't already uploading
-	for (auto &write_buffer : to_flush) {
-		if (!write_buffer->uploading) {
-			FlushBuffer(file_handle, write_buffer);
-		}
-	}
-	unique_lock<mutex> lck(multi_file_upload.uploads_in_progress_lock);
-#ifndef SAME_THREAD_UPLOAD
-	multi_file_upload.final_flush_cv.wait(lck, [&] { return multi_file_upload.uploads_in_progress == 0; });
-#endif
-
-	file_handle.RethrowIOError();
-}
-
-void S3FileHandle::RethrowIOError() {
-	if (multi_part_upload->uploader_has_error) {
-		std::rethrow_exception(multi_part_upload->upload_exception);
-	}
 }
 
 // Wrapper around the BufferManager::Allocate to that allows limiting the number of buffers that will be handed out
@@ -1041,7 +945,7 @@ void S3FileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx
 
 		// Flush to HTTP if full
 		if (write_buffer->idx >= part_size) {
-			FlushBuffer(s3fh, write_buffer);
+			s3fh.multi_part_upload->FlushBuffer(write_buffer);
 		}
 		s3fh.file_offset += bytes_to_write;
 		s3fh.length += bytes_to_write;

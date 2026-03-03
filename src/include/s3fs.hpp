@@ -142,9 +142,6 @@ protected:
 
 protected:
 	unique_ptr<HTTPClient> CreateClient() override;
-
-	//! Rethrow IO Exception originating from an upload thread
-	void RethrowIOError();
 };
 
 class S3FileSystem : public HTTPFileSystem {
@@ -177,8 +174,6 @@ public:
 	void RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener = nullptr) override;
 	void FileSync(FileHandle &handle) override;
 	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
-
-	void FlushAllBuffers(S3FileHandle &handle);
 
 	void ReadQueryParams(const string &url_query_param, S3AuthParams &params);
 	static ParsedS3Url S3UrlParse(string url, const S3AuthParams &params);
@@ -220,8 +215,6 @@ protected:
 	static string GetPrefix(const string &url);
 	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                                optional_ptr<FileOpener> opener) override;
-
-	void FlushBuffer(S3FileHandle &handle, shared_ptr<S3WriteBuffer> write_buffer);
 	string GetPayloadHash(char *buffer, idx_t buffer_len);
 };
 

@@ -45,6 +45,12 @@ public:
 	string InitializeMultipartUpload();
 	void FinalizeMultipartUpload();
 
+	void FlushBuffer(shared_ptr<S3WriteBuffer> write_buffer);
+	void FlushAllBuffers();
+
+	//! Rethrow IO Exception originating from an upload thread
+	void RethrowIOError();
+
 public:
 	shared_ptr<S3WriteBuffer> GetBuffer(uint16_t write_buffer_idx);
 	void Finalize();

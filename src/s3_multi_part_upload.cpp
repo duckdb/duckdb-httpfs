@@ -1,5 +1,9 @@
 #include "s3_multi_part_upload.hpp"
 
+#include <thread>
+#ifdef EMSCRIPTEN
+#define SAME_THREAD_UPLOAD
+#endif
 namespace duckdb {
 
 S3MultiPartUpload::S3MultiPartUpload(S3FileHandle &s3_file_handle)
@@ -13,7 +17,7 @@ void S3MultiPartUpload::Finalize() {
 		// already finalized
 		return;
 	}
-	s3fs.FlushAllBuffers(s3_file_handle);
+	FlushAllBuffers();
 	if (parts_uploaded) {
 		FinalizeMultipartUpload();
 	}
@@ -100,12 +104,11 @@ void S3MultiPartUpload::FinalizeMultipartUpload() {
 	string result;
 
 	string query_param = "uploadId=" + S3FileSystem::UrlEncode(multipart_upload_id, true);
-	auto res =
-		s3fs.PostRequest(s3_file_handle, path, {}, result, (char *)body.c_str(), body.length(), query_param);
+	auto res = s3fs.PostRequest(s3_file_handle, path, {}, result, (char *)body.c_str(), body.length(), query_param);
 	auto open_tag_pos = result.find("<CompleteMultipartUploadResult", 0);
 	if (open_tag_pos == string::npos) {
 		throw HTTPException(*res, "Unexpected response during S3 multipart upload finalization: %d\n\n%s",
-							static_cast<int>(res->status), result);
+		                    static_cast<int>(res->status), result);
 	}
 }
 
@@ -187,6 +190,94 @@ void S3MultiPartUpload::NotifyUploadsInProgress() {
 	uploads_in_progress_cv.notify_one();
 	final_flush_cv.notify_one();
 #endif
+}
+
+void S3MultiPartUpload::FlushBuffer(shared_ptr<S3WriteBuffer> write_buffer) {
+	if (write_buffer->idx == 0) {
+		return;
+	}
+
+	auto uploading = write_buffer->uploading.load();
+	if (uploading) {
+		return;
+	}
+	bool can_upload = write_buffer->uploading.compare_exchange_strong(uploading, true);
+	if (!can_upload) {
+		return;
+	}
+
+	RethrowIOError();
+
+	{
+		unique_lock<mutex> lck(write_buffers_lock);
+		write_buffers.erase(write_buffer->part_no);
+	}
+
+	{
+		unique_lock<mutex> lck(uploads_in_progress_lock);
+		// check if there are upload threads available
+#ifndef SAME_THREAD_UPLOAD
+		if (uploads_in_progress >= config_params.max_upload_threads) {
+			// there are not - wait for one to become available
+			uploads_in_progress_cv.wait(lck, [&] { return uploads_in_progress < config_params.max_upload_threads; });
+		}
+#endif
+		uploads_in_progress++;
+	}
+	if (initialized_multipart_upload == false) {
+		multipart_upload_id = InitializeMultipartUpload();
+	}
+
+#ifdef SAME_THREAD_UPLOAD
+	UploadBuffer(file_handle, write_buffer);
+	return;
+#endif
+
+	std::thread upload_thread(S3MultiPartUpload::UploadBuffer, std::ref(s3_file_handle), write_buffer);
+	upload_thread.detach();
+}
+
+// Note that FlushAll currently does not allow to continue writing afterwards. Therefore, FinalizeMultipartUpload should
+// be called right after it!
+// TODO: we can fix this by keeping the last partially written buffer in memory and allow reuploading it with new data.
+void S3MultiPartUpload::FlushAllBuffers() {
+	//  Collect references to all buffers to check
+	vector<shared_ptr<S3WriteBuffer>> to_flush;
+	write_buffers_lock.lock();
+	for (auto &item : write_buffers) {
+		to_flush.push_back(item.second);
+	}
+	write_buffers_lock.unlock();
+
+	if (!initialized_multipart_upload) {
+		// TODO (carlo): unclear how to handle kms_key_id, but given currently they are custom, leave the multiupload
+		// codepath in that case
+		if (to_flush.size() == 1 && s3_file_handle.auth_params.kms_key_id.empty()) {
+			S3MultiPartUpload::UploadSingleBuffer(s3_file_handle, to_flush[0]);
+			upload_finalized = true;
+			return;
+		} else {
+			multipart_upload_id = InitializeMultipartUpload();
+		}
+	}
+	// Flush all buffers that aren't already uploading
+	for (auto &write_buffer : to_flush) {
+		if (!write_buffer->uploading) {
+			FlushBuffer(write_buffer);
+		}
+	}
+	unique_lock<mutex> lck(uploads_in_progress_lock);
+#ifndef SAME_THREAD_UPLOAD
+	final_flush_cv.wait(lck, [&] { return uploads_in_progress == 0; });
+#endif
+
+	RethrowIOError();
+}
+
+void S3MultiPartUpload::RethrowIOError() {
+	if (uploader_has_error) {
+		std::rethrow_exception(upload_exception);
+	}
 }
 
 } // namespace duckdb
