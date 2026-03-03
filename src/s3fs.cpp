@@ -1244,8 +1244,13 @@ string AWSListObjectV2::Request(string &path, HTTPParams &http_params, S3AuthPar
 	// Get requests use fresh connection
 	string full_host = parsed_url.http_proto + parsed_url.host;
 	std::stringstream response;
+    // GetRequestInfo(host, path) calls BaseRequest::BaseRequest(host, path)
+    // which is incorrect -- it binds url to path only, not to host + path.
+    // Thus requests using request->url (i.e. curl requests) are incorrect,
+    // as they don't use the host. Fix this here by concatenating both parts
+    const string host_with_path = full_host + listobjectv2_url;
 	GetRequestInfo get_request(
-	    full_host, listobjectv2_url, header_map, http_params,
+	    host_with_path, header_map, http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
 			    string trimmed_path = path;
