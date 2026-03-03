@@ -113,6 +113,9 @@ static idx_t httpfs_client_count = 0;
 
 class HTTPFSCurlClient : public HTTPClient {
 public:
+	void Cleanup () override {
+		state = nullptr;
+	}
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
 		base_url = curl_url();
 		curl_url_set(base_url, CURLUPART_URL, proto_host_port.c_str(), 0);
