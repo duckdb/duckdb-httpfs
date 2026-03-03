@@ -410,87 +410,6 @@ string S3FileSystem::InitializeMultipartUpload(S3FileHandle &file_handle) {
 	return result.substr(open_tag_pos, close_tag_pos - open_tag_pos);
 }
 
-void S3FileSystem::NotifyUploadsInProgress(S3FileHandle &file_handle) {
-	auto &multi_file_upload = *file_handle.multi_part_upload;
-	{
-		unique_lock<mutex> lck(multi_file_upload.uploads_in_progress_lock);
-		multi_file_upload.uploads_in_progress--;
-	}
-	// Note that there are 2 cv's because otherwise we might deadlock when the final flushing thread is notified while
-	// another thread is still waiting for an upload thread
-#ifndef SAME_THREAD_UPLOAD
-	multi_file_upload.uploads_in_progress_cv.notify_one();
-	multi_file_upload.final_flush_cv.notify_one();
-#endif
-}
-
-void S3FileSystem::UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
-	auto &multi_file_upload = *file_handle.multi_part_upload;
-	string query_param = "partNumber=" + to_string(write_buffer->part_no + 1) + "&" +
-	                     "uploadId=" + S3FileSystem::UrlEncode(multi_file_upload.multipart_upload_id, true);
-
-	UploadBufferImplementation(file_handle, write_buffer, query_param, false);
-
-	NotifyUploadsInProgress(file_handle);
-}
-
-void S3FileSystem::UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
-	UploadBufferImplementation(file_handle, write_buffer, "", true);
-}
-
-void S3FileSystem::UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
-                                              string query_param, bool single_upload) {
-	auto &s3fs = (S3FileSystem &)file_handle.file_system;
-	auto &multi_file_upload = *file_handle.multi_part_upload;
-
-	unique_ptr<HTTPResponse> res;
-	string etag;
-
-	try {
-		res = s3fs.PutRequest(file_handle, file_handle.path, {}, (char *)write_buffer->Ptr(), write_buffer->idx,
-		                      query_param);
-
-		if (res->status != HTTPStatusCode::OK_200) {
-			throw HTTPException(*res, "Unable to connect to URL %s: %s (HTTP code %d)", file_handle.path,
-			                    res->GetError(), static_cast<int>(res->status));
-		}
-
-		if (!res->headers.HasHeader("ETag")) {
-			throw IOException("Unexpected response when uploading part to S3");
-		}
-		etag = res->headers.GetHeaderValue("ETag");
-	} catch (std::exception &ex) {
-		if (single_upload) {
-			throw;
-		}
-		ErrorData error(ex);
-		if (error.Type() != ExceptionType::IO && error.Type() != ExceptionType::HTTP) {
-			throw;
-		}
-		// Ensure only one thread sets the exception
-		bool f = false;
-		auto exchanged = multi_file_upload.uploader_has_error.compare_exchange_strong(f, true);
-		if (exchanged) {
-			multi_file_upload.upload_exception = std::current_exception();
-		}
-
-		D_ASSERT(!single_upload); // If we are here we are in the multi-buffer situation
-		NotifyUploadsInProgress(file_handle);
-		return;
-	}
-
-	// Insert etag
-	{
-		unique_lock<mutex> lck(multi_file_upload.part_etags_lock);
-		multi_file_upload.part_etags.insert(std::pair<uint16_t, string>(write_buffer->part_no, etag));
-	}
-
-	multi_file_upload.parts_uploaded++;
-
-	// Free up space for another thread to acquire an S3WriteBuffer
-	write_buffer.reset();
-}
-
 void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer) {
 	if (write_buffer->idx == 0) {
 		return;
@@ -535,7 +454,7 @@ void S3FileSystem::FlushBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuff
 	return;
 #endif
 
-	thread upload_thread(UploadBuffer, std::ref(file_handle), write_buffer);
+	thread upload_thread(S3MultiPartUpload::UploadBuffer, std::ref(file_handle), write_buffer);
 	upload_thread.detach();
 }
 
@@ -556,7 +475,7 @@ void S3FileSystem::FlushAllBuffers(S3FileHandle &file_handle) {
 		// TODO (carlo): unclear how to handle kms_key_id, but given currently they are custom, leave the multiupload
 		// codepath in that case
 		if (to_flush.size() == 1 && file_handle.auth_params.kms_key_id.empty()) {
-			UploadSingleBuffer(file_handle, to_flush[0]);
+			S3MultiPartUpload::UploadSingleBuffer(file_handle, to_flush[0]);
 			multi_file_upload.upload_finalized = true;
 			return;
 		} else {

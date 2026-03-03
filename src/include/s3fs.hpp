@@ -191,13 +191,6 @@ public:
 
 	static string TryGetPrefix(const string &url);
 
-	// Uploads the contents of write_buffer to S3.
-	// Note: caller is responsible to not call this method twice on the same buffer
-	static void UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
-	static void UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
-	static void UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
-	                                       string query_param, bool direct_throw);
-
 	//! Wrapper around BufferManager::Allocate to limit the number of buffers
 	BufferHandle Allocate(idx_t part_size, uint16_t max_threads);
 
@@ -227,7 +220,6 @@ protected:
 	}
 
 protected:
-	static void NotifyUploadsInProgress(S3FileHandle &file_handle);
 	static string GetPrefix(const string &url);
 	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                                optional_ptr<FileOpener> opener) override;

@@ -35,6 +35,15 @@ public:
 	S3MultiPartUpload(S3FileHandle &s3_file_handle);
 
 public:
+	// Uploads the contents of write_buffer to S3.
+	// Note: caller is responsible to not call this method twice on the same buffer
+	static void UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
+	static void UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
+	static void UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
+										   string query_param, bool direct_throw);
+	void NotifyUploadsInProgress();
+
+public:
 	shared_ptr<S3WriteBuffer> GetBuffer(uint16_t write_buffer_idx);
 	void Finalize();
 
