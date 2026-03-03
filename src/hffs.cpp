@@ -59,7 +59,7 @@ string HuggingFaceFileSystem::ListHFRequest(ParsedHFUrl &url, HTTPFSParams &http
 		fragment_next_page_url = next_page_url.substr(url.endpoint.size());
 	}
 	GetRequestInfo get_request(
-	    url.endpoint, fragment_next_page_url, header_map, http_params,
+	    url.endpoint + "/" + fragment_next_page_url, header_map, http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
 			    throw HTTPException(response, "HTTP GET error on '%s' (HTTP %d)", next_page_url, response.status);
