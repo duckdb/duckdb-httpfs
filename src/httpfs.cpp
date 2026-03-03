@@ -143,39 +143,37 @@ static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &head
 	}
 }
 
-static void AddHandleHeaders(HTTPFileHandle &handle, HTTPHeaders &header_map) {
+static void AddHandleHeaders(HTTPFSParams &http_params, HTTPHeaders &header_map) {
 	// Inject headers from the http param extra_headers into the request
-	for (auto &header : handle.http_params.extra_headers) {
+	for (auto &header : http_params.extra_headers) {
 		header_map[header.first] = header.second;
 	}
-	handle.http_params.pre_merged_headers = true;
+	http_params.pre_merged_headers = true;
 }
 
-unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(HTTPInput &input, string url, HTTPHeaders header_map,
                                                      string &buffer_out, char *buffer_in, idx_t buffer_in_len,
                                                      string params) {
-	auto &hfh = handle.Cast<HTTPFileHandle>();
-	auto &http_util = hfh.http_params.http_util;
+	auto &http_util = input.http_params.http_util;
 
-	AddUserAgentIfAvailable(hfh.http_params, header_map);
-	AddHandleHeaders(hfh, header_map);
+	AddUserAgentIfAvailable(input.http_params, header_map);
+	AddHandleHeaders(input.http_params, header_map);
 
-	PostRequestInfo post_request(url, header_map, hfh.http_params, const_data_ptr_cast(buffer_in), buffer_in_len);
+	PostRequestInfo post_request(url, header_map, input.http_params, const_data_ptr_cast(buffer_in), buffer_in_len);
 	auto result = http_util.Request(post_request);
 	buffer_out = std::move(post_request.buffer_out);
 	return result;
 }
 
-unique_ptr<HTTPResponse> HTTPFileSystem::PutRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+unique_ptr<HTTPResponse> HTTPFileSystem::PutRequest(HTTPInput &input, string url, HTTPHeaders header_map,
                                                     char *buffer_in, idx_t buffer_in_len, string params) {
-	auto &hfh = handle.Cast<HTTPFileHandle>();
-	auto &http_util = hfh.http_params.http_util;
+	auto &http_util = input.http_params.http_util;
 
-	AddUserAgentIfAvailable(hfh.http_params, header_map);
-	AddHandleHeaders(hfh, header_map);
+	AddUserAgentIfAvailable(input.http_params, header_map);
+	AddHandleHeaders(input.http_params, header_map);
 
 	string content_type = "application/octet-stream";
-	PutRequestInfo put_request(url, header_map, hfh.http_params, (const_data_ptr_t)buffer_in, buffer_in_len,
+	PutRequestInfo put_request(url, header_map, input.http_params, (const_data_ptr_t)buffer_in, buffer_in_len,
 	                           content_type);
 	return http_util.Request(put_request);
 }
@@ -185,7 +183,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, string 
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
-	AddHandleHeaders(hfh, header_map);
+	AddHandleHeaders(hfh.http_params, header_map);
 
 	auto http_client = hfh.GetClient();
 
@@ -201,7 +199,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::DeleteRequest(FileHandle &handle, strin
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
-	AddHandleHeaders(hfh, header_map);
+	AddHandleHeaders(hfh.http_params, header_map);
 
 	auto http_client = hfh.GetClient();
 	DeleteRequestInfo delete_request(url, header_map, hfh.http_params);
@@ -227,7 +225,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
-	AddHandleHeaders(hfh, header_map);
+	AddHandleHeaders(hfh.http_params, header_map);
 
 	D_ASSERT(hfh.cached_file_handle);
 
@@ -283,7 +281,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	auto &http_util = hfh.http_params.http_util;
 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
-	AddHandleHeaders(hfh, header_map);
+	AddHandleHeaders(hfh.http_params, header_map);
 
 	// send the Range header to read only subset of file
 	string range_expr = "bytes=" + to_string(file_offset) + "-" + to_string(file_offset + buffer_out_len - 1);
@@ -361,9 +359,13 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	return response;
 }
 
+HTTPInput::HTTPInput(unique_ptr<HTTPParams> params_p)
+    : params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()) {
+}
+
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
-                               unique_ptr<HTTPParams> params_p)
-    : FileHandle(fs, file.path, flags), params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()),
+                               shared_ptr<HTTPInput> input_p)
+    : FileHandle(fs, file.path, flags), http_input(std::move(input_p)), http_params(http_input->http_params),
       flags(flags), length(0), force_full_download(false), buffer_available(0), buffer_idx(0), file_offset(0),
       buffer_start(0), buffer_end(0) {
 	// check if the handle has extended properties that can be set directly in the handle
@@ -393,6 +395,12 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		}
 	}
 }
+
+HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+                               unique_ptr<HTTPParams> params_p)
+    : HTTPFileHandle(fs, file, flags, make_shared_ptr<HTTPInput>(std::move(params_p))) {
+}
+
 unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                         optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
