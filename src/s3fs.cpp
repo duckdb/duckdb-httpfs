@@ -1357,7 +1357,7 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		std::stringstream response;
 		ErrorData error;
 		GetRequestInfo get_request(
-		    full_host + "/" + listobjectv2_url, header_map, http_params,
+		    full_host + listobjectv2_url, header_map, http_params,
 		    [&](const HTTPResponse &response) {
 			    if (static_cast<int>(response.status) >= 400) {
 				    string trimmed_path = path;
