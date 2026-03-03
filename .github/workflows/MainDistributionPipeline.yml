@@ -14,30 +14,30 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
     with:
       extension_name: httpfs
-      duckdb_version: 928e9127e2da0c8b91beb6fd5efcd12e76ec8cb3
-      ci_tools_version: main
+      duckdb_version: 490e7a8f479b607798541d21dccf2815abfa673a
+      ci_tools_version: v1.5-variegata
 
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.5-variegata
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: 928e9127e2da0c8b91beb6fd5efcd12e76ec8cb3
-      ci_tools_version: main
+      duckdb_version: 490e7a8f479b607798541d21dccf2815abfa673a
+      ci_tools_version: v1.5-variegata
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
 
   code-quality:
     name: Code Quality
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
     with:
       extension_name: httpfs
-      duckdb_version: 928e9127e2da0c8b91beb6fd5efcd12e76ec8cb3
-      ci_tools_version: main
+      duckdb_version: 490e7a8f479b607798541d21dccf2815abfa673a
+      ci_tools_version: v1.5-variegata
       extra_toolchains: 'python3'
       format_checks: 'format'
