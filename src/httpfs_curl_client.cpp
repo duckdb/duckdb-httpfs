@@ -280,6 +280,11 @@ public:
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
+
+			curl_easy_setopt(*curl, CURLOPT_TIMEOUT, 0L);                         // no hard timeout for uploads
+			curl_easy_setopt(*curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);              // abort if < 1 KB/s...
+			curl_easy_setopt(*curl, CURLOPT_LOW_SPEED_TIME, info.params.timeout); // ...for X consecutive seconds
+
 			// Perform PUT
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "PUT");
 			// Include PUT body
@@ -294,6 +299,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, 0);
 			curl_url_cleanup(url);
+			curl_easy_setopt(*curl, CURLOPT_TIMEOUT, info.params.timeout);
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -342,7 +348,6 @@ public:
 		if (state) {
 			state->delete_count++;
 		}
-
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		// transform parameters
 		request_info->url = info.url;
