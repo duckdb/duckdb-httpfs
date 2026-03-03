@@ -171,6 +171,10 @@ void S3MultiPartUpload::UploadBufferImplementation(shared_ptr<S3WriteBuffer> wri
 void S3MultiPartUpload::NotifyUploadsInProgress() {
 	{
 		unique_lock<mutex> lck(uploads_in_progress_lock);
+		if (uploads_in_progress == 0) {
+			throw InternalException(
+			    "S3MultiPartUpload: uploads_in_progress decremented but no uploads are supposed to be active");
+		}
 		uploads_in_progress--;
 	}
 	// Note that there are 2 cv's because otherwise we might deadlock when the final flushing thread is notified while
