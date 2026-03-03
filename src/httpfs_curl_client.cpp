@@ -417,6 +417,12 @@ public:
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
 		info.buffer_out = request_info->body;
+
+		const idx_t bytes_received = request_info->body.size();
+		if (state) {
+			state->total_bytes_received += bytes_received;
+		}
+
 		// Construct HTTPResponse
 		return TransformResponseCurl(res);
 	}
