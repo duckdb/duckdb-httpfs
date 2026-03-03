@@ -153,7 +153,6 @@ void S3MultiPartUpload::UploadBufferImplementation(shared_ptr<S3WriteBuffer> wri
 		error_manager.PushError(std::move(error));
 
 		D_ASSERT(!single_upload); // If we are here we are in the multi-buffer situation
-		NotifyUploadsInProgress();
 		return;
 	}
 
