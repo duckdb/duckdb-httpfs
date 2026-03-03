@@ -114,6 +114,16 @@ struct S3ConfigParams {
 	static S3ConfigParams ReadFrom(optional_ptr<FileOpener> opener);
 };
 
+class S3HTTPInput : public HTTPInput {
+public:
+	S3HTTPInput(unique_ptr<HTTPParams> params, const S3AuthParams &auth_params_p,
+	            const S3ConfigParams &config_params_p);
+	~S3HTTPInput() override;
+
+	S3AuthParams auth_params;
+	S3ConfigParams config_params;
+};
+
 class S3FileSystem;
 class S3MultiPartUpload;
 class S3WriteBuffer;
@@ -126,8 +136,8 @@ public:
 	             const S3AuthParams &auth_params_p, const S3ConfigParams &config_params_p);
 	~S3FileHandle() override;
 
-	S3AuthParams auth_params;
-	const S3ConfigParams config_params;
+	S3AuthParams &auth_params;
+	const S3ConfigParams &config_params;
 	shared_ptr<S3MultiPartUpload> multi_part_upload;
 
 public:
@@ -158,10 +168,10 @@ public:
 	duckdb::unique_ptr<HTTPResponse> GetRangeRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
 	                                                 idx_t file_offset, char *buffer_out,
 	                                                 idx_t buffer_out_len) override;
-	duckdb::unique_ptr<HTTPResponse> PostRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
+	duckdb::unique_ptr<HTTPResponse> PostRequest(HTTPInput &input, string s3_url, HTTPHeaders header_map,
 	                                             string &buffer_out, char *buffer_in, idx_t buffer_in_len,
 	                                             string http_params = "") override;
-	duckdb::unique_ptr<HTTPResponse> PutRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
+	duckdb::unique_ptr<HTTPResponse> PutRequest(HTTPInput &input, string s3_url, HTTPHeaders header_map,
 	                                            char *buffer_in, idx_t buffer_in_len, string http_params = "") override;
 	duckdb::unique_ptr<HTTPResponse> DeleteRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map) override;
 

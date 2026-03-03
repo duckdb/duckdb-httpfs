@@ -29,17 +29,16 @@ public:
 	atomic<bool> uploading;
 };
 
-class S3MultiPartUpload {
+class S3MultiPartUpload : public enable_shared_from_this<S3MultiPartUpload> {
 public:
 	S3MultiPartUpload(S3FileHandle &s3_file_handle);
 
 public:
 	// Uploads the contents of write_buffer to S3.
 	// Note: caller is responsible to not call this method twice on the same buffer
-	static void UploadBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
-	static void UploadSingleBuffer(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer);
-	static void UploadBufferImplementation(S3FileHandle &file_handle, shared_ptr<S3WriteBuffer> write_buffer,
-	                                       string query_param, bool direct_throw);
+	static void UploadBuffer(shared_ptr<S3MultiPartUpload> multi_part_upload, shared_ptr<S3WriteBuffer> write_buffer);
+	void UploadSingleBuffer(shared_ptr<S3WriteBuffer> write_buffer);
+	void UploadBufferImplementation(shared_ptr<S3WriteBuffer> write_buffer, string query_param, bool direct_throw);
 	void NotifyUploadsInProgress();
 
 	string InitializeMultipartUpload();
@@ -56,7 +55,7 @@ public:
 	void Finalize();
 
 	S3FileSystem &s3fs;
-	S3FileHandle &s3_file_handle;
+	shared_ptr<HTTPInput> http_input;
 	string path;
 	const S3ConfigParams config_params;
 
@@ -83,8 +82,7 @@ public:
 	bool upload_finalized = true;
 
 	//! Error handling in upload threads
-	atomic<bool> uploader_has_error {false};
-	std::exception_ptr upload_exception;
+	TaskErrorManager error_manager;
 };
 
 } // namespace duckdb
