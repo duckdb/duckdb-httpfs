@@ -229,7 +229,7 @@ void S3MultiPartUpload::FlushBuffer(shared_ptr<S3WriteBuffer> write_buffer) {
 	}
 
 #ifdef SAME_THREAD_UPLOAD
-	UploadBuffer(file_handle, write_buffer);
+	UploadBuffer(s3_file_handle, write_buffer);
 	return;
 #endif
 
