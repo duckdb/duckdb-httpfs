@@ -9,7 +9,7 @@ namespace duckdb {
 S3MultiPartUpload::S3MultiPartUpload(S3FileHandle &s3_file_handle)
     : s3fs(s3_file_handle.file_system.Cast<S3FileSystem>()), http_input(s3_file_handle.http_input),
       path(s3_file_handle.path), config_params(s3_file_handle.config_params), uploads_in_progress(0), parts_uploaded(0),
-      upload_finalized(false), uploader_has_error(false), upload_exception(nullptr) {
+      upload_finalized(false) {
 }
 
 void S3MultiPartUpload::Finalize() {
@@ -150,12 +150,7 @@ void S3MultiPartUpload::UploadBufferImplementation(shared_ptr<S3WriteBuffer> wri
 		if (error.Type() != ExceptionType::IO && error.Type() != ExceptionType::HTTP) {
 			throw;
 		}
-		// Ensure only one thread sets the exception
-		bool f = false;
-		auto exchanged = uploader_has_error.compare_exchange_strong(f, true);
-		if (exchanged) {
-			upload_exception = std::current_exception();
-		}
+		error_manager.PushError(std::move(error));
 
 		D_ASSERT(!single_upload); // If we are here we are in the multi-buffer situation
 		NotifyUploadsInProgress();
@@ -271,8 +266,8 @@ void S3MultiPartUpload::FlushAllBuffers() {
 }
 
 void S3MultiPartUpload::RethrowIOError() {
-	if (uploader_has_error) {
-		std::rethrow_exception(upload_exception);
+	if (error_manager.HasError()) {
+		error_manager.ThrowException();
 	}
 }
 

@@ -82,8 +82,7 @@ public:
 	bool upload_finalized = true;
 
 	//! Error handling in upload threads
-	atomic<bool> uploader_has_error {false};
-	std::exception_ptr upload_exception;
+	TaskErrorManager error_manager;
 };
 
 } // namespace duckdb
