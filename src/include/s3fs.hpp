@@ -115,30 +115,8 @@ struct S3ConfigParams {
 };
 
 class S3FileSystem;
-
-// Holds the buffered data for 1 part of an S3 Multipart upload
-class S3WriteBuffer {
-public:
-	explicit S3WriteBuffer(idx_t buffer_start, size_t buffer_size, BufferHandle buffer_p)
-	    : idx(0), buffer_start(buffer_start), buffer(std::move(buffer_p)) {
-		buffer_end = buffer_start + buffer_size;
-		part_no = buffer_start / buffer_size;
-		uploading = false;
-	}
-
-	void *Ptr() {
-		return buffer.Ptr();
-	}
-
-	// The S3 multipart part number. Note that internally we start at 0 but AWS S3 starts at 1
-	idx_t part_no;
-
-	idx_t idx;
-	idx_t buffer_start;
-	idx_t buffer_end;
-	BufferHandle buffer;
-	atomic<bool> uploading;
-};
+class S3MultiPartUpload;
+class S3WriteBuffer;
 
 class S3FileHandle : public HTTPFileHandle {
 	friend class S3FileSystem;
@@ -150,13 +128,12 @@ public:
 
 	S3AuthParams auth_params;
 	const S3ConfigParams config_params;
-	bool initialized_multipart_upload {false};
+	shared_ptr<S3MultiPartUpload> multi_part_upload;
 
 public:
 	void Close() override;
 	void Initialize(optional_ptr<FileOpener> opener) override;
-
-	shared_ptr<S3WriteBuffer> GetBuffer(uint16_t write_buffer_idx);
+	void FinalizeUpload();
 
 protected:
 	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
@@ -164,39 +141,10 @@ protected:
 	void SetRegion(string region_p);
 
 protected:
-	string multipart_upload_id;
-	size_t part_size;
-
-	//! Write buffers for this file
-	mutex write_buffers_lock;
-	unordered_map<uint16_t, shared_ptr<S3WriteBuffer>> write_buffers;
-
-	//! Synchronization for upload threads
-	mutex uploads_in_progress_lock;
-	std::condition_variable uploads_in_progress_cv;
-	std::condition_variable final_flush_cv;
-	uint16_t uploads_in_progress;
-
-	//! Etags are stored for each part
-	mutex part_etags_lock;
-	unordered_map<uint16_t, string> part_etags;
-
-	//! Info for upload
-	atomic<uint16_t> parts_uploaded;
-	bool upload_finalized = true;
-
-	//! Error handling in upload threads
-	atomic<bool> uploader_has_error {false};
-	std::exception_ptr upload_exception;
-
 	unique_ptr<HTTPClient> CreateClient() override;
 
 	//! Rethrow IO Exception originating from an upload thread
-	void RethrowIOError() {
-		if (uploader_has_error) {
-			std::rethrow_exception(upload_exception);
-		}
-	}
+	void RethrowIOError();
 };
 
 class S3FileSystem : public HTTPFileSystem {
