@@ -1354,10 +1354,18 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		// Get requests use fresh connection
 		string full_host = parsed_url.http_proto + parsed_url.host;
 		string listobjectv2_url = req_path + "?" + encoded_params;
+		string actual_path = full_host;
+		if (StringUtil::StartsWith(listobjectv2_url, full_host)) {
+			actual_path = listobjectv2_url;
+		} else if (listobjectv2_url[0] == '/') {
+			actual_path += listobjectv2_url;
+		} else {
+			actual_path += "/" + listobjectv2_url;
+		}
 		std::stringstream response;
 		ErrorData error;
 		GetRequestInfo get_request(
-		    full_host, listobjectv2_url, header_map, http_params,
+		    actual_path, header_map, http_params,
 		    [&](const HTTPResponse &response) {
 			    if (static_cast<int>(response.status) >= 400) {
 				    string trimmed_path = path;
