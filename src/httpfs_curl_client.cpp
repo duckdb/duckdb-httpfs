@@ -218,7 +218,7 @@ public:
 		{
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
@@ -276,7 +276,7 @@ public:
 		CURLcode res;
 		{
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
@@ -324,7 +324,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
 
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
@@ -355,7 +355,7 @@ public:
 		CURLcode res;
 		{
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
@@ -395,7 +395,7 @@ public:
 		CURLcode res;
 		{
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+			curl_url_set(url, CURLUPART_URL, info.path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
