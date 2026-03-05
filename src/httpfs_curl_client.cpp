@@ -113,9 +113,22 @@ static idx_t httpfs_client_count = 0;
 
 class HTTPFSCurlClient : public HTTPClient {
 public:
+	static string NormalizePathToBeAdded(string added_path) {
+		while (added_path.size() > 2) {
+			if (StringUtil::StartsWith(added_path, "//"))
+				added_path = added_path.substr(1);
+			else if (StringUtil::StartsWith(added_path, "./"))
+				added_path = added_path.substr(1);
+			else
+				break;
+		}
+
+		return added_path;
+	}
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
 		base_url = curl_url();
-		curl_url_set(base_url, CURLUPART_URL, proto_host_port.c_str(), 0);
+		string normalized_path = NormalizePathToBeAdded(proto_host_port);
+		curl_url_set(base_url, CURLUPART_URL, normalized_path.c_str(), 0);
 		stored_bearer_token = "";
 		stored_cert_file_path = "";
 		Initialize(http_params);
@@ -218,7 +231,9 @@ public:
 		{
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+
+			string normalized_path = NormalizePathToBeAdded(info.path);
+			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
@@ -276,7 +291,9 @@ public:
 		CURLcode res;
 		{
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+
+			string normalized_path = NormalizePathToBeAdded(info.path);
+			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
@@ -324,7 +341,9 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
 
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+
+			string normalized_path = NormalizePathToBeAdded(info.path);
+			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
@@ -355,7 +374,9 @@ public:
 		CURLcode res;
 		{
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+
+			string normalized_path = NormalizePathToBeAdded(info.path);
+			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
@@ -395,7 +416,9 @@ public:
 		CURLcode res;
 		{
 			CURLU *url = curl_url_dup(base_url);
-			curl_url_set(url, CURLUPART_PATH, info.path.c_str(), 0);
+
+			string normalized_path = NormalizePathToBeAdded(info.path);
+			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
