@@ -1188,19 +1188,32 @@ bool S3FileSystem::ListFilesExtended(const string &directory, const std::functio
 }
 
 optional_idx FindTagContents(const string &response, const string &tag, idx_t cur_pos, string &result) {
-	string open_tag = "<" + tag + ">";
+	// Match "<tag>" or "<tag ...>" (handles XML attributes like xmlns="...")
+	string open_tag_prefix = "<" + tag;
 	string close_tag = "</" + tag + ">";
-	auto open_tag_pos = response.find(open_tag, cur_pos);
+	auto open_tag_pos = response.find(open_tag_prefix, cur_pos);
 	if (open_tag_pos == string::npos) {
 		// tag not found
 		return optional_idx();
 	}
-	auto close_tag_pos = response.find(close_tag, open_tag_pos + open_tag.size());
+	// Verify the match is a complete tag name (not a prefix of a longer tag)
+	auto after_name = open_tag_pos + open_tag_prefix.size();
+	if (after_name >= response.size() || (response[after_name] != '>' && response[after_name] != ' ')) {
+		// Not a valid tag match (e.g., matched <Prefix in <PrefixOther>)
+		return optional_idx();
+	}
+	// Find the end of the opening tag (handles attributes)
+	auto open_tag_end = response.find('>', open_tag_pos);
+	if (open_tag_end == string::npos) {
+		return optional_idx();
+	}
+	auto content_start = open_tag_end + 1;
+	auto close_tag_pos = response.find(close_tag, content_start);
 	if (close_tag_pos == string::npos) {
 		throw InternalException("Failed to parse S3 result: found open tag for %s but did not find matching close tag",
 		                        tag);
 	}
-	result = response.substr(open_tag_pos + open_tag.size(), close_tag_pos - open_tag_pos - open_tag.size());
+	result = response.substr(content_start, close_tag_pos - content_start);
 	return close_tag_pos + close_tag.size();
 }
 
@@ -1487,39 +1500,32 @@ void AWSListObjectV2::ParseFileList(string &aws_response, vector<OpenFileInfo> &
 }
 
 string AWSListObjectV2::ParseContinuationToken(string &aws_response) {
-
-	auto open_tag_pos = aws_response.find("<NextContinuationToken>");
-	if (open_tag_pos == string::npos) {
+	string result;
+	auto pos = FindTagContents(aws_response, "NextContinuationToken", 0, result);
+	if (!pos.IsValid()) {
 		return "";
-	} else {
-		auto close_tag_pos = aws_response.find("</NextContinuationToken>", open_tag_pos + 23);
-		if (close_tag_pos == string::npos) {
-			throw InternalException("Failed to parse S3 result");
-		}
-		return aws_response.substr(open_tag_pos + 23, close_tag_pos - open_tag_pos - 23);
 	}
+	return result;
 }
 
 vector<string> AWSListObjectV2::ParseCommonPrefix(string &aws_response) {
 	vector<string> s3_prefixes;
 	idx_t cur_pos = 0;
 	while (true) {
-		cur_pos = aws_response.find("<CommonPrefixes>", cur_pos);
-		if (cur_pos == string::npos) {
+		string common_prefix_contents;
+		auto next_pos = FindTagContents(aws_response, "CommonPrefixes", cur_pos, common_prefix_contents);
+		if (!next_pos.IsValid()) {
 			break;
 		}
-		auto next_open_tag_pos = aws_response.find("<Prefix>", cur_pos);
-		if (next_open_tag_pos == string::npos) {
-			throw InternalException("Parsing error while parsing s3 listobject result");
-		} else {
-			auto next_close_tag_pos = aws_response.find("</Prefix>", next_open_tag_pos + 8);
-			if (next_close_tag_pos == string::npos) {
-				throw InternalException("Failed to parse S3 result");
-			}
-			auto parsed_path = aws_response.substr(next_open_tag_pos + 8, next_close_tag_pos - next_open_tag_pos - 8);
-			s3_prefixes.push_back(parsed_path);
-			cur_pos = next_close_tag_pos + 6;
+		cur_pos = next_pos.GetIndex();
+
+		string prefix;
+		auto prefix_pos = FindTagContents(common_prefix_contents, "Prefix", 0, prefix);
+		if (!prefix_pos.IsValid()) {
+			throw InternalException("Parsing error while parsing s3 listobject result: Prefix not found in "
+			                        "CommonPrefixes");
 		}
+		s3_prefixes.push_back(prefix);
 	}
 	return s3_prefixes;
 }
