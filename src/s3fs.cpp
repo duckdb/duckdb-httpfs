@@ -1003,6 +1003,8 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 	return key == key_end && pattern == pattern_end;
 }
 
+enum GlobType { HIERARCHICAL, LISTING, UNKNOWN };
+
 struct S3GlobResult : public LazyMultiFileList {
 public:
 	S3GlobResult(S3FileSystem &fs, const string &path, optional_ptr<FileOpener> opener);
@@ -1021,6 +1023,7 @@ private:
 	mutable string current_common_prefix;
 	mutable string common_prefix_continuation_token;
 	mutable vector<string> common_prefixes;
+	mutable GlobType glob_type {UNKNOWN};
 };
 
 S3GlobResult::S3GlobResult(S3FileSystem &fs, const string &glob_pattern_p, optional_ptr<FileOpener> opener)
@@ -1110,49 +1113,58 @@ bool S3GlobResult::ExpandNextPath() const {
 			allow_s3_recursive_globbing = value.GetValue<bool>();
 		}
 
-		const bool could_use_recursive_glob =
-		    !StringUtil::Contains(parsed_s3_url.key, "**") && allow_s3_recursive_globbing;
+		const bool investigate_use_recursive_glob = !StringUtil::Contains(parsed_s3_url.key, "**") &&
+		                                            allow_s3_recursive_globbing && glob_type == GlobType::UNKNOWN;
 		// issue the main request
 
+		bool perform_listing = (glob_type != GlobType::HIERARCHICAL);
+
 		// First perform listing once (default will get back up to 1000 elements)
-		string response_str =
-		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token, false);
-		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
+		string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
+		                                               main_continuation_token, !perform_listing);
 
-		AWSListObjectV2::ParseFileList(response_str, s3_keys);
+		string next_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
 
-		// If we could have used recursive globbing AND there are more files, check selectivity
-		if (could_use_recursive_glob && !main_continuation_token.empty()) {
+		// If we could have used recursive globbing AND there are more files, check average number of files per folder
+		if (investigate_use_recursive_glob && !next_continuation_token.empty()) {
+			vector<OpenFileInfo> s3_keys_tmp;
+			AWSListObjectV2::ParseFileList(response_str, s3_keys_tmp);
 			idx_t found = 0;
-			idx_t matching = 0;
-			for (auto &s3_key : s3_keys) {
+			unordered_set<string> my_set;
+			for (auto &s3_key : s3_keys_tmp) {
 				vector<string> key_splits = StringUtil::Split(s3_key.path, "/");
-				bool is_match =
-				    Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(), true);
 
-				if (is_match) {
-					matching++;
-				}
 				found++;
+				string x = "";
+				key_splits.pop_back();
+				for (string y : key_splits) {
+					x += y + "/";
+				}
+				my_set.insert(x);
 			}
-			if (matching * 10 < found) {
-				// Filter is selective, less than 10% of files in the list are valid, let's pay the fixed price per
-				// folder of hierarchical glob
+
+			if (my_set.size() * 100 < found) {
+				// We have at least 100 files per folder, this should make so that hierarchical listing price is
+				// amortized folder of hierarchical glob
 
 				// Start from scratch:
 				// 1. clear keys
-				s3_keys.clear();
+				s3_keys_tmp.clear();
 				// 2. do request again, now passing true
 				response_str =
 				    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token, true);
 
-				// 3. add to the list any top level file we found
-				AWSListObjectV2::ParseFileList(response_str, s3_keys);
+				// 3. now set next_continuation_token
+				next_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
 
-				// 4. reset continuation
-				main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
+				glob_type = GlobType::HIERARCHICAL;
+			} else {
+				glob_type = GlobType::LISTING;
 			}
 		}
+
+		main_continuation_token = next_continuation_token;
+		AWSListObjectV2::ParseFileList(response_str, s3_keys);
 
 		// parse the list of common prefixes
 		common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
