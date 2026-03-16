@@ -1064,6 +1064,7 @@ bool S3GlobResult::ExpandNextPath() const {
 	FileOpenerInfo info = {glob_pattern};
 	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
 	auto http_params = http_util->InitializeParameters(opener, info);
+	const vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
 
 	vector<OpenFileInfo> s3_keys;
 	if (!current_common_prefix.empty()) {
@@ -1071,7 +1072,6 @@ bool S3GlobResult::ExpandNextPath() const {
 		auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
 
 		current_common_prefix = S3FileSystem::UrlDecode(current_common_prefix);
-		vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
 		vector<string> key_splits = StringUtil::Split(current_common_prefix, "/");
 		const bool is_match =
 		    Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(), false);
@@ -1110,12 +1110,49 @@ bool S3GlobResult::ExpandNextPath() const {
 			allow_s3_recursive_globbing = value.GetValue<bool>();
 		}
 
-		const bool use_recursive_glob = !StringUtil::Contains(parsed_s3_url.key, "**") && allow_s3_recursive_globbing;
+		const bool could_use_recursive_glob =
+		    !StringUtil::Contains(parsed_s3_url.key, "**") && allow_s3_recursive_globbing;
 		// issue the main request
-		string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
-		                                               main_continuation_token, use_recursive_glob);
+
+		// First perform listing once (default will get back up to 1000 elements)
+		string response_str =
+		    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token, false);
 		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
+
 		AWSListObjectV2::ParseFileList(response_str, s3_keys);
+
+		// If we could have used recursive globbing AND there are more files, check selectivity
+		if (could_use_recursive_glob && !main_continuation_token.empty()) {
+			idx_t found = 0;
+			idx_t matching = 0;
+			for (auto &s3_key : s3_keys) {
+				vector<string> key_splits = StringUtil::Split(s3_key.path, "/");
+				bool is_match =
+				    Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(), true);
+
+				if (is_match) {
+					matching++;
+				}
+				found++;
+			}
+			if (matching * 10 < found) {
+				// Filter is selective, less than 10% of files in the list are valid, let's pay the fixed price per
+				// folder of hierarchical glob
+
+				// Start from scratch:
+				// 1. clear keys
+				s3_keys.clear();
+				// 2. do request again, now passing true
+				response_str =
+				    AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params, main_continuation_token, true);
+
+				// 3. add to the list any top level file we found
+				AWSListObjectV2::ParseFileList(response_str, s3_keys);
+
+				// 4. reset continuation
+				main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
+			}
+		}
 
 		// parse the list of common prefixes
 		common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
@@ -1131,7 +1168,6 @@ bool S3GlobResult::ExpandNextPath() const {
 		finished = true;
 	}
 
-	vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
 	for (auto &s3_key : s3_keys) {
 
 		vector<string> key_splits = StringUtil::Split(s3_key.path, "/");
