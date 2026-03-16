@@ -116,7 +116,7 @@ endloop
 query IIIII
 FROM (FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD') head, sum(request.type == 'GET') get, sum(request.type == 'POST') post, sum(request.type == 'PUT') put GROUP BY context_id ORDER BY context_id) WHERE post == 0;
 ----
-3	0	3	0	0
+11	0	11	0	0
 11	0	11	0	0
 11	0	11	0	0
 11	0	11	0	0
