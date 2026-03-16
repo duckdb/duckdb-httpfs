@@ -1,0 +1,34 @@
+# name: test/sql/copy/parquet/test_parquet_force_download_threshold.test
+# description: Test Force download
+# group: [parquet]
+
+require parquet
+
+require httpfs
+
+# we query the same file multiple times, so we have to disable the cache to verify the GET request count
+statement ok
+set enable_external_file_cache=false;
+
+query II
+EXPLAIN ANALYZE SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
+----
+analyzed_plan	<REGEX>:.*GET: 2.*
+
+# now set the threshold to 50mb so that the file is force-downloaded
+statement ok
+set force_download_threshold='50mb';
+
+query II
+EXPLAIN ANALYZE SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
+----
+analyzed_plan	<REGEX>:.*GET: 1.*
+
+# now reset back to 0 so that it is not force-downloaded and we see the GET request count increase again
+statement ok
+set force_download_threshold='0b';
+
+query II
+EXPLAIN ANALYZE SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
+----
+analyzed_plan	<REGEX>:.*GET: 2.*

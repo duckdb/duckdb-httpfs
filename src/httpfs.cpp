@@ -47,6 +47,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	// Setting lookups
 	FileOpener::TryGetCurrentSetting(opener, "http_timeout", result->timeout, info);
 	FileOpener::TryGetCurrentSetting(opener, "force_download", result->force_download, info);
+	FileOpener::TryGetCurrentSetting(opener, "force_download_threshold", result->force_download_threshold, info);
 	FileOpener::TryGetCurrentSetting(opener, "auto_fallback_to_full_download", result->auto_fallback_to_full_download,
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retries", result->retries, info);
@@ -937,7 +938,12 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	LoadFileInfo();
 
 	if (flags.OpenForReading()) {
-		if ((http_params.state && length == 0) || force_full_download) {
+
+		const auto has_cache_state = (http_params.state != nullptr) && (length == 0);
+		const auto always_download = force_full_download;
+		const auto meets_threshold = (length < http_params.force_download_threshold) && (length != 0);
+
+		if (has_cache_state || meets_threshold || always_download) {
 			FullDownload(hfs, should_write_cache);
 		}
 		if (should_write_cache) {
