@@ -113,6 +113,39 @@ SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/*/transactions/date=2
 endloop
 
 #
+# P9: Zero results vs one result — exact date that doesn't exist
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/transactions/date=2099-01-01/*');
+----
+0
+
+endloop
+
+#
+# P10: Multiple * in one segment — all first-of-month dates
+# recursive enumerates ALL objects under blocks/, no-recursive uses delimiter to walk dates
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/blocks/date=*-*-01/*');
+----
+206
+
+endloop
+
+#
 # P5: Fail-fast — non-existent table
 #
 
@@ -144,5 +177,9 @@ FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), su
 13	0	13	0	0
 16	0	16	0	0
 36	0	36	0	0
+1	0	1	0	0
+1	0	1	0	0
+213	0	213	0	0
+7	0	7	0	0
 1	0	1	0	0
 1	0	1	0	0

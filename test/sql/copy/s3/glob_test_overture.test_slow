@@ -110,6 +110,39 @@ SELECT count(*) FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/them
 
 endloop
 
+#
+# P4: Character class [bp]* — themes starting with b or p (buildings + base + places)
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/theme=[bp]*/type=*/*.parquet');
+----
+420
+
+endloop
+
+#
+# P2d: Deep ** vs shallow */* on base theme — should return same count (174)
+# but different wire cost
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/theme=base/*/*.parquet');
+----
+174
+
+endloop
+
 # Wire cost assertions
 query IIIII
 FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
@@ -125,4 +158,8 @@ FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), su
 1	0	1	0	0
 1	0	1	0	0
 1	0	1	0	0
+1	0	1	0	0
+13	0	13	0	0
+1	0	1	0	0
+7	0	7	0	0
 1	0	1	0	0
