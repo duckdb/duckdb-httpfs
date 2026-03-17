@@ -37,7 +37,7 @@ analyzed_plan	<REGEX>:.*GET: 2.*
 
 # now set the threshold to 50mb so that the file is force-downloaded
 statement ok
-set force_download_threshold='50mb';
+set force_download_threshold=50_000_000;
 
 query II
 EXPLAIN ANALYZE SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
@@ -46,7 +46,7 @@ analyzed_plan	<REGEX>:.*GET: 1.*
 
 # now reset back to 0 so that it is not force-downloaded and we see the GET request count increase again
 statement ok
-set force_download_threshold='0b';
+set force_download_threshold=0;
 
 query II
 EXPLAIN ANALYZE SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 5;
