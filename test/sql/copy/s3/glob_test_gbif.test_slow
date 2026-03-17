@@ -1,0 +1,84 @@
+# name: test/sql/copy/s3/glob_test_gbif.test_slow
+# description: Glob stress tests on gbif-open-data — massive flat partition dir (2111 files per snapshot)
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+set ignore_error_messages
+
+statement ok
+CREATE SECRET gbif (TYPE s3, SCOPE 's3://gbif-open-data-us-east-1', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-east-1');
+
+statement ok
+CALL enable_logging('HTTP');
+
+#
+# P1: Single snapshot — all part files (2111 files, exercises ListObjectsV2 pagination)
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://gbif-open-data-us-east-1/occurrence/2023-04-01/occurrence.parquet/*');
+----
+2111
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+3	0	3	0	0
+3	0	3	0	0
+
+#
+# P6: LIMIT on large partition — early termination
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM (FROM glob('s3://gbif-open-data-us-east-1/occurrence/2023-04-01/occurrence.parquet/*') LIMIT 100);
+----
+100
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+1	0	1	0	0
+1	0	1	0	0
+
+#
+# P5: Non-existent snapshot date
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://gbif-open-data-us-east-1/occurrence/1999-01-01/occurrence.parquet/*');
+----
+0
+
+endloop

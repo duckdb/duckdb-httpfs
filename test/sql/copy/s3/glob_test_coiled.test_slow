@@ -1,0 +1,141 @@
+# name: test/sql/copy/s3/glob_test_coiled.test_slow
+# description: Glob stress tests on coiled-datasets — decade-partitioned time series (~1620 files)
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+set ignore_error_messages
+
+statement ok
+CREATE SECRET coiled (TYPE s3, SCOPE 's3://coiled-datasets', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-east-2');
+
+statement ok
+CALL enable_logging('HTTP');
+
+#
+# P1: Basic single-level glob
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/1990s/parquet/*.parquet');
+----
+521
+
+endloop
+
+# Both modes should give same result; compare request counts
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+1	0	1	0	0
+1	0	1	0	0
+
+#
+# P2: Mid-path wildcard — wildcard at decade level
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/*s/parquet/*');
+----
+1620
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+6	0	6	0	0
+46	0	46	0	0
+
+#
+# P3: Recursive glob **
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/1990s/**/*.parquet');
+----
+521
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+2	0	2	0	0
+2	0	2	0	0
+
+#
+# P5: Fail-fast on non-existent path
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/*s/non-existing-folder/*');
+----
+0
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+3	0	3	0	0
+46	0	46	0	0
+
+#
+# P6: Glob + LIMIT — early termination
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM (FROM glob('s3://coiled-datasets/timeseries/*s/parquet/*.parquet') LIMIT 100);
+----
+100
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+3	0	3	0	0
+1	0	1	0	0

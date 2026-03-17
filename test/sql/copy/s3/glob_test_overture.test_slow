@@ -1,0 +1,135 @@
+# name: test/sql/copy/s3/glob_test_overture.test_slow
+# description: Glob stress tests on overturemaps — 2-level hive (theme/type) with many part files (526 total)
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+set ignore_error_messages
+
+statement ok
+CREATE SECRET overture (TYPE s3, SCOPE 's3://overturemaps-us-west-2', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-west-2');
+
+statement ok
+CALL enable_logging('HTTP');
+
+#
+# P1: Specific type — places/place (small, 8 files)
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/theme=places/type=place/*.parquet');
+----
+8
+
+endloop
+
+query IIIII
+FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
+----
+1	0	1	0	0
+1	0	1	0	0
+
+#
+# P2: Wildcard at type level — all types under base theme
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/theme=base/type=*/*.parquet');
+----
+174
+
+endloop
+
+#
+# P3: Full recursive glob — all themes, all types
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/**/*.parquet');
+----
+526
+
+endloop
+
+#
+# P5: Fail-fast — non-existent type
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/theme=*/type=non_existing/*.parquet');
+----
+0
+
+endloop
+
+#
+# P6: Recursive + LIMIT — early termination on large set
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM (FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/**/*.parquet') LIMIT 10);
+----
+10
+
+endloop
+
+#
+# P2c: Wildcard at theme level, specific type pattern
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/theme=base/type=water/*.parquet');
+----
+24
+
+endloop
