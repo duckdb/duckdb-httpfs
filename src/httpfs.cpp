@@ -801,6 +801,19 @@ optional_idx TryParseContentLength(const HTTPHeaders &headers) {
 }
 
 void HTTPFileHandle::LoadFileInfo() {
+
+	// Check if file is already fully cached (e.g., from a prior force_download_threshold open)
+	if (http_params.state) {
+		const auto &cache_entry = http_params.state->GetCachedFile(path);
+		auto handle = cache_entry->GetHandle();
+		if (handle->Initialized()) {
+			length = handle->GetSize();
+			cached_file_handle = std::move(handle);
+			initialized = true;
+			return;
+		}
+	}
+
 	if (initialized || force_full_download) {
 		// already initialized or we specifically do not want to perform a head request and just run a direct download
 		return;
