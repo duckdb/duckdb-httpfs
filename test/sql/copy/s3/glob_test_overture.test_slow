@@ -145,7 +145,7 @@ endloop
 
 # Wire cost assertions
 query IIIII
-SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') FROM duckdb_logs_parsed('HTTP') WHERE response.status = 'OK_200' GROUP BY context_id ORDER BY context_id;
+SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') FROM duckdb_logs_parsed('HTTP') WHERE response.status IN ('OK_200', 'PartialContent_206', 'Accepted_202') GROUP BY context_id ORDER BY context_id;
 ----
 1	0	1	0	0
 1	0	1	0	0
