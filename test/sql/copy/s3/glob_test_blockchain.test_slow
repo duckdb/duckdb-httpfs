@@ -79,6 +79,40 @@ SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/blocks/date=2024-
 endloop
 
 #
+# P2b: Date range across tables — December 2024 (wildcard after narrow prefix btc/)
+# no-recursive faster: delimiter walks tables then date prefix vs recursive enumerates all of btc/
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/*/date=2024-12-*/*');
+----
+62
+
+endloop
+
+#
+# P2c: Wildcard at chain level — single date across chains (btc, eth, ...)
+# recursive faster: prefix is v1.0/ which is small, recursive avoids per-chain directory walks
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/*/transactions/date=2024-12-12/*');
+----
+2
+
+endloop
+
+#
 # P5: Fail-fast — non-existent table
 #
 
@@ -106,5 +140,9 @@ FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), su
 13	0	13	0	0
 32	0	32	0	0
 1	0	1	0	0
+77	0	77	0	0
+13	0	13	0	0
+16	0	16	0	0
+36	0	36	0	0
 1	0	1	0	0
 1	0	1	0	0
