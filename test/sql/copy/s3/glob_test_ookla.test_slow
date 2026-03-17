@@ -100,7 +100,7 @@ FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), su
 ----
 1	0	1	0	0
 1	0	1	0	0
-5	0	5	0	0
+1	0	1	0	0
 1	0	1	0	0
 1	0	1	0	0
 1	0	1	0	0
