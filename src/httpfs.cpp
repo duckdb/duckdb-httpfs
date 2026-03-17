@@ -952,7 +952,7 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			current_cache->Insert(path, GetCacheEntry());
 		}
 
-		if (should_full_download || !SkipBuffer()) {
+		if (!should_full_download && !SkipBuffer()) {
 			// Initialize the read buffer now that we know the file exists
 			AllocateReadBuffer(opener);
 		}
