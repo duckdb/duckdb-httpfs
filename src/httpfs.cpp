@@ -943,14 +943,16 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		const auto always_download = force_full_download;
 		const auto meets_threshold = (length < http_params.force_download_threshold) && (length != 0);
 
-		if (has_cache_state || meets_threshold || always_download) {
+		const auto should_full_download = has_cache_state || meets_threshold || always_download;
+
+		if (should_full_download) {
 			FullDownload(hfs, should_write_cache);
 		}
 		if (should_write_cache) {
 			current_cache->Insert(path, GetCacheEntry());
 		}
 
-		if (!SkipBuffer()) {
+		if (should_full_download || !SkipBuffer()) {
 			// Initialize the read buffer now that we know the file exists
 			AllocateReadBuffer(opener);
 		}
