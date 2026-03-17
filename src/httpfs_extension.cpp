@@ -110,7 +110,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto callback_httpfs_client_implementation = [](ClientContext &context, SetScope scope, Value &parameter) {
 		auto &config = DBConfig::GetConfig(context);
 		string value = StringValue::Get(parameter);
-		if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+		auto &http_util = config.GetHTTPUtil();
+		if (http_util.GetName() == "WasmHTTPUtils") {
 			if (value == "wasm" || value == "default") {
 				return;
 			}
@@ -119,14 +120,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 		}
 #ifndef EMSCRIPTEN
 		if (value == "curl" || value == "default") {
-			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil-Curl") {
-				config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+			if (http_util.GetName() != "HTTPFSUtil-Curl") {
+				config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>());
 			}
 			return;
 		}
 		if (value == "httplib") {
-			if (!config.http_util || config.http_util->GetName() != "HTTPFSUtil") {
-				config.http_util = make_shared_ptr<HTTPFSUtil>();
+			if (http_util.GetName() != "HTTPFSUtil") {
+				config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
 			}
 			return;
 		}
@@ -140,13 +141,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Automatically fetch AWS credentials from environment variables.", LogicalType::BOOLEAN,
 	                          Value::BOOLEAN(true));
 
-	if (config.http_util && config.http_util->GetName() == "WasmHTTPUtils") {
+	auto &http_util = config.GetHTTPUtil();
+	if (http_util.GetName() == "WasmHTTPUtils") {
 		// Already handled, do not override
 	} else {
 #ifndef EMSCRIPTEN
-		config.http_util = make_shared_ptr<HTTPFSCurlUtil>();
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>());
 #else
-		config.http_util = make_shared_ptr<HTTPFSUtil>();
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
 #endif
 	}
 

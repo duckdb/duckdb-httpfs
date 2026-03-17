@@ -24,7 +24,7 @@
 
 namespace duckdb {
 
-shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
+HTTPUtil &HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		return opener->GetHTTPUtil();
 	}
@@ -409,8 +409,8 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 	FileOpenerInfo info;
 	info.file_path = file.path;
 
-	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util->InitializeParameters(opener, info);
+	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util.InitializeParameters(opener, info);
 
 	auto secret_manager = FileOpener::TryGetSecretManager(opener);
 	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
