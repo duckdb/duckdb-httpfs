@@ -29,6 +29,7 @@ struct HTTPFSParams : public HTTPParams {
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
 	bool pre_merged_headers = false;
+	idx_t force_download_threshold = 0;
 
 	// Additional fields needs to be appended at the end and need to be propagated to duckdb-wasm
 	// TODO: make this unnecessary

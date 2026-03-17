@@ -34,6 +34,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("http_retries", "HTTP retries on I/O error", LogicalType::UBIGINT, Value(3));
 	config.AddExtensionOption("http_retry_wait_ms", "Time between retries", LogicalType::UBIGINT, Value(100));
 	config.AddExtensionOption("force_download", "Forces upfront download of file", LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("force_download_threshold",
+	                          "Forces upfront download of files smaller than the given size in bytes",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 	config.AddExtensionOption("auto_fallback_to_full_download",
 	                          "Allows automatically falling back to full file downloads when possible.",
 	                          LogicalType::BOOLEAN, Value(true));
