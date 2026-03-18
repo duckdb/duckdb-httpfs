@@ -754,6 +754,8 @@ void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache)
 		should_write_cache = false;
 	} else {
 		length = cached_file_handle->GetSize();
+		// No need to cache metadata for fully downloaded files
+		should_write_cache = false;
 	}
 }
 
@@ -938,6 +940,16 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 
 			if (found) {
 				InitializeFromCacheEntry(value);
+
+				// If a full file download exists in HTTPState, reuse it
+				// instead of falling through to range requests that may not be supported.
+				if (http_params.state) {
+					auto &cache_entry = http_params.state->GetCachedFile(path);
+					auto handle = cache_entry->GetHandle();
+					if (handle->Initialized()) {
+						cached_file_handle = std::move(handle);
+					}
+				}
 
 				if (flags.OpenForReading() && !SkipBuffer()) {
 					AllocateReadBuffer(opener);
