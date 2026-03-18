@@ -754,6 +754,8 @@ void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache)
 		should_write_cache = false;
 	} else {
 		length = cached_file_handle->GetSize();
+		// No need to cache metadata for fully downloaded files
+		should_write_cache = false;
 	}
 }
 
