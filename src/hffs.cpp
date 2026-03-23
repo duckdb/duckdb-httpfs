@@ -46,7 +46,8 @@ static bool IsSupportedHFRepoType(const string &repo_type) {
 	return repo_type == "datasets" || repo_type == "spaces" || repo_type == "buckets";
 }
 
-HFFileHandle::~HFFileHandle() {};
+HFFileHandle::~HFFileHandle() {
+}
 
 unique_ptr<HTTPClient> HFFileHandle::CreateClient() {
 	return http_params.http_util.InitializeClient(http_params, parsed_url.endpoint);
@@ -218,8 +219,8 @@ vector<OpenFileInfo> HuggingFaceFileSystem::Glob(const string &path, FileOpener 
 
 	FileOpenerInfo info;
 	info.file_path = path;
-	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util->InitializeParameters(opener, info);
+	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util.InitializeParameters(opener, info);
 	auto &http_params = params->Cast<HTTPFSParams>();
 	SetParams(http_params, path, opener);
 	auto http_state = HTTPState::TryGetState(opener).get();
@@ -293,8 +294,8 @@ unique_ptr<HTTPFileHandle> HuggingFaceFileSystem::CreateHandle(const OpenFileInf
 	FileOpenerInfo info;
 	info.file_path = file.path;
 
-	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util->InitializeParameters(opener, info);
+	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util.InitializeParameters(opener, info);
 	SetParams(params->Cast<HTTPFSParams>(), file.path, opener);
 
 	return duckdb::make_uniq<HFFileHandle>(*this, std::move(parsed_url), file, flags, std::move(params));

@@ -24,7 +24,7 @@
 
 namespace duckdb {
 
-shared_ptr<HTTPUtil> HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
+HTTPUtil &HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		return opener->GetHTTPUtil();
 	}
@@ -47,6 +47,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	// Setting lookups
 	FileOpener::TryGetCurrentSetting(opener, "http_timeout", result->timeout, info);
 	FileOpener::TryGetCurrentSetting(opener, "force_download", result->force_download, info);
+	FileOpener::TryGetCurrentSetting(opener, "force_download_threshold", result->force_download_threshold, info);
 	FileOpener::TryGetCurrentSetting(opener, "auto_fallback_to_full_download", result->auto_fallback_to_full_download,
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retries", result->retries, info);
@@ -303,7 +304,17 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 			    if (!hfh.http_params.unsafe_disable_etag_checks && !hfh.etag.empty() && response.HasHeader("ETag")) {
 				    string responseEtag = response.GetHeaderValue("ETag");
 
-				    if (!responseEtag.empty() && responseEtag != hfh.etag) {
+				    // Strip surrounding quotes for comparison: some S3-compatible backends
+				    // (e.g. NetApp ONTAP) omit quotes in ListObjectsV2 XML ETags, while
+				    // HTTP headers include them per RFC 7232
+				    auto strip_quotes = [](const string &etag) -> string {
+					    if (etag.size() >= 2 && etag.front() == '"' && etag.back() == '"') {
+						    return etag.substr(1, etag.size() - 2);
+					    }
+					    return etag;
+				    };
+
+				    if (!responseEtag.empty() && strip_quotes(responseEtag) != strip_quotes(hfh.etag)) {
 					    if (global_metadata_cache) {
 						    global_metadata_cache->Erase(handle.path);
 					    }
@@ -408,8 +419,8 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 	FileOpenerInfo info;
 	info.file_path = file.path;
 
-	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util->InitializeParameters(opener, info);
+	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util.InitializeParameters(opener, info);
 
 	auto secret_manager = FileOpener::TryGetSecretManager(opener);
 	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
@@ -753,6 +764,8 @@ void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache)
 		should_write_cache = false;
 	} else {
 		length = cached_file_handle->GetSize();
+		// No need to cache metadata for fully downloaded files
+		should_write_cache = false;
 	}
 }
 
@@ -800,6 +813,19 @@ optional_idx TryParseContentLength(const HTTPHeaders &headers) {
 }
 
 void HTTPFileHandle::LoadFileInfo() {
+
+	// Check if file is already fully cached (e.g., from a prior force_download_threshold open)
+	if (http_params.state) {
+		const auto &cache_entry = http_params.state->GetCachedFile(path);
+		auto handle = cache_entry->GetHandle();
+		if (handle->Initialized()) {
+			length = handle->GetSize();
+			cached_file_handle = std::move(handle);
+			initialized = true;
+			return;
+		}
+	}
+
 	if (initialized || force_full_download) {
 		// already initialized or we specifically do not want to perform a head request and just run a direct download
 		return;
@@ -925,6 +951,16 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			if (found) {
 				InitializeFromCacheEntry(value);
 
+				// If a full file download exists in HTTPState, reuse it
+				// instead of falling through to range requests that may not be supported.
+				if (http_params.state) {
+					auto &cache_entry = http_params.state->GetCachedFile(path);
+					auto handle = cache_entry->GetHandle();
+					if (handle->Initialized()) {
+						cached_file_handle = std::move(handle);
+					}
+				}
+
 				if (flags.OpenForReading() && !SkipBuffer()) {
 					AllocateReadBuffer(opener);
 				}
@@ -937,14 +973,21 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	LoadFileInfo();
 
 	if (flags.OpenForReading()) {
-		if ((http_params.state && length == 0) || force_full_download) {
+
+		const auto has_cache_state = (http_params.state != nullptr) && (length == 0);
+		const auto always_download = force_full_download;
+		const auto meets_threshold = (length < http_params.force_download_threshold) && (length != 0);
+
+		const auto should_full_download = has_cache_state || meets_threshold || always_download;
+
+		if (should_full_download) {
 			FullDownload(hfs, should_write_cache);
 		}
 		if (should_write_cache) {
 			current_cache->Insert(path, GetCacheEntry());
 		}
 
-		if (!SkipBuffer()) {
+		if (!should_full_download && !SkipBuffer()) {
 			// Initialize the read buffer now that we know the file exists
 			AllocateReadBuffer(opener);
 		}
@@ -980,7 +1023,7 @@ void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
 
 HTTPFileHandle::~HTTPFileHandle() {
 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
-};
+}
 
 string HTTPFSUtil::GetName() const {
 	return "HTTPFS";

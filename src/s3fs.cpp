@@ -697,8 +697,8 @@ unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, 
 	auto parsed_s3_url = S3UrlParse(file.path, auth_params);
 	ReadQueryParams(parsed_s3_url.query_param, auth_params);
 
-	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util->InitializeParameters(opener, info);
+	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util.InitializeParameters(opener, info);
 
 	return duckdb::make_uniq<S3FileHandle>(*this, file, flags, std::move(params), auth_params,
 	                                       S3ConfigParams::ReadFrom(opener));
@@ -1065,8 +1065,8 @@ bool S3GlobResult::ExpandNextPath() const {
 	}
 
 	FileOpenerInfo info = {glob_pattern};
-	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto http_params = http_util->InitializeParameters(opener, info);
+	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto http_params = http_util.InitializeParameters(opener, info);
 	const vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
 
 	vector<OpenFileInfo> s3_keys;

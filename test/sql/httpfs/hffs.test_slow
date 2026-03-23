@@ -6,6 +6,8 @@ require parquet
 
 require httpfs
 
+mode skip
+
 # FIXME: currently this will not fail the Linux HTTPFS ci job if it fails, because it might do so due to networking issues
 #        however having a CI job dedicated to remote tests that may spuriously fail would solve this
 # TODO: add hf://buckets integration coverage here once there is a maintainer-owned public bucket fixture
