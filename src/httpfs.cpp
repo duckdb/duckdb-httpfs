@@ -304,7 +304,17 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 			    if (!hfh.http_params.unsafe_disable_etag_checks && !hfh.etag.empty() && response.HasHeader("ETag")) {
 				    string responseEtag = response.GetHeaderValue("ETag");
 
-				    if (!responseEtag.empty() && responseEtag != hfh.etag) {
+				    // Strip surrounding quotes for comparison: some S3-compatible backends
+				    // (e.g. NetApp ONTAP) omit quotes in ListObjectsV2 XML ETags, while
+				    // HTTP headers include them per RFC 7232
+				    auto strip_quotes = [](const string &etag) -> string {
+					    if (etag.size() >= 2 && etag.front() == '"' && etag.back() == '"') {
+						    return etag.substr(1, etag.size() - 2);
+					    }
+					    return etag;
+				    };
+
+				    if (!responseEtag.empty() && strip_quotes(responseEtag) != strip_quotes(hfh.etag)) {
 					    if (global_metadata_cache) {
 						    global_metadata_cache->Erase(handle.path);
 					    }
