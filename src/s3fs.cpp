@@ -825,7 +825,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 
 		const string &bucket = parsed_url.bucket;
 		if (keys_by_bucket.find(bucket) == keys_by_bucket.end()) {
-			string bucket_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length() - 1);
+			string bucket_path = parsed_url.path.substr(0, parsed_url.path.length() - parsed_url.key.length());
 			if (bucket_path.empty()) {
 				bucket_path = "/";
 			}
@@ -877,12 +877,13 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 			string http_url = url_info.http_proto + url_info.host + S3FileSystem::UrlEncode(url_info.path) + "?" +
 			                  http_query_param_for_url;
 			string bucket_url = url_info.prefix + bucket + "/";
-			auto handle = OpenFile(bucket_url, FileFlags::FILE_FLAGS_READ, opener);
-
-			auto &s3_handle = handle->Cast<S3FileHandle>();
+			FileOpenerInfo info = {bucket_url};
+			auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
+			auto http_params = http_util.InitializeParameters(opener, info);
+			S3HTTPInput http_input(std::move(http_params), url_info.auth_params, S3ConfigParams::ReadFrom(opener));
 
 			string result;
-			auto res = HTTPFileSystem::PostRequest(*s3_handle.http_input, http_url, headers, result,
+			auto res = HTTPFileSystem::PostRequest(http_input, http_url, headers, result,
 			                                       const_cast<char *>(body.data()), body.length());
 
 			if (res->status != HTTPStatusCode::OK_200) {
