@@ -574,7 +574,7 @@ unordered_map<string, string> HTTPFSCurlUtil::ParseGetParameters(const string &t
 }
 
 string HTTPFSCurlUtil::GetName() const {
-	return "HTTPFS-Curl";
+	return "HTTPFSUtil-Curl";
 }
 
 } // namespace duckdb
