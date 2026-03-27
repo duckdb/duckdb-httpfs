@@ -197,7 +197,7 @@ S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerI
 	}
 
 	const char *secret_types[] = {"s3", "r2", "gcs", "aws"};
-	S3KeyValueReader secret_reader(*opener, info, secret_types, 3);
+	S3KeyValueReader secret_reader(*opener, info, secret_types, 4);
 
 	return ReadFrom(secret_reader, info.file_path);
 }
