@@ -119,16 +119,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 			                            "`default` are currently supported for duckdb-wasm");
 		}
 #ifndef EMSCRIPTEN
+		// HTTP util classes are supposed to be cheap, which provides acces to the HTTP client, and generally don't
+		// store resources (i.e., connection pool).
 		if (value == "curl" || value == "default") {
-			if (http_util.GetName() != "HTTPFSUtil-Curl") {
-				config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>());
-			}
+			config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>());
 			return;
 		}
 		if (value == "httplib") {
-			if (http_util.GetName() != "HTTPFSUtil") {
-				config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
-			}
+			config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
 			return;
 		}
 #endif
