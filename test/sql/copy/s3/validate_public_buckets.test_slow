@@ -1,0 +1,69 @@
+# name: test/sql/copy/s3/validate_public_buckets.test_slow
+# description: Validate that public S3 buckets used for glob stress tests are accessible
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+set ignore_error_messages
+
+#
+# coiled-datasets (us-east-2) — decade-partitioned time series
+#
+
+statement ok
+CREATE SECRET coiled (TYPE s3, SCOPE 's3://coiled-datasets', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-east-2');
+
+query I
+SELECT count(*) > 0 FROM glob('s3://coiled-datasets/timeseries/1990s/parquet/*.parquet');
+----
+true
+
+#
+# ookla-open-data (us-west-2) — 3-level hive: type=/year=/quarter=/
+#
+
+statement ok
+CREATE SECRET ookla (TYPE s3, SCOPE 's3://ookla-open-data', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-west-2');
+
+query I
+SELECT count(*) > 0 FROM glob('s3://ookla-open-data/parquet/performance/type=fixed/year=2024/quarter=*/*.parquet');
+----
+true
+
+#
+# overturemaps-us-west-2 (us-west-2) — 2-level hive: theme=/type=/ + many part files
+#
+
+statement ok
+CREATE SECRET overture (TYPE s3, SCOPE 's3://overturemaps-us-west-2', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-west-2');
+
+query I
+SELECT count(*) > 0 FROM glob('s3://overturemaps-us-west-2/release/2026-02-18.0/theme=places/type=place/*.parquet');
+----
+true
+
+#
+# gbif-open-data-us-east-1 (us-east-1) — date snapshots with many part files
+#
+
+statement ok
+CREATE SECRET gbif (TYPE s3, SCOPE 's3://gbif-open-data-us-east-1', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-east-1');
+
+query I
+SELECT count(*) > 0 FROM glob('s3://gbif-open-data-us-east-1/occurrence/2023-04-01/occurrence.parquet/*');
+----
+true
+
+#
+# aws-public-blockchain (us-east-2) — chain/table/date= daily partitions
+#
+
+statement ok
+CREATE SECRET blockchain (TYPE s3, SCOPE 's3://aws-public-blockchain', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-east-2');
+
+query I
+SELECT count(*) > 0 FROM glob('s3://aws-public-blockchain/v1.0/btc/transactions/date=2024-01-01/*');
+----
+true
