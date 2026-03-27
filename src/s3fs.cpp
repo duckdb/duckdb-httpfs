@@ -173,22 +173,6 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 	this->SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR);
 }
 
-S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
-	S3AuthParams params;
-
-	params.region = DEFAULT_REGION_ENV_VAR;
-	params.region = REGION_ENV_VAR;
-	params.access_key_id = ACCESS_KEY_ENV_VAR;
-	params.secret_access_key = SECRET_KEY_ENV_VAR;
-	params.session_token = SESSION_TOKEN_ENV_VAR;
-	params.endpoint = DUCKDB_ENDPOINT_ENV_VAR;
-	params.kms_key_id = DUCKDB_KMS_KEY_ID_ENV_VAR;
-	params.use_ssl = DUCKDB_USE_SSL_ENV_VAR;
-	params.requester_pays = DUCKDB_REQUESTER_PAYS_ENV_VAR;
-
-	return params;
-}
-
 S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
 
 	// Without a FileOpener we can not access settings nor secrets: return empty auth params
