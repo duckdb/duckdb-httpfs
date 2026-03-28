@@ -1,5 +1,8 @@
 #include "http_state.hpp"
 #include "duckdb/main/query_profiler.hpp"
+#include "yyjson.hpp"
+
+using namespace duckdb_yyjson;
 
 namespace duckdb {
 
@@ -95,6 +98,28 @@ void HTTPState::WriteProfilingInformation(std::ostream &ss) {
 	ss << "││" + QueryProfiler::DrawPadded(del, TOTAL_BOX_WIDTH - 4) + "││\n";
 	ss << "│└───────────────────────────────────┘│\n";
 	ss << "└─────────────────────────────────────┘\n";
+}
+
+//! Write HTTP profiling information to JSON format
+//! NOTE: This method is intended to override ClientContextState::WriteProfilingInformationToJSON
+//! when DuckDB adds it to the base class. Until then, it's implemented without override.
+void HTTPState::WriteProfilingInformationToJSON(duckdb_yyjson::yyjson_mut_doc *doc, duckdb_yyjson::yyjson_mut_val *obj) {
+	// Skip if no HTTP activity
+	if (IsEmpty()) {
+		return;
+	}
+
+	// Create httpfs_stats object with structured metrics
+	auto httpfs_stats = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_uint(doc, httpfs_stats, "total_bytes_received", total_bytes_received);
+	yyjson_mut_obj_add_uint(doc, httpfs_stats, "total_bytes_sent", total_bytes_sent);
+	yyjson_mut_obj_add_uint(doc, httpfs_stats, "head_count", head_count);
+	yyjson_mut_obj_add_uint(doc, httpfs_stats, "get_count", get_count);
+	yyjson_mut_obj_add_uint(doc, httpfs_stats, "put_count", put_count);
+	yyjson_mut_obj_add_uint(doc, httpfs_stats, "post_count", post_count);
+	yyjson_mut_obj_add_uint(doc, httpfs_stats, "delete_count", delete_count);
+
+	yyjson_mut_obj_add_val(doc, obj, "httpfs_stats", httpfs_stats);
 }
 
 //! Get cache entry, create if not exists
