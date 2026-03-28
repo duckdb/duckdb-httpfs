@@ -185,8 +185,8 @@ public:
 		curl_easy_setopt(*curl, CURLOPT_TIMEOUT, http_params.timeout);
 		// set connection timeout
 		curl_easy_setopt(*curl, CURLOPT_CONNECTTIMEOUT, http_params.timeout);
-		// accept content as-is (i.e no decompressing)
-		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, NULL);
+		// advertise supported compression encodings and let CURL decompress responses automatically
+		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, "");
 		// follow redirects
 		curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, http_params.follow_location ? 1L : 0L);
 
