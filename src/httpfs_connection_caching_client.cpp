@@ -71,16 +71,20 @@ unique_ptr<HTTPResponse> HTTPFSCachedUtil::SendRequest(BaseRequest &request, uni
 	if (!client && caching) {
 		auto cached_client = FindCachedCandidate(request.proto_host_port);
 		if (cached_client) {
-			if (request.params.logger && request.params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
-				request.params.logger->WriteLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
-				                                HTTPFSInfoLogType::ConstructLogMessage("connection_cache_hit", request.proto_host_port));
+			if (request.params.logger &&
+			    request.params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+				request.params.logger->WriteLog(
+				    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+				    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_hit", request.proto_host_port));
 			}
 			cached_client->Initialize(request.params);
 			client = std::move(cached_client);
 		} else {
-			if (request.params.logger && request.params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
-				request.params.logger->WriteLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
-				                                HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", request.proto_host_port));
+			if (request.params.logger &&
+			    request.params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+				request.params.logger->WriteLog(
+				    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+				    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", request.proto_host_port));
 			}
 		}
 	}
