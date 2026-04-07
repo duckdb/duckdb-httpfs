@@ -126,9 +126,10 @@ public:
 		return added_path;
 	}
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
-		base_url = curl_url();
+		base_url = proto_host_port;
+		curl_base_url = curl_url();
 		string normalized_path = NormalizePathToBeAdded(proto_host_port);
-		curl_url_set(base_url, CURLUPART_URL, normalized_path.c_str(), 0);
+		curl_url_set(curl_base_url, CURLUPART_URL, normalized_path.c_str(), 0);
 		stored_bearer_token = "";
 		stored_cert_file_path = "";
 		Initialize(http_params);
@@ -214,7 +215,7 @@ public:
 	}
 
 	~HTTPFSCurlClient() {
-		curl_url_cleanup(base_url);
+		curl_url_cleanup(curl_base_url);
 		DestroyCurlGlobal();
 	}
 
@@ -231,7 +232,7 @@ public:
 		{
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -291,7 +292,7 @@ public:
 
 		CURLcode res;
 		{
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -341,7 +342,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
 
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -374,7 +375,7 @@ public:
 
 		CURLcode res;
 		{
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -416,7 +417,7 @@ public:
 
 		CURLcode res;
 		{
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -513,7 +514,7 @@ private:
 	unique_ptr<CURLHandle> curl;
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
-	CURLU *base_url = nullptr;
+	CURLU *curl_base_url = nullptr;
 	string stored_bearer_token;
 	string stored_cert_file_path;
 

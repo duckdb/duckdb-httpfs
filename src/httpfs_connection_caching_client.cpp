@@ -54,9 +54,9 @@ unique_ptr<HTTPClient> HTTPFSCachedUtil::InitializeClient(HTTPParams &http_param
 	return HTTPFSCurlUtil::InitializeClient(http_params, proto_host_port);
 }
 
-void HTTPFSCachedUtil::CloseClient(const string &proto_host_port, unique_ptr<HTTPClient> &&client) {
+void HTTPFSCachedUtil::CloseClient(unique_ptr<HTTPClient> &&client) {
 	// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
-	StoreCachedCandidate(proto_host_port, std::move(client));
+	StoreCachedCandidate(client->base_url, std::move(client));
 }
 
 bool HTTPFSCachedUtil::EnableCaching(BaseRequest &request) {

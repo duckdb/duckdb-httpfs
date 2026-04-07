@@ -61,9 +61,6 @@ public:
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 
-	//! Close a client — may cache it for reuse
-	virtual void CloseClient(const string &proto_host_port, unique_ptr<HTTPClient> &&client);
-
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
 
@@ -84,7 +81,7 @@ public:
 class HTTPFSCachedUtil : public HTTPFSCurlUtil {
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
-	void CloseClient(const string &proto_host_port, unique_ptr<HTTPClient> &&client) override;
+	void CloseClient(unique_ptr<HTTPClient> &&client) override;
 	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override;
 
 	string GetName() const override;
