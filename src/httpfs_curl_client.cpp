@@ -559,8 +559,7 @@ unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params,
 			client->Initialize(http_params);
 			return client;
 		}
-		if (http_params.logger &&
-		    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+		if (http_params.logger && http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
 			http_params.logger->WriteLog(
 			    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
 			    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", proto_host_port));
