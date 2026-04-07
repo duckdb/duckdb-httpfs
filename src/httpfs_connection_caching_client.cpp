@@ -55,6 +55,7 @@ unique_ptr<HTTPClient> HTTPFSCachedUtil::InitializeClient(HTTPParams &http_param
 }
 
 void HTTPFSCachedUtil::CloseClient(const string &proto_host_port, unique_ptr<HTTPClient> &&client) {
+	// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
 	StoreCachedCandidate(proto_host_port, std::move(client));
 }
 
@@ -70,11 +71,17 @@ unique_ptr<HTTPResponse> HTTPFSCachedUtil::SendRequest(BaseRequest &request, uni
 	if (!client && caching) {
 		auto cached_client = FindCachedCandidate(request.proto_host_port);
 		if (cached_client) {
-			// fprintf(stderr, "SendRequest: reusing cached client for %s\n", request.proto_host_port.c_str());
+			if (request.params.logger && request.params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+				request.params.logger->WriteLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+				                                HTTPFSInfoLogType::ConstructLogMessage("connection_cache_hit", request.proto_host_port));
+			}
 			cached_client->Initialize(request.params);
 			client = std::move(cached_client);
 		} else {
-			// fprintf(stderr, "SendRequest: no cached client for %s\n", request.proto_host_port.c_str());
+			if (request.params.logger && request.params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+				request.params.logger->WriteLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+				                                HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", request.proto_host_port));
+			}
 		}
 	}
 	if (!client) {

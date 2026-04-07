@@ -1,9 +1,23 @@
 #pragma once
 
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/logging/log_type.hpp"
 #include <mutex>
 
 namespace duckdb {
+
+class HTTPFSInfoLogType {
+public:
+	static constexpr const char *NAME = "HTTPFSInfo";
+	static constexpr LogLevel LEVEL = LogLevel::LOG_INFO;
+
+	static string ConstructLogMessage(const string &type, const string &host, const string &payload = "") {
+		if (payload.empty()) {
+			return "{\"type\":\"" + type + "\",\"host\":\"" + host + "\"}";
+		}
+		return "{\"type\":\"" + type + "\",\"host\":\"" + host + "\",\"payload\":\"" + payload + "\"}";
+	}
+};
 class HTTPLogger;
 class FileOpener;
 struct FileOpenerInfo;
