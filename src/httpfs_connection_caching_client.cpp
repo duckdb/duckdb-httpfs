@@ -5,45 +5,56 @@
 
 namespace duckdb {
 
-unique_ptr<HTTPClient> HTTPFSCurlUtil::FindCachedCandidate(const string &proto_host_port) {
-	if (proto_host_port.empty()) {
+//===--------------------------------------------------------------------===//
+// HTTPClientConnectionCache
+//===--------------------------------------------------------------------===//
+
+unique_ptr<HTTPClient> HTTPClientConnectionCache::Find(const string &base_url) {
+	if (base_url.empty()) {
 		return nullptr;
 	}
-	if (auto lock = std::unique_lock<std::mutex>(cached_httpclients_mutex, std::try_to_lock)) {
-		for (idx_t i = 0; i < cached_httpclients.size(); i++) {
-			if (cached_httpclients[i].proto_host_port == proto_host_port && cached_httpclients[i].cached_client) {
-				return std::move(cached_httpclients[i].cached_client);
+	if (auto lock = std::unique_lock<std::mutex>(mutex, std::try_to_lock)) {
+		for (idx_t i = 0; i < entries.size(); i++) {
+			if (entries[i] && entries[i]->base_url == base_url) {
+				return std::move(entries[i]);
 			}
 		}
 	}
 	return nullptr;
 }
 
-void HTTPFSCurlUtil::StoreCachedCandidate(const string &proto_host_port, unique_ptr<HTTPClient> &&client) {
-	if (proto_host_port.empty()) {
+void HTTPClientConnectionCache::Store(unique_ptr<HTTPClient> &&client) {
+	if (!client || client->base_url.empty()) {
 		return;
 	}
-	if (auto lock = std::unique_lock<std::mutex>(cached_httpclients_mutex, std::try_to_lock)) {
-		if (cached_httpclients.empty()) {
-			cached_httpclients.resize(64);
+	if (auto lock = std::unique_lock<std::mutex>(mutex, std::try_to_lock)) {
+		if (entries.empty()) {
+			entries.resize(64);
 		}
 		// First prefer an empty slot
-		for (idx_t i = 0; i < cached_httpclients.size(); i++) {
-			if (!cached_httpclients[i].cached_client) {
-				cached_httpclients[i].cached_client = std::move(client);
-				cached_httpclients[i].proto_host_port = proto_host_port;
+		for (idx_t i = 0; i < entries.size(); i++) {
+			if (!entries[i]) {
+				entries[i] = std::move(client);
 				return;
 			}
 		}
 		// Else evict one at random
 		{
 			RandomEngine engine;
-			size_t index = engine.NextRandomInteger() % cached_httpclients.size();
-			cached_httpclients[index].cached_client = std::move(client);
-			cached_httpclients[index].proto_host_port = proto_host_port;
+			size_t index = engine.NextRandomInteger() % entries.size();
+			entries[index] = std::move(client);
 		}
 	}
 }
+
+void HTTPClientConnectionCache::Clear() {
+	lock_guard<std::mutex> lck(mutex);
+	entries.clear();
+}
+
+//===--------------------------------------------------------------------===//
+// HTTPFSCurlUtil — connection caching
+//===--------------------------------------------------------------------===//
 
 bool HTTPFSCurlUtil::EnableCaching(BaseRequest &request) {
 	if (!connection_caching_enabled) {
@@ -56,14 +67,13 @@ bool HTTPFSCurlUtil::EnableCaching(BaseRequest &request) {
 }
 
 void HTTPFSCurlUtil::ClearCachedConnections() {
-	lock_guard<std::mutex> lck(cached_httpclients_mutex);
-	cached_httpclients.clear();
+	connection_cache.Clear();
 }
 
 void HTTPFSCurlUtil::CloseClient(unique_ptr<HTTPClient> &&client) {
 	if (connection_caching_enabled) {
 		// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
-		StoreCachedCandidate(client->base_url, std::move(client));
+		connection_cache.Store(std::move(client));
 	}
 }
 
@@ -75,7 +85,7 @@ unique_ptr<HTTPResponse> HTTPFSCurlUtil::CachingSendRequest(BaseRequest &request
 	bool caller_owns_client = client != nullptr;
 
 	if (!client) {
-		auto cached_client = FindCachedCandidate(request.proto_host_port);
+		auto cached_client = connection_cache.Find(request.proto_host_port);
 		if (cached_client) {
 			if (request.params.logger &&
 			    request.params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
@@ -99,7 +109,7 @@ unique_ptr<HTTPResponse> HTTPFSCurlUtil::CachingSendRequest(BaseRequest &request
 
 	// Only cache if the caller didn't provide the client — otherwise the caller manages its lifecycle
 	if (!caller_owns_client) {
-		StoreCachedCandidate(request.proto_host_port, std::move(client));
+		connection_cache.Store(std::move(client));
 	}
 	return std::move(r);
 }

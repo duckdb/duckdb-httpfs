@@ -53,9 +53,15 @@ struct HTTPFSParams : public HTTPParams {
 	// TODO: make this unnecessary
 };
 
-struct CachedHTTPClient {
-	unique_ptr<HTTPClient> cached_client;
-	string proto_host_port;
+class HTTPClientConnectionCache {
+public:
+	unique_ptr<HTTPClient> Find(const string &base_url);
+	void Store(unique_ptr<HTTPClient> &&client);
+	void Clear();
+
+private:
+	std::mutex mutex {};
+	std::vector<unique_ptr<HTTPClient>> entries;
 };
 
 class HTTPFSUtil : public HTTPUtil {
@@ -96,10 +102,7 @@ private:
 	unique_ptr<HTTPResponse> BaseSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client);
 
 	bool EnableCaching(BaseRequest &request);
-	unique_ptr<HTTPClient> FindCachedCandidate(const string &proto_host_port);
-	void StoreCachedCandidate(const string &proto_host_port, unique_ptr<HTTPClient> &&client);
-	std::mutex cached_httpclients_mutex {};
-	std::vector<CachedHTTPClient> cached_httpclients;
+	HTTPClientConnectionCache connection_cache;
 };
 
 #endif

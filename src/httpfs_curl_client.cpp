@@ -548,7 +548,7 @@ private:
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
 	if (connection_caching_enabled) {
-		auto client = FindCachedCandidate(proto_host_port);
+		auto client = connection_cache.Find(proto_host_port);
 		if (client) {
 			if (http_params.logger &&
 			    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
