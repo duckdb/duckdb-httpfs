@@ -47,7 +47,7 @@ SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%';
 
 # Clear the cache
 statement ok
-CALL clear_cached_connections();
+CALL clear_httpfs_connection_cache();
 
 # Request after clearing — should be a cache miss again
 statement ok

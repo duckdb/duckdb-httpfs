@@ -56,7 +56,7 @@ true
 
 # Clear cache and verify miss on next request
 statement ok
-CALL clear_cached_connections();
+CALL clear_httpfs_connection_cache();
 
 statement ok
 CREATE TABLE hits_after_clear AS SELECT count(*) AS cnt FROM duckdb_logs WHERE message LIKE '%connection_cache_miss%';

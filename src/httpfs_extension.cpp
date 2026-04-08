@@ -18,13 +18,13 @@
 
 namespace duckdb {
 
-static void ClearCachedConnectionsFunction(ClientContext &context, TableFunctionInput &, DataChunk &) {
+static void ClearHTTPFSConnectionCacheFunction(ClientContext &context, TableFunctionInput &, DataChunk &) {
 	auto &config = DBConfig::GetConfig(context);
 	auto &httpfs_util = static_cast<HTTPFSUtil &>(config.GetHTTPUtil());
 	httpfs_util.ClearCachedConnections();
 }
 
-static unique_ptr<FunctionData> ClearCachedConnectionsBind(ClientContext &, TableFunctionBindInput &,
+static unique_ptr<FunctionData> ClearHTTPFSConnectionCacheBind(ClientContext &, TableFunctionBindInput &,
                                                            vector<LogicalType> &return_types, vector<string> &names) {
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("success");
@@ -183,9 +183,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	provider->SetAll();
 
-	auto clear_cached_connections =
-	    TableFunction("clear_cached_connections", {}, ClearCachedConnectionsFunction, ClearCachedConnectionsBind);
-	loader.RegisterFunction(clear_cached_connections);
+	auto clear_httpfs_connection_cache =
+	    TableFunction("clear_httpfs_connection_cache", {}, ClearHTTPFSConnectionCacheFunction, ClearHTTPFSConnectionCacheBind);
+	loader.RegisterFunction(clear_httpfs_connection_cache);
 
 	CreateS3SecretFunctions::Register(loader);
 	CreateBearerTokenFunctions::Register(loader);
