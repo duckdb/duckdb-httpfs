@@ -14,9 +14,9 @@ unique_ptr<HTTPClient> HTTPClientConnectionCache::Find(const string &base_url) {
 		return nullptr;
 	}
 	if (auto lock = std::unique_lock<std::mutex>(mutex, std::try_to_lock)) {
-		for (idx_t i = 0; i < entries.size(); i++) {
-			if (entries[i] && entries[i]->GetBaseUrl() == base_url) {
-				return std::move(entries[i]);
+		for (auto &entry : entries) {
+			if (entry && entry->GetBaseUrl() == base_url) {
+				return std::move(entry);
 			}
 		}
 	}
@@ -32,9 +32,9 @@ void HTTPClientConnectionCache::Store(unique_ptr<HTTPClient> &&client) {
 			entries.resize(64);
 		}
 		// First prefer an empty slot
-		for (idx_t i = 0; i < entries.size(); i++) {
-			if (!entries[i]) {
-				entries[i] = std::move(client);
+		for (auto &entry : entries) {
+			if (!entry) {
+				entry = std::move(client);
 				return;
 			}
 		}
