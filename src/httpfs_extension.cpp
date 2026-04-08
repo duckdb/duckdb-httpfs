@@ -17,6 +17,18 @@
 
 namespace duckdb {
 
+static void ClearHTTPFSConnectionCacheFunction(ClientContext &, TableFunctionInput &, DataChunk &) {
+	// NOP — connection caching not yet implemented on this branch
+}
+
+static unique_ptr<FunctionData> ClearHTTPFSConnectionCacheBind(ClientContext &, TableFunctionBindInput &,
+                                                               vector<LogicalType> &return_types,
+                                                               vector<string> &names) {
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("success");
+	return nullptr;
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
 	auto &fs = instance.GetFileSystem();
@@ -135,6 +147,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	};
 	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
 	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
+	// NOP — connection caching not yet implemented on this branch
+	config.AddExtensionOption("httpfs_connection_caching", "Enable connection caching for HTTP requests",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	config.AddExtensionOption("enable_global_s3_configuration",
 	                          "Automatically fetch AWS credentials from environment variables.", LogicalType::BOOLEAN,
 	                          Value::BOOLEAN(true));
@@ -152,6 +168,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	provider->SetAll();
+
+	auto clear_httpfs_connection_cache = TableFunction(
+	    "clear_httpfs_connection_cache", {}, ClearHTTPFSConnectionCacheFunction, ClearHTTPFSConnectionCacheBind);
+	loader.RegisterFunction(clear_httpfs_connection_cache);
 
 	CreateS3SecretFunctions::Register(loader);
 	CreateBearerTokenFunctions::Register(loader);
