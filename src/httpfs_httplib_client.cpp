@@ -7,8 +7,7 @@ namespace duckdb {
 
 class HTTPFSClient : public HTTPClient {
 public:
-	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) {
-		base_url = proto_host_port;
+	HTTPFSClient(HTTPFSParams &http_params, const string &proto_host_port) : HTTPClient(proto_host_port) {
 		client = make_uniq<duckdb_httplib_openssl::Client>(proto_host_port);
 		Initialize(http_params);
 	}

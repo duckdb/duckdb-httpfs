@@ -126,8 +126,7 @@ public:
 
 		return added_path;
 	}
-	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
-		base_url = proto_host_port;
+	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) : HTTPClient(proto_host_port) {
 		curl_base_url = curl_url();
 		string normalized_path = NormalizePathToBeAdded(proto_host_port);
 		curl_url_set(curl_base_url, CURLUPART_URL, normalized_path.c_str(), 0);
