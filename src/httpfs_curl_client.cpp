@@ -522,7 +522,7 @@ private:
 	}
 
 	static void InitCurlGlobal() {
-		GetRefLock();
+		const std::lock_guard<std::mutex> lock(GetRefLock());
 		if (httpfs_client_count == 0) {
 			curl_global_init(CURL_GLOBAL_DEFAULT);
 		}
