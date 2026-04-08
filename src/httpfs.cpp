@@ -1029,6 +1029,10 @@ HTTPFileHandle::~HTTPFileHandle() {
 	}
 }
 
+void HTTPFSUtil::ClearCachedConnections() {
+	// no-op by default
+}
+
 string HTTPFSUtil::GetName() const {
 	return "HTTPFS";
 }

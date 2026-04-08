@@ -6,10 +6,13 @@
 
 namespace duckdb {
 
-class HTTPFSInfoLogType {
+class HTTPFSInfoLogType : public LogType {
 public:
 	static constexpr const char *NAME = "HTTPFSInfo";
 	static constexpr LogLevel LEVEL = LogLevel::LOG_INFO;
+
+	HTTPFSInfoLogType() : LogType(NAME, LEVEL) {
+	}
 
 	static string ConstructLogMessage(const string &type, const string &host, const string &payload = "") {
 		if (payload.empty()) {
@@ -61,6 +64,9 @@ public:
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 
+	//! Clear any cached connections
+	virtual void ClearCachedConnections();
+
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
 
@@ -73,6 +79,7 @@ class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 	void CloseClient(unique_ptr<HTTPClient> &&client) override;
+	void ClearCachedConnections() override;
 	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override;
 
 	static unordered_map<string, string> ParseGetParameters(const string &text);

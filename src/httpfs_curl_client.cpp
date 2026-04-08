@@ -1,5 +1,6 @@
 #include "httpfs_client.hpp"
 #include "http_state.hpp"
+#include "duckdb/logging/logger.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
@@ -546,6 +547,25 @@ private:
 };
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
+	if (connection_caching_enabled) {
+		auto client = FindCachedCandidate(proto_host_port);
+		if (client) {
+			if (http_params.logger &&
+			    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+				http_params.logger->WriteLog(
+				    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+				    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_hit", proto_host_port));
+			}
+			client->Initialize(http_params);
+			return client;
+		}
+		if (http_params.logger &&
+		    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+			http_params.logger->WriteLog(
+			    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+			    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", proto_host_port));
+		}
+	}
 	auto client = make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
 	return std::move(client);
 }

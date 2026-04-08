@@ -55,6 +55,11 @@ bool HTTPFSCurlUtil::EnableCaching(BaseRequest &request) {
 	return true;
 }
 
+void HTTPFSCurlUtil::ClearCachedConnections() {
+	lock_guard<std::mutex> lck(cached_httpclients_mutex);
+	cached_httpclients.clear();
+}
+
 void HTTPFSCurlUtil::CloseClient(unique_ptr<HTTPClient> &&client) {
 	if (connection_caching_enabled) {
 		// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
