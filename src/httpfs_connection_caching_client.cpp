@@ -5,7 +5,7 @@
 
 namespace duckdb {
 
-unique_ptr<HTTPClient> HTTPFSCachedUtil::FindCachedCandidate(const string &proto_host_port) {
+unique_ptr<HTTPClient> HTTPFSCurlUtil::FindCachedCandidate(const string &proto_host_port) {
 	if (proto_host_port.empty()) {
 		return nullptr;
 	}
@@ -19,7 +19,7 @@ unique_ptr<HTTPClient> HTTPFSCachedUtil::FindCachedCandidate(const string &proto
 	return nullptr;
 }
 
-void HTTPFSCachedUtil::StoreCachedCandidate(const string &proto_host_port, unique_ptr<HTTPClient> &&client) {
+void HTTPFSCurlUtil::StoreCachedCandidate(const string &proto_host_port, unique_ptr<HTTPClient> &&client) {
 	if (proto_host_port.empty()) {
 		return;
 	}
@@ -45,30 +45,31 @@ void HTTPFSCachedUtil::StoreCachedCandidate(const string &proto_host_port, uniqu
 	}
 }
 
-unique_ptr<HTTPClient> HTTPFSCachedUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
-	auto client = FindCachedCandidate(proto_host_port);
-	if (client) {
-		client->Initialize(http_params);
-		return client;
+bool HTTPFSCurlUtil::EnableCaching(BaseRequest &request) {
+	if (!connection_caching_enabled) {
+		return false;
 	}
-	return HTTPFSCurlUtil::InitializeClient(http_params, proto_host_port);
-}
-
-void HTTPFSCachedUtil::CloseClient(unique_ptr<HTTPClient> &&client) {
-	// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
-	StoreCachedCandidate(client->base_url, std::move(client));
-}
-
-bool HTTPFSCachedUtil::EnableCaching(BaseRequest &request) {
-	// TODO: return false for proxied connections
+	if (!request.params.http_proxy.empty()) {
+		return false;
+	}
 	return true;
 }
 
-unique_ptr<HTTPResponse> HTTPFSCachedUtil::SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) {
-	bool caller_owns_client = client != nullptr;
-	bool caching = EnableCaching(request);
+void HTTPFSCurlUtil::CloseClient(unique_ptr<HTTPClient> &&client) {
+	if (connection_caching_enabled) {
+		// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
+		StoreCachedCandidate(client->base_url, std::move(client));
+	}
+}
 
-	if (!client && caching) {
+unique_ptr<HTTPResponse> HTTPFSCurlUtil::BaseSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) {
+	return HTTPUtil::SendRequest(request, client);
+}
+
+unique_ptr<HTTPResponse> HTTPFSCurlUtil::CachingSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) {
+	bool caller_owns_client = client != nullptr;
+
+	if (!client) {
 		auto cached_client = FindCachedCandidate(request.proto_host_port);
 		if (cached_client) {
 			if (request.params.logger &&
@@ -88,48 +89,21 @@ unique_ptr<HTTPResponse> HTTPFSCachedUtil::SendRequest(BaseRequest &request, uni
 			}
 		}
 	}
-	if (!client) {
-		client = InitializeClient(request.params, request.proto_host_port);
-	}
 
-	std::function<unique_ptr<HTTPResponse>(void)> on_request([&]() {
-		unique_ptr<HTTPResponse> response;
+	auto r = BaseSendRequest(request, client);
 
-		if (request.params.logger) {
-			request.have_request_timing = request.params.logger->ShouldLog(HTTPLogType::NAME, HTTPLogType::LEVEL);
-		}
-
-		try {
-			if (request.have_request_timing) {
-				request.request_start = Timestamp::GetCurrentTimestamp();
-			}
-			response = client->Request(request);
-		} catch (...) {
-			if (request.have_request_timing) {
-				request.request_end = Timestamp::GetCurrentTimestamp();
-			}
-			LogRequest(request, nullptr);
-			throw;
-		}
-		if (request.have_request_timing) {
-			request.request_end = Timestamp::GetCurrentTimestamp();
-		}
-		LogRequest(request, response ? response.get() : nullptr);
-		return response;
-	});
-
-	std::function<void(void)> on_retry([&]() { client = InitializeClient(request.params, request.proto_host_port); });
-
-	auto r = RunRequestWithRetry(on_request, request, on_retry);
 	// Only cache if the caller didn't provide the client — otherwise the caller manages its lifecycle
-	if (caching && !caller_owns_client) {
+	if (!caller_owns_client) {
 		StoreCachedCandidate(request.proto_host_port, std::move(client));
 	}
 	return std::move(r);
 }
 
-string HTTPFSCachedUtil::GetName() const {
-	return "HTTPFS-CachedConnection";
+unique_ptr<HTTPResponse> HTTPFSCurlUtil::SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) {
+	if (EnableCaching(request)) {
+		return CachingSendRequest(request, client);
+	}
+	return BaseSendRequest(request, client);
 }
 
 } // namespace duckdb

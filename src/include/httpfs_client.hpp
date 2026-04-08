@@ -72,19 +72,21 @@ public:
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+	void CloseClient(unique_ptr<HTTPClient> &&client) override;
+	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override;
 
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 
 	string GetName() const override;
-};
 
-class HTTPFSCachedUtil : public HTTPFSCurlUtil {
-public:
-	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
-	void CloseClient(unique_ptr<HTTPClient> &&client) override;
-	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override;
+	//! Whether connection caching is enabled
+	bool connection_caching_enabled = false;
 
-	string GetName() const override;
+private:
+	//! Send request with connection caching (acquire from pool, run, store back)
+	unique_ptr<HTTPResponse> CachingSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client);
+	//! Send request without caching (delegates to HTTPUtil::SendRequest)
+	unique_ptr<HTTPResponse> BaseSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client);
 
 	bool EnableCaching(BaseRequest &request);
 	unique_ptr<HTTPClient> FindCachedCandidate(const string &proto_host_port);

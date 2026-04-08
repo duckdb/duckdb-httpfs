@@ -137,23 +137,29 @@ static void LoadInternal(ExtensionLoader &loader) {
 			config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>());
 			return;
 		}
-		if (value == "connection-caching") {
-			config.SetHTTPUtil(make_shared_ptr<HTTPFSCachedUtil>());
-			return;
-		}
 		if (value == "httplib") {
 			config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
 			return;
 		}
 #endif
-		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib`, "
-		                            "`connection-caching` and `default` are currently supported");
+		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` "
+		                            "and `default` are currently supported");
 	};
 	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
 	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
-	// NOP — connection caching not yet implemented on this branch
+
+	auto callback_httpfs_connection_caching = [](ClientContext &context, SetScope scope, Value &parameter) {
+		auto &config = DBConfig::GetConfig(context);
+		auto &http_util = config.GetHTTPUtil();
+#ifndef EMSCRIPTEN
+		auto *curl_util = dynamic_cast<HTTPFSCurlUtil *>(&http_util);
+		if (curl_util) {
+			curl_util->connection_caching_enabled = BooleanValue::Get(parameter);
+		}
+#endif
+	};
 	config.AddExtensionOption("httpfs_connection_caching", "Enable connection caching for HTTP requests",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), callback_httpfs_connection_caching);
 
 	config.AddExtensionOption("enable_global_s3_configuration",
 	                          "Automatically fetch AWS credentials from environment variables.", LogicalType::BOOLEAN,
