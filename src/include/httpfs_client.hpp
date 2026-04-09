@@ -60,7 +60,7 @@ public:
 	void Clear();
 
 private:
-	mutex mutex {};
+	mutex cache_lock {};
 	std::vector<unique_ptr<HTTPClient>> entries;
 };
 
