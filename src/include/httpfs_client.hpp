@@ -1,8 +1,26 @@
 #pragma once
 
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/mutex.hpp"
+#include "duckdb/logging/log_type.hpp"
 
 namespace duckdb {
+
+class HTTPFSInfoLogType : public LogType {
+public:
+	static constexpr const char *NAME = "HTTPFSInfo";
+	static constexpr LogLevel LEVEL = LogLevel::LOG_INFO;
+
+	HTTPFSInfoLogType() : LogType(NAME, LEVEL) {
+	}
+
+	static string ConstructLogMessage(const string &type, const string &host, const string &payload = "") {
+		if (payload.empty()) {
+			return "{\"type\":\"" + type + "\",\"host\":\"" + host + "\"}";
+		}
+		return "{\"type\":\"" + type + "\",\"host\":\"" + host + "\",\"payload\":\"" + payload + "\"}";
+	}
+};
 class HTTPLogger;
 class FileOpener;
 struct FileOpenerInfo;
@@ -35,11 +53,25 @@ struct HTTPFSParams : public HTTPParams {
 	// TODO: make this unnecessary
 };
 
+class HTTPClientConnectionCache {
+public:
+	unique_ptr<HTTPClient> Find(const string &base_url);
+	void Store(unique_ptr<HTTPClient> &&client);
+	void Clear();
+
+private:
+	mutex cache_lock {};
+	std::vector<unique_ptr<HTTPClient>> entries;
+};
+
 class HTTPFSUtil : public HTTPUtil {
 public:
 	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+
+	//! Clear any cached connections
+	virtual void ClearCachedConnections();
 
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
@@ -52,10 +84,25 @@ public:
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+	void CloseClient(unique_ptr<HTTPClient> &&client) override;
+	void ClearCachedConnections() override;
+	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override;
 
 	static unordered_map<string, string> ParseGetParameters(const string &text);
 
 	string GetName() const override;
+
+	//! Whether connection caching is enabled
+	bool connection_caching_enabled = false;
+
+private:
+	//! Send request with connection caching (acquire from pool, run, store back)
+	unique_ptr<HTTPResponse> CachingSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client);
+	//! Send request without caching (delegates to HTTPUtil::SendRequest)
+	unique_ptr<HTTPResponse> BaseSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client);
+
+	bool EnableCaching(BaseRequest &request);
+	HTTPClientConnectionCache connection_cache;
 };
 
 #endif

@@ -6,6 +6,7 @@
 #include "s3fs.hpp"
 #include "hffs.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 #include "crypto.hpp"
@@ -17,8 +18,10 @@
 
 namespace duckdb {
 
-static void ClearHTTPFSConnectionCacheFunction(ClientContext &, TableFunctionInput &, DataChunk &) {
-	// NOP — connection caching not yet implemented on this branch
+static void ClearHTTPFSConnectionCacheFunction(ClientContext &context, TableFunctionInput &, DataChunk &) {
+	auto &config = DBConfig::GetConfig(context);
+	auto &httpfs_util = static_cast<HTTPFSUtil &>(config.GetHTTPUtil());
+	httpfs_util.ClearCachedConnections();
 }
 
 static unique_ptr<FunctionData> ClearHTTPFSConnectionCacheBind(ClientContext &, TableFunctionBindInput &,
@@ -36,6 +39,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	fs.RegisterSubSystem(make_uniq<HTTPFileSystem>());
 	fs.RegisterSubSystem(make_uniq<HuggingFaceFileSystem>());
 	fs.RegisterSubSystem(make_uniq<S3FileSystem>(BufferManager::GetBufferManager(instance)));
+
+	instance.GetLogManager().RegisterLogType(make_uniq<HTTPFSInfoLogType>());
 
 	auto &config = DBConfig::GetConfig(instance);
 
@@ -142,14 +147,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 			return;
 		}
 #endif
-		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` and "
-		                            "`default` are currently supported");
+		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `curl`, `httplib` "
+		                            "and `default` are currently supported");
 	};
 	config.AddExtensionOption("httpfs_client_implementation", "Select which is the HTTPUtil implementation to be used",
 	                          LogicalType::VARCHAR, "default", callback_httpfs_client_implementation);
-	// NOP — connection caching not yet implemented on this branch
+
+	auto callback_httpfs_connection_caching = [](ClientContext &context, SetScope scope, Value &parameter) {
+		auto &config = DBConfig::GetConfig(context);
+		auto &http_util = config.GetHTTPUtil();
+#ifndef EMSCRIPTEN
+		auto *curl_util = dynamic_cast<HTTPFSCurlUtil *>(&http_util);
+		if (curl_util) {
+			curl_util->connection_caching_enabled = BooleanValue::Get(parameter);
+		}
+#endif
+	};
 	config.AddExtensionOption("httpfs_connection_caching", "Enable connection caching for HTTP requests",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), callback_httpfs_connection_caching);
 
 	config.AddExtensionOption("enable_global_s3_configuration",
 	                          "Automatically fetch AWS credentials from environment variables.", LogicalType::BOOLEAN,

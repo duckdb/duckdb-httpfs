@@ -1,0 +1,68 @@
+# name: test/sql/connection_caching.test
+# description: Test connection caching behavior
+# group: [sql]
+
+require httpfs
+
+require parquet
+
+# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
+set ignore_error_messages
+
+statement ok
+SET enable_logging=true;
+
+statement ok
+CALL enable_logging('HTTPFSInfo');
+
+statement ok
+SET httpfs_connection_caching=true;
+
+# First request — should be a cache miss
+statement ok
+FROM 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_role_type.parquet';
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_miss%';
+----
+1
+
+# Second request to the same file — should be a cache hit
+statement ok
+FROM 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_role_type.parquet';
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%';
+----
+1
+
+# Different file on the same host — should still be a cache hit (same base_url)
+statement ok
+SELECT * FROM 'https://github.com/duckdb/duckdb/raw/9cf66f950dde0173e1a863a7659b3ecf11bf3978/data/csv/customer.csv';
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%';
+----
+2
+
+# Clear the cache
+statement ok
+CALL clear_httpfs_connection_cache();
+
+# Request after clearing — should be a cache miss again
+statement ok
+FROM 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_role_type.parquet';
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_miss%';
+----
+2
+
+# Request again — should be a cache hit
+statement ok
+FROM 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_role_type.parquet';
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%';
+----
+3

@@ -1,5 +1,6 @@
 #include "httpfs_client.hpp"
 #include "http_state.hpp"
+#include "duckdb/logging/logger.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
@@ -125,10 +126,10 @@ public:
 
 		return added_path;
 	}
-	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) {
-		base_url = curl_url();
+	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) : HTTPClient(proto_host_port) {
+		curl_base_url = curl_url();
 		string normalized_path = NormalizePathToBeAdded(proto_host_port);
-		curl_url_set(base_url, CURLUPART_URL, normalized_path.c_str(), 0);
+		curl_url_set(curl_base_url, CURLUPART_URL, normalized_path.c_str(), 0);
 		stored_bearer_token = "";
 		stored_cert_file_path = "";
 		Initialize(http_params);
@@ -214,7 +215,7 @@ public:
 	}
 
 	~HTTPFSCurlClient() {
-		curl_url_cleanup(base_url);
+		curl_url_cleanup(curl_base_url);
 		DestroyCurlGlobal();
 	}
 
@@ -230,7 +231,8 @@ public:
 		CURLcode res;
 		{
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
-			CURLU *url = curl_url_dup(base_url);
+			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -290,7 +292,7 @@ public:
 
 		CURLcode res;
 		{
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -340,7 +342,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
 
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -373,7 +375,7 @@ public:
 
 		CURLcode res;
 		{
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -415,7 +417,7 @@ public:
 
 		CURLcode res;
 		{
-			CURLU *url = curl_url_dup(base_url);
+			CURLU *url = curl_url_dup(curl_base_url);
 
 			string normalized_path = NormalizePathToBeAdded(info.path);
 			curl_url_set(url, CURLUPART_URL, normalized_path.c_str(), 0);
@@ -512,12 +514,12 @@ private:
 	unique_ptr<CURLHandle> curl;
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
-	CURLU *base_url = nullptr;
+	CURLU *curl_base_url = nullptr;
 	string stored_bearer_token;
 	string stored_cert_file_path;
 
-	static std::mutex &GetRefLock() {
-		static std::mutex mtx;
+	static mutex &GetRefLock() {
+		static mutex mtx;
 		return mtx;
 	}
 
@@ -544,6 +546,24 @@ private:
 };
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
+	if (connection_caching_enabled) {
+		auto client = connection_cache.Find(proto_host_port);
+		if (client) {
+			if (http_params.logger &&
+			    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+				http_params.logger->WriteLog(
+				    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+				    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_hit", proto_host_port));
+			}
+			client->Initialize(http_params);
+			return client;
+		}
+		if (http_params.logger && http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+			http_params.logger->WriteLog(
+			    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+			    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", proto_host_port));
+		}
+	}
 	auto client = make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
 	return std::move(client);
 }

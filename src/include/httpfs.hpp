@@ -10,8 +10,6 @@
 #include "http_metadata_cache.hpp"
 #include "httpfs_client.hpp"
 
-#include <mutex>
-
 namespace duckdb {
 
 class RangeRequestNotSupportedException {
@@ -106,7 +104,7 @@ public:
 	idx_t buffer_end;
 
 	// Used when file handle created with parallel access flag specified.
-	std::mutex mu;
+	mutex mu;
 
 	// Read buffer
 	AllocatedData read_buffer;
