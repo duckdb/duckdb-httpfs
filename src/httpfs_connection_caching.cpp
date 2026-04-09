@@ -1,4 +1,5 @@
 #include "httpfs_client.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -13,7 +14,7 @@ unique_ptr<HTTPClient> HTTPClientConnectionCache::Find(const string &base_url) {
 	if (base_url.empty()) {
 		return nullptr;
 	}
-	if (auto lock = std::unique_lock<std::mutex>(mutex, std::try_to_lock)) {
+	if (auto lock = unique_lock<std::mutex>(mutex, std::try_to_lock)) {
 		for (auto &entry : entries) {
 			if (entry && entry->GetBaseUrl() == base_url) {
 				return std::move(entry);
@@ -27,7 +28,7 @@ void HTTPClientConnectionCache::Store(unique_ptr<HTTPClient> &&client) {
 	if (!client || client->GetBaseUrl().empty()) {
 		return;
 	}
-	if (auto lock = std::unique_lock<std::mutex>(mutex, std::try_to_lock)) {
+	if (auto lock = unique_lock<std::mutex>(mutex, std::try_to_lock)) {
 		if (entries.empty()) {
 			entries.resize(64);
 		}

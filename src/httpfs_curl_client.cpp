@@ -518,8 +518,8 @@ private:
 	string stored_bearer_token;
 	string stored_cert_file_path;
 
-	static std::mutex &GetRefLock() {
-		static std::mutex mtx;
+	static mutex &GetRefLock() {
+		static mutex mtx;
 		return mtx;
 	}
 

@@ -1,8 +1,8 @@
 #pragma once
 
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/logging/log_type.hpp"
-#include <mutex>
 
 namespace duckdb {
 
@@ -60,7 +60,7 @@ public:
 	void Clear();
 
 private:
-	std::mutex mutex {};
+	mutex mutex {};
 	std::vector<unique_ptr<HTTPClient>> entries;
 };
 

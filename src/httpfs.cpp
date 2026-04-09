@@ -15,10 +15,8 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "http_state.hpp"
 
-#include <chrono>
 #include <map>
 #include <string>
-#include <thread>
 
 #include "s3fs.hpp"
 
@@ -557,7 +555,7 @@ bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_b
 		DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
 		// Update handle status within critical section for parallel access.
 		if (hfh.flags.RequireParallelAccess()) {
-			std::lock_guard<std::mutex> lck(hfh.mu);
+			std::lock_guard<mutex> lck(hfh.mu);
 			hfh.buffer_available = 0;
 			hfh.buffer_idx = 0;
 			hfh.file_offset = location + nr_bytes;
