@@ -13,10 +13,10 @@ statement ok
 SET enable_logging=true;
 
 statement ok
-CALL enable_logging('HTTPFSInfo');
+SET httpfs_connection_caching=true;
 
 statement ok
-SET httpfs_connection_caching=true;
+CALL enable_logging('HTTPFSInfo');
 
 # First request — should be a cache miss
 statement ok
