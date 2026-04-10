@@ -335,9 +335,15 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 			    }
 
 			    if (response.HasHeader("Content-Length")) {
-				    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
-				    if ((idx_t)content_length != buffer_out_len) {
-					    RangeRequestNotSupportedException::Throw();
+				    try {
+					    auto content_length = stoll(response.GetHeaderValue("Content-Length"));
+					    if ((idx_t)content_length != buffer_out_len) {
+						    RangeRequestNotSupportedException::Throw();
+					    }
+				    } catch (const std::invalid_argument &) {
+					    // Header value not parseable — skip range validation
+				    } catch (const std::out_of_range &) {
+					    // Header value overflows — skip range validation
 				    }
 			    }
 		    }
