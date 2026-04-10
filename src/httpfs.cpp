@@ -340,10 +340,10 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 					    if ((idx_t)content_length != buffer_out_len) {
 						    RangeRequestNotSupportedException::Throw();
 					    }
-				    } catch (const std::invalid_argument &) {
-					    // Header value not parseable — skip range validation
-				    } catch (const std::out_of_range &) {
-					    // Header value overflows — skip range validation
+				    } catch (const std::exception &e) {
+					    auto raw = response.GetHeaderValue("Content-Length");
+					    fprintf(stderr, "httpfs: unparseable Content-Length header: '%s' (%s), skipping range validation\n",
+					            raw.c_str(), e.what());
 				    }
 			    }
 		    }

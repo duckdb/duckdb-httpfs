@@ -256,8 +256,10 @@ public:
 				if (bytes_received != content_length_received) {
 					// Something is off, might happen in case of unreliable network
 				}
-			} catch (...) {
-				// Header value not parseable — ignore, bytes_received is authoritative
+			} catch (const std::exception &e) {
+				auto raw = request_info->header_collection.back().GetHeaderValue("content-length");
+				fprintf(stderr, "httpfs: unparseable content-length header: '%s' (%s), using body size %zu\n",
+				        raw.c_str(), e.what(), (size_t)bytes_received);
 			}
 		}
 
