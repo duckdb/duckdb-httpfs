@@ -157,8 +157,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 		auto &config = DBConfig::GetConfig(context);
 		auto &http_util = config.GetHTTPUtil();
 #ifndef EMSCRIPTEN
-		auto *curl_util = dynamic_cast<HTTPFSCurlUtil *>(&http_util);
-		if (curl_util) {
+		if (http_util.GetName() == "HTTPFS-Curl") {
+			auto *curl_util = static_cast<HTTPFSCurlUtil *>(&http_util);
 			curl_util->connection_caching_enabled = BooleanValue::Get(parameter);
 		}
 #endif
