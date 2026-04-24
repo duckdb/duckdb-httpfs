@@ -27,6 +27,8 @@ protected:
 	static unique_ptr<BaseSecret> CreateS3SecretFromSettings(ClientContext &context, CreateSecretInput &input);
 	//! Function for the "config" provider: creates secret from parameters passed by user
 	static unique_ptr<BaseSecret> CreateS3SecretFromConfig(ClientContext &context, CreateSecretInput &input);
+	//! gcs/credential_chain — fetches an OAuth2 access token via Google Application Default Credentials
+	static unique_ptr<BaseSecret> CreateGCSSecretFromCredentialChain(ClientContext &context, CreateSecretInput &input);
 
 	//! Helper function to set named params of secret function
 	static void SetBaseNamedParams(CreateSecretFunction &function, string &type);

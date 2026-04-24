@@ -2,6 +2,12 @@
 #include "s3fs.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/common/http_util.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/main/client_context.hpp"
+
+#include <cctype>
+#include <cstdio>
 
 namespace duckdb {
 
@@ -254,6 +260,224 @@ void CreateS3SecretFunctions::RegisterCreateSecretFunction(ExtensionLoader &load
 	CreateSecretFunction from_empty_config_fun2 = {type, "config", CreateS3SecretFromConfig};
 	SetBaseNamedParams(from_empty_config_fun2, type);
 	loader.RegisterFunction(from_empty_config_fun2);
+
+	if (type == "gcs") {
+		CreateSecretFunction credential_chain_fun = {type, "credential_chain", CreateGCSSecretFromCredentialChain};
+		loader.RegisterFunction(credential_chain_fun);
+	}
+}
+
+//
+// Google Application Default Credentials (ADC) chain.
+//
+// Phase 1 supports two sources, in standard ADC order:
+//   2. ~/.config/gcloud/application_default_credentials.json (developer laptops)
+//   4. GCE metadata server (GCE/GKE/Cloud Run/Cloud Functions/Cloud Build)
+//
+// Sources 1 (service-account JSON key, requires JWT signing) and 3 (workload
+// identity federation) are not yet implemented.
+//
+// Each source returns AdcSourceResult{token, error}:
+//   - token non-empty: success, use this token
+//   - token empty + error empty: source not applicable (try next)
+//   - token empty + error non-empty: source attempted but failed (record and try next)
+//
+// JSON parsing here uses crude string extraction. Sufficient for the
+// well-formed output of gcloud and the Google token endpoint, but should be
+// replaced with yyjson before merging upstream.
+//
+
+namespace {
+struct AdcSourceResult {
+	string token;
+	string error;
+};
+} // namespace
+
+static string ExtractJsonString(const string &json, const string &key) {
+	string needle = "\"" + key + "\"";
+	auto pos = json.find(needle);
+	if (pos == string::npos) {
+		throw IOException("Field '%s' not found in JSON", key);
+	}
+	pos = json.find('"', pos + needle.size());
+	if (pos == string::npos) {
+		throw IOException("Malformed JSON near '%s'", key);
+	}
+	auto end = json.find('"', pos + 1);
+	if (end == string::npos) {
+		throw IOException("Unterminated string for '%s'", key);
+	}
+	return json.substr(pos + 1, end - pos - 1);
+}
+
+static string UrlEncode(const string &s) {
+	string out;
+	out.reserve(s.size());
+	for (unsigned char c : s) {
+		if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+			out += (char)c;
+		} else {
+			char buf[4];
+			std::snprintf(buf, sizeof(buf), "%%%02X", c);
+			out += buf;
+		}
+	}
+	return out;
+}
+
+// Source 2: gcloud user credentials.
+// Reads ~/.config/gcloud/application_default_credentials.json, exchanges the
+// refresh token at oauth2.googleapis.com/token for a 1h access token.
+static AdcSourceResult TryFetchTokenFromGcloudUserCreds(ClientContext &context) {
+	AdcSourceResult result;
+	const char *home = std::getenv("HOME");
+	if (!home) {
+		return result; // not applicable
+	}
+	string adc_path = string(home) + "/.config/gcloud/application_default_credentials.json";
+
+	LocalFileSystem fs;
+	if (!fs.FileExists(adc_path)) {
+		return result; // not applicable — chain falls through silently
+	}
+
+	try {
+		auto handle = fs.OpenFile(adc_path, {FileOpenFlags::FILE_FLAGS_READ});
+		auto file_size = fs.GetFileSize(*handle);
+		string adc(file_size, '\0');
+		fs.Read(*handle, (void *)adc.data(), file_size);
+
+		string client_id = ExtractJsonString(adc, "client_id");
+		string client_secret = ExtractJsonString(adc, "client_secret");
+		string refresh_token = ExtractJsonString(adc, "refresh_token");
+
+		string body = "client_id=" + UrlEncode(client_id) + "&client_secret=" + UrlEncode(client_secret) +
+		              "&refresh_token=" + UrlEncode(refresh_token) + "&grant_type=refresh_token";
+
+		string url = "https://oauth2.googleapis.com/token";
+		auto &http_util = HTTPUtil::Get(*context.db);
+		auto http_params = http_util.InitializeParameters(context, url);
+		HTTPHeaders headers;
+		headers["Content-Type"] = "application/x-www-form-urlencoded";
+		PostRequestInfo post_request(url, headers, *http_params, const_data_ptr_cast(body.data()), body.size());
+		auto response = http_util.Request(post_request);
+
+		if (!response->Success()) {
+			result.error = StringUtil::Format("token endpoint returned status %d: %s", (int)response->status,
+			                                  post_request.buffer_out);
+			return result;
+		}
+		result.token = ExtractJsonString(post_request.buffer_out, "access_token");
+	} catch (std::exception &e) {
+		result.error = e.what();
+	}
+	return result;
+}
+
+// Source 4: GCE/GKE/Cloud Run/Cloud Functions metadata server.
+// HTTP GET against the link-local metadata service with the required
+// `Metadata-Flavor: Google` header. Short timeout so non-GCE hosts fail fast
+// rather than hanging the user's CREATE SECRET.
+static AdcSourceResult TryFetchTokenFromMetadataServer(ClientContext &context) {
+	AdcSourceResult result;
+	string url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+
+	try {
+		auto &http_util = HTTPUtil::Get(*context.db);
+		auto http_params = http_util.InitializeParameters(context, url);
+		http_params->timeout = 2; // seconds — don't hang on non-GCE hosts
+
+		HTTPHeaders headers;
+		headers["Metadata-Flavor"] = "Google";
+
+		string body;
+		GetRequestInfo get_request(
+		    url, headers, *http_params, [](const HTTPResponse &) -> bool { return true; },
+		    [&](const_data_ptr_t data, idx_t data_length) -> bool {
+			    body.append(const_char_ptr_cast(data), data_length);
+			    return true;
+		    });
+		auto response = http_util.Request(get_request);
+
+		if (!response->Success()) {
+			// Network error / DNS failure / refused = not on GCE. Silently skip.
+			if (response->HasRequestError()) {
+				return result;
+			}
+			// HTTP-level error (e.g. 403, 500): we reached the server but were rejected.
+			// Surface as an error so users on GCE see what went wrong.
+			result.error = StringUtil::Format("metadata server returned status %d", (int)response->status);
+			return result;
+		}
+		result.token = ExtractJsonString(body, "access_token");
+	} catch (std::exception &e) {
+		// Network/DNS exceptions = not on GCE. Silently skip.
+	}
+	return result;
+}
+
+unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateGCSSecretFromCredentialChain(ClientContext &context,
+                                                                                   CreateSecretInput &input) {
+	auto scope = input.scope;
+	if (scope.empty()) {
+		scope.push_back("gcs://");
+		scope.push_back("gs://");
+	}
+
+	string error_summary;
+	string token;
+
+	auto try_source = [&](const string &name, const std::function<AdcSourceResult()> &fn) -> bool {
+		auto result = fn();
+		if (!result.token.empty()) {
+			token = std::move(result.token);
+			return true;
+		}
+		if (!result.error.empty()) {
+			error_summary += "  - " + name + ": " + result.error + "\n";
+		}
+		return false;
+	};
+
+	if (!try_source("gcloud user credentials", [&] { return TryFetchTokenFromGcloudUserCreds(context); })) {
+		try_source("GCE metadata server", [&] { return TryFetchTokenFromMetadataServer(context); });
+	}
+
+	if (token.empty()) {
+		string detail = error_summary.empty() ? "  (no source was applicable)\n" : error_summary;
+		throw IOException(
+		    "Could not obtain a Google ADC access token for GCS. Tried the following sources:\n" + detail +
+		    "\nTo configure ADC: run `gcloud auth application-default login` for laptop dev, "
+		    "or run on a GCE/GKE/Cloud Run instance with an attached service account.");
+	}
+
+	auto secret = make_uniq<KeyValueSecret>(scope, input.type, input.provider, input.name);
+	secret->secret_map["bearer_token"] = token;
+
+	// Enable the existing httpfs refresh hook (s3fs.cpp:737) so a 401 on a
+	// subsequent file open re-invokes this function and yields a fresh token.
+	// Addresses two practical cases:
+	//   1. Persistent secret used in a new session after the access token has
+	//      expired (~1h). Loaded token is dead → first open 401s → refresh
+	//      fires → new token → retry succeeds.
+	//   2. Long-running session that opens a new file after expiry — same path.
+	// What this does NOT address: mid-stream 401 during a single file read,
+	// and proactive refresh (no 401 ever fired). Those are deferred.
+	secret->secret_map["refresh"] = Value("auto");
+	child_list_t<Value> refresh_fields;
+	for (const auto &named_param : input.options) {
+		refresh_fields.push_back({StringUtil::Lower(named_param.first), named_param.second});
+	}
+	if (refresh_fields.empty()) {
+		// Value::STRUCT requires at least one field; carry a marker that our
+		// function happily ignores on the recreate call.
+		refresh_fields.push_back({"_provider", Value("credential_chain")});
+	}
+	secret->secret_map["refresh_info"] = Value::STRUCT(refresh_fields);
+
+	secret->redact_keys = {"bearer_token"};
+	return std::move(secret);
 }
 
 void CreateBearerTokenFunctions::Register(ExtensionLoader &loader) {
