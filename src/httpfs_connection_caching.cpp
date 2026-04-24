@@ -112,7 +112,7 @@ unique_ptr<HTTPResponse> HTTPFSCurlUtil::CachingSendRequest(BaseRequest &request
 	if (!caller_owns_client) {
 		connection_cache.Store(std::move(client));
 	}
-	return std::move(r);
+	return r;
 }
 
 unique_ptr<HTTPResponse> HTTPFSCurlUtil::SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) {
