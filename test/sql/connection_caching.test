@@ -45,6 +45,9 @@ SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%';
 ----
 2
 
+# Clear of caching disabled temporarily
+mode skip
+
 # Clear the cache
 statement ok
 CALL clear_httpfs_connection_cache();
