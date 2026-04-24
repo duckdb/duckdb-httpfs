@@ -210,9 +210,9 @@ void S3MultiPartUpload::FlushBuffer(shared_ptr<S3WriteBuffer> write_buffer) {
 		unique_lock<mutex> lck(uploads_in_progress_lock);
 		// check if there are upload threads available
 #ifndef SAME_THREAD_UPLOAD
-		if (uploads_in_progress >= config_params.max_upload_threads) {
+		while (uploads_in_progress >= config_params.max_upload_threads) {
 			// there are not - wait for one to become available
-			uploads_in_progress_cv.wait(lck, [&] { return uploads_in_progress < config_params.max_upload_threads; });
+			uploads_in_progress_cv.Wait(&uploads_in_progress_lock);
 		}
 #endif
 		uploads_in_progress++;
@@ -262,7 +262,9 @@ void S3MultiPartUpload::FlushAllBuffers() {
 	}
 	unique_lock<mutex> lck(uploads_in_progress_lock);
 #ifndef SAME_THREAD_UPLOAD
-	final_flush_cv.wait(lck, [&] { return uploads_in_progress == 0; });
+	while (uploads_in_progress != 0) {
+		final_flush_cv.Wait(&uploads_in_progress_lock);
+	}
 #endif
 
 	RethrowIOError();

@@ -69,8 +69,8 @@ public:
 
 	//! Synchronization for upload threads
 	mutex uploads_in_progress_lock;
-	std::condition_variable uploads_in_progress_cv;
-	std::condition_variable final_flush_cv;
+	absl::CondVar uploads_in_progress_cv;
+	absl::CondVar final_flush_cv;
 	uint16_t uploads_in_progress;
 
 	//! Etags are stored for each part

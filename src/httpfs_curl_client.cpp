@@ -529,12 +529,12 @@ private:
 	string stored_cert_file_path;
 
 	static mutex &GetRefLock() {
-		static mutex mtx;
+		static mutex mtx(absl::kConstInit);
 		return mtx;
 	}
 
 	static void InitCurlGlobal() {
-		const std::lock_guard<std::mutex> lock(GetRefLock());
+		const std::lock_guard<mutex> lock(GetRefLock());
 		if (httpfs_client_count == 0) {
 			curl_global_init(CURL_GLOBAL_DEFAULT);
 		}
