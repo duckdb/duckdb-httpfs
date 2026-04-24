@@ -375,7 +375,6 @@ void S3FileHandle::Close() {
 }
 
 void S3FileHandle::FinalizeUpload() {
-	auto &s3fs = (S3FileSystem &)file_system;
 	if (flags.OpenForWriting() && multi_part_upload) {
 		multi_part_upload->Finalize();
 	}
