@@ -802,14 +802,14 @@ bool S3FileSystem::CanHandleFile(const string &fpath) {
 void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener) {
 	auto handle = OpenFile(path, FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS, opener);
 	if (!handle) {
-		throw IOException({{"errno", "404"}}, "Could not remove file \"%s\": %s", path, "No such file or directory");
+		throw IOException({{"errno", "404"}}, "Could not remove file \"" + path + "\": No such file or directory");
 	}
 
 	auto &s3fh = handle->Cast<S3FileHandle>();
 	auto res = DeleteRequest(*handle, s3fh.path, {});
 	if (res->status != HTTPStatusCode::OK_200 && res->status != HTTPStatusCode::NoContent_204) {
-		throw IOException({{"errno", to_string(static_cast<int>(res->status))}}, "Could not remove file \"%s\": %s",
-		                  path, res->GetError());
+		throw IOException({{"errno", to_string(static_cast<int>(res->status))}},
+		                  "Could not remove file \"" + path + "\": " + res->GetError());
 	}
 }
 
