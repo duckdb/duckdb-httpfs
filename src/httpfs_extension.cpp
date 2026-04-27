@@ -186,7 +186,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto clear_httpfs_connection_cache = TableFunction(
 	    "clear_httpfs_connection_cache", {}, ClearHTTPFSConnectionCacheFunction, ClearHTTPFSConnectionCacheBind);
-	loader.RegisterFunction(clear_httpfs_connection_cache);
+	// No registration (for now), due to issues with loading httpfs with partially intialized duckdb
+	// loader.RegisterFunction(clear_httpfs_connection_cache);
 
 	CreateS3SecretFunctions::Register(loader);
 	CreateBearerTokenFunctions::Register(loader);
