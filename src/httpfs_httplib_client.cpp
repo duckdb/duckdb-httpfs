@@ -122,8 +122,11 @@ public:
 		// First assign body, this is the body that will be uploaded
 		req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
 		auto transformed_req = TransformResult(client->send(req));
-		// Then, after actual re-quest, re-assign body to the response value of the POST request
-		transformed_req->body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
+		// For non-2xx responses, httplib does not invoke content_receiver,
+		// so buffer_out will be empty. Fall back to the response body.
+		if (info.buffer_out.empty() && !transformed_req->body.empty()) {
+			info.buffer_out = transformed_req->body;
+		}
 		return transformed_req;
 	}
 
