@@ -1132,6 +1132,11 @@ bool S3GlobResult::ExpandNextPath() const {
 				// We have at least 100 files per folder, this should make so that hierarchical listing price is
 				// amortized folder of hierarchical glob
 
+				// TODO: instead of starting from scratch, we could reuse the flat listing results
+				// by remembering which directories were fully covered in the first page, and only
+				// doing hierarchical listing for the remaining directories. This would avoid
+				// throwing away the first request's data.
+
 				// Start from scratch:
 				// 1. clear keys
 				s3_keys_tmp.clear();
