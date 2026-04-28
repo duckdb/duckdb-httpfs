@@ -802,7 +802,9 @@ bool S3FileSystem::CanHandleFile(const string &fpath) {
 void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener) {
 	auto handle = OpenFile(path, FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS, opener);
 	if (!handle) {
-		throw IOException({{"errno", "404"}}, "Could not remove file \"" + path + "\": No such file or directory");
+		throw IOException({{"errno", "404"}}, "Could not remove file \"%s\": %s", path, string("No such file or directory"));```
+
+Maybe like this? Forcing cast to string, where deduction just works (and same also below).
 	}
 
 	auto &s3fh = handle->Cast<S3FileHandle>();
