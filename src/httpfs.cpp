@@ -22,6 +22,13 @@
 
 namespace duckdb {
 
+namespace {
+
+//! Byte length used in the Range probe (bytes=0..N-1) when HEAD does not return 200 OK.
+constexpr idx_t HTTP_RANGE_FILE_SIZE_PROBE_LENGTH = 2;
+
+} // namespace
+
 HTTPUtil &HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	if (opener) {
 		return opener->GetHTTPUtil();
@@ -847,16 +854,40 @@ void HTTPFileHandle::LoadFileInfo() {
 			length = 0;
 			return;
 		} else {
-			// HEAD request fail, use Range request for another try (read only one byte)
+			// Many HTTP APIs do not implement HEAD (405) or return 501. A follow-up Range probe (bytes=0-1)
+			// is inappropriate and often fails; defer to a full GET in Initialize() instead.
+			if (flags.OpenForReading() && (res->status == HTTPStatusCode::MethodNotAllowed_405 ||
+			                               res->status == HTTPStatusCode::NotImplemented_501)) {
+				length = 0;
+				initialized = true;
+				return;
+			}
+			// HEAD request fail, use Range request for another try (read first two bytes)
 			if (flags.OpenForReading() && res->status != HTTPStatusCode::NotFound_404 &&
 			    res->status != HTTPStatusCode::MovedPermanently_301) {
-				auto range_res = hfs.GetRangeRequest(*this, path, {}, 0, nullptr, 2);
-				if (range_res->status != HTTPStatusCode::PartialContent_206 &&
-				    range_res->status != HTTPStatusCode::Accepted_202 && range_res->status != HTTPStatusCode::OK_200) {
-					// It failed again
-					throw hfs.GetHTTPError(*this, *range_res, path);
+				try {
+					auto range_res =
+					    hfs.GetRangeRequest(*this, path, {}, 0, nullptr, HTTP_RANGE_FILE_SIZE_PROBE_LENGTH);
+					if (range_res->status != HTTPStatusCode::PartialContent_206 &&
+					    range_res->status != HTTPStatusCode::Accepted_202 &&
+					    range_res->status != HTTPStatusCode::OK_200) {
+						// Range probe failed (typical for JSON REST APIs that ignore Range on GET)
+						if (http_params.auto_fallback_to_full_download) {
+							length = 0;
+							initialized = true;
+							return;
+						}
+						throw hfs.GetHTTPError(*this, *range_res, path);
+					}
+					res = std::move(range_res);
+				} catch (const HTTPException &) {
+					if (http_params.auto_fallback_to_full_download) {
+						length = 0;
+						initialized = true;
+						return;
+					}
+					throw;
 				}
-				res = std::move(range_res);
 			} else {
 				throw hfs.GetHTTPError(*this, *res, path);
 			}

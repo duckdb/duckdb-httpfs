@@ -1,5 +1,5 @@
 # name: test/sql/copy/test_remote_head_forbidden.test
-# description: Test Force download with server that doesn't want to give us the head
+# description: Full GET fallback when HEAD or Range probe fails on JSON APIs (regression: duckdb/duckdb#21583).
 # group: [copy]
 
 require httpfs
