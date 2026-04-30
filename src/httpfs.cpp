@@ -337,13 +337,16 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 			    }
 
 			    if (response.HasHeader("Content-Length")) {
+				    unsigned long long content_length;
+				    bool parsed = false;
 				    try {
-					    auto content_length = stoull(response.GetHeaderValue("Content-Length"));
-					    if ((idx_t)content_length != buffer_out_len) {
-						    RangeRequestNotSupportedException::Throw();
-					    }
+					    content_length = stoull(response.GetHeaderValue("Content-Length"));
+					    parsed = true;
 				    } catch (const std::exception &) {
 					    // Content-Length header contains a non-numeric value — skip validation.
+				    }
+				    if (parsed && (idx_t)content_length != buffer_out_len) {
+					    RangeRequestNotSupportedException::Throw();
 				    }
 			    }
 		    }
