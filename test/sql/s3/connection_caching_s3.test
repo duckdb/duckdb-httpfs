@@ -1,0 +1,73 @@
+# name: test/sql/s3/connection_caching_s3.test
+# description: Test connection caching with S3 on a public bucket
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
+set ignore_error_messages
+
+statement ok
+SET s3_access_key_id='';
+SET s3_secret_access_key='';
+SET s3_endpoint='s3.amazonaws.com';
+SET s3_region='us-west-2';
+
+statement ok
+SET enable_logging=true;
+
+statement ok
+CALL enable_logging('HTTPFSInfo');
+
+statement ok
+SET httpfs_connection_caching=true;
+
+# Read a single parquet file — cache miss
+statement ok
+FROM parquet_scan('s3://overturemaps-us-west-2/bridgefiles/2025-03-19.0-beta.0/dataset=Esri Community Maps/theme=buildings/type=building/part-00000-947c2149-23db-4abc-a7ee-3a892aac90ff.c000.snappy.parquet') LIMIT 1;
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs WHERE message LIKE '%connection_cache_miss%';
+----
+true
+
+# Read the same file again — the file handle was destroyed, client returned to pool, should get a hit
+statement ok
+FROM parquet_scan('s3://overturemaps-us-west-2/bridgefiles/2025-03-19.0-beta.0/dataset=Esri Community Maps/theme=buildings/type=building/part-00000-947c2149-23db-4abc-a7ee-3a892aac90ff.c000.snappy.parquet') LIMIT 1;
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%';
+----
+true
+
+# Cache hits should increase with more requests to the same host
+statement ok
+CREATE TABLE hits_before AS SELECT count(*) AS cnt FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%';
+
+statement ok
+FROM parquet_scan('s3://overturemaps-us-west-2/bridgefiles/2025-03-19.0-beta.0/dataset=Esri Community Maps/theme=buildings/type=building/part-00000-947c2149-23db-4abc-a7ee-3a892aac90ff.c000.snappy.parquet') LIMIT 1;
+
+query I
+SELECT (SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%') > (SELECT cnt FROM hits_before);
+----
+true
+
+# Clear of cache currently disabled
+mode skip
+
+# Clear cache and verify miss on next request
+statement ok
+CALL clear_httpfs_connection_cache();
+
+statement ok
+CREATE TABLE hits_after_clear AS SELECT count(*) AS cnt FROM duckdb_logs WHERE message LIKE '%connection_cache_miss%';
+
+statement ok
+FROM parquet_scan('s3://overturemaps-us-west-2/bridgefiles/2025-03-19.0-beta.0/dataset=Esri Community Maps/theme=buildings/type=building/part-00000-947c2149-23db-4abc-a7ee-3a892aac90ff.c000.snappy.parquet') LIMIT 1;
+
+query I
+SELECT (SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_miss%') > (SELECT cnt FROM hits_after_clear);
+----
+true

@@ -86,7 +86,6 @@ struct AWSEnvironmentCredentialsProvider {
 
 	void SetExtensionOptionValue(string key, const char *env_var);
 	void SetAll();
-	S3AuthParams CreateParams();
 };
 
 struct ParsedS3Url {

@@ -15,10 +15,8 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "http_state.hpp"
 
-#include <chrono>
 #include <map>
 #include <string>
-#include <thread>
 
 #include "s3fs.hpp"
 
@@ -564,7 +562,7 @@ bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_b
 		DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
 		// Update handle status within critical section for parallel access.
 		if (hfh.flags.RequireParallelAccess()) {
-			std::lock_guard<std::mutex> lck(hfh.mu);
+			std::lock_guard<mutex> lck(hfh.mu);
 			hfh.buffer_available = 0;
 			hfh.buffer_idx = 0;
 			hfh.file_offset = location + nr_bytes;
@@ -1018,7 +1016,6 @@ unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
 }
 
 unique_ptr<HTTPClient> HTTPFileHandle::CreateClient() {
-	// Create a new client
 	string path_out, proto_host_port;
 	HTTPUtil::DecomposeURL(path, path_out, proto_host_port);
 	return http_params.http_util.InitializeClient(http_params, proto_host_port);
@@ -1030,6 +1027,15 @@ void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
 
 HTTPFileHandle::~HTTPFileHandle() {
 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
+	auto client = client_cache.GetClient();
+	while (client) {
+		http_params.http_util.CloseClient(std::move(client));
+		client = client_cache.GetClient();
+	}
+}
+
+void HTTPFSUtil::ClearCachedConnections() {
+	// no-op by default
 }
 
 string HTTPFSUtil::GetName() const {

@@ -88,3 +88,4 @@ jobs:
           ./build/release/test/unittest "*" --skip-error-messages "[]"
           ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation='curl';" || true
           ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation='httplib';" || true
+          ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_connection_caching=true;" || true
