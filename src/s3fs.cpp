@@ -173,22 +173,6 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 	this->SetExtensionOptionValue("s3_requester_pays", DUCKDB_REQUESTER_PAYS_ENV_VAR);
 }
 
-S3AuthParams AWSEnvironmentCredentialsProvider::CreateParams() {
-	S3AuthParams params;
-
-	params.region = DEFAULT_REGION_ENV_VAR;
-	params.region = REGION_ENV_VAR;
-	params.access_key_id = ACCESS_KEY_ENV_VAR;
-	params.secret_access_key = SECRET_KEY_ENV_VAR;
-	params.session_token = SESSION_TOKEN_ENV_VAR;
-	params.endpoint = DUCKDB_ENDPOINT_ENV_VAR;
-	params.kms_key_id = DUCKDB_KMS_KEY_ID_ENV_VAR;
-	params.use_ssl = DUCKDB_USE_SSL_ENV_VAR;
-	params.requester_pays = DUCKDB_REQUESTER_PAYS_ENV_VAR;
-
-	return params;
-}
-
 S3AuthParams S3AuthParams::ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
 
 	// Without a FileOpener we can not access settings nor secrets: return empty auth params
@@ -802,7 +786,8 @@ bool S3FileSystem::CanHandleFile(const string &fpath) {
 void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener) {
 	auto handle = OpenFile(path, FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS, opener);
 	if (!handle) {
-		throw IOException({{"errno", "404"}}, "Could not remove file \"%s\": %s", path, "No such file or directory");
+		throw IOException({{"errno", "404"}}, "Could not remove file \"%s\": %s", path,
+		                  string("No such file or directory"));
 	}
 
 	auto &s3fh = handle->Cast<S3FileHandle>();

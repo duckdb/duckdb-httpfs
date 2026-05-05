@@ -54,6 +54,9 @@ SELECT (SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_h
 ----
 true
 
+# Clear of cache currently disabled
+mode skip
+
 # Clear cache and verify miss on next request
 statement ok
 CALL clear_httpfs_connection_cache();

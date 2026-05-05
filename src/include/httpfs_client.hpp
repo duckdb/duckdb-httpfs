@@ -11,7 +11,7 @@ public:
 	static constexpr const char *NAME = "HTTPFSInfo";
 	static constexpr LogLevel LEVEL = LogLevel::LOG_INFO;
 
-	HTTPFSInfoLogType() : LogType(NAME, LEVEL) {
+	HTTPFSInfoLogType() : LogType(NAME, LogLevel::LOG_INFO) {
 	}
 
 	static string ConstructLogMessage(const string &type, const string &host, const string &payload = "") {

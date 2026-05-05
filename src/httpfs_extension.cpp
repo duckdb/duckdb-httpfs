@@ -157,8 +157,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 		auto &config = DBConfig::GetConfig(context);
 		auto &http_util = config.GetHTTPUtil();
 #ifndef EMSCRIPTEN
-		auto *curl_util = dynamic_cast<HTTPFSCurlUtil *>(&http_util);
-		if (curl_util) {
+		if (http_util.GetName() == "HTTPFS-Curl") {
+			auto *curl_util = static_cast<HTTPFSCurlUtil *>(&http_util);
 			curl_util->connection_caching_enabled = BooleanValue::Get(parameter);
 		}
 #endif
@@ -186,7 +186,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto clear_httpfs_connection_cache = TableFunction(
 	    "clear_httpfs_connection_cache", {}, ClearHTTPFSConnectionCacheFunction, ClearHTTPFSConnectionCacheBind);
-	loader.RegisterFunction(clear_httpfs_connection_cache);
+	// No registration (for now), due to issues with loading httpfs with partially intialized duckdb
+	// loader.RegisterFunction(clear_httpfs_connection_cache);
 
 	CreateS3SecretFunctions::Register(loader);
 	CreateBearerTokenFunctions::Register(loader);
