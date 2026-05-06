@@ -467,6 +467,11 @@ public:
 		return TransformResponseCurl(res);
 	}
 
+	void Cleanup() override {
+		// Release any buffers retained from the last request before this client is parked in the connection cache.
+		request_info = make_uniq<RequestInfo>();
+	}
+
 private:
 	CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
 		auto &httpfs_params = params.Cast<HTTPFSParams>();

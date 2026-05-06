@@ -72,10 +72,12 @@ void HTTPFSCurlUtil::ClearCachedConnections() {
 }
 
 void HTTPFSCurlUtil::CloseClient(unique_ptr<HTTPClient> &&client) {
-	if (connection_caching_enabled) {
-		// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
-		connection_cache.Store(std::move(client));
+	if (!client || !connection_caching_enabled) {
+		return;
 	}
+	client->Cleanup();
+	// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
+	connection_cache.Store(std::move(client));
 }
 
 unique_ptr<HTTPResponse> HTTPFSCurlUtil::BaseSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) {
