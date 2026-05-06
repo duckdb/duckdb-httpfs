@@ -1,8 +1,11 @@
 #include "httpfs_client.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/random_engine.hpp"
+#include "duckdb/common/thread.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "duckdb/logging/logger.hpp"
+
+#include <functional>
 
 namespace duckdb {
 
@@ -10,13 +13,27 @@ namespace duckdb {
 // HTTPClientConnectionCache
 //===--------------------------------------------------------------------===//
 
+// Per-thread starting pool index. Initialised from a hash of the thread id so
+// threads spread across pools, then updated to the last successfully-touched
+// pool so subsequent calls revisit the warm pool first.
+static thread_local size_t cache_pool_idx =
+    std::hash<thread_id> {}(ThreadUtil::GetThreadId()) & (HTTPClientConnectionCache::POOL_COUNT - 1);
+
 unique_ptr<HTTPClient> HTTPClientConnectionCache::Find(const string &base_url) {
 	if (base_url.empty()) {
 		return nullptr;
 	}
-	if (auto lock = unique_lock<mutex>(cache_lock, std::try_to_lock)) {
-		for (auto &entry : entries) {
+	const size_t start = cache_pool_idx;
+	for (size_t i = 0; i < POOL_COUNT; i++) {
+		const size_t idx = (start + i) & (POOL_COUNT - 1);
+		auto &pool = pools[idx];
+		unique_lock<mutex> lock(pool.lock, std::try_to_lock);
+		if (!lock) {
+			continue;
+		}
+		for (auto &entry : pool.entries) {
 			if (entry && entry->GetBaseUrl() == base_url) {
+				cache_pool_idx = idx;
 				return std::move(entry);
 			}
 		}
@@ -28,29 +45,47 @@ void HTTPClientConnectionCache::Store(unique_ptr<HTTPClient> &&client) {
 	if (!client || client->GetBaseUrl().empty()) {
 		return;
 	}
-	if (auto lock = unique_lock<mutex>(cache_lock, std::try_to_lock)) {
-		if (entries.empty()) {
-			entries.resize(64);
+	const size_t start = cache_pool_idx;
+	// Pass 1: prefer an empty slot in any reachable pool
+	for (size_t i = 0; i < POOL_COUNT; i++) {
+		const size_t idx = (start + i) & (POOL_COUNT - 1);
+		auto &pool = pools[idx];
+		unique_lock<mutex> lock(pool.lock, std::try_to_lock);
+		if (!lock) {
+			continue;
 		}
-		// First prefer an empty slot
-		for (auto &entry : entries) {
+		for (auto &entry : pool.entries) {
 			if (!entry) {
 				entry = std::move(client);
+				cache_pool_idx = idx;
 				return;
 			}
 		}
-		// Else evict one at random
-		{
-			RandomEngine engine;
-			size_t index = engine.NextRandomInteger() % entries.size();
-			entries[index] = std::move(client);
-		}
 	}
+	// Pass 2: every reachable pool is full — evict at random in the first lockable pool
+	RandomEngine engine;
+	for (size_t i = 0; i < POOL_COUNT; i++) {
+		const size_t idx = (start + i) & (POOL_COUNT - 1);
+		auto &pool = pools[idx];
+		unique_lock<mutex> lock(pool.lock, std::try_to_lock);
+		if (!lock) {
+			continue;
+		}
+		const size_t slot = engine.NextRandomInteger() % pool.entries.size();
+		pool.entries[slot] = std::move(client);
+		cache_pool_idx = idx;
+		return;
+	}
+	// Every pool busy — drop the client; will reconnect next time.
 }
 
 void HTTPClientConnectionCache::Clear() {
-	lock_guard<mutex> lck(cache_lock);
-	entries.clear();
+	for (auto &pool : pools) {
+		lock_guard<mutex> lock(pool.lock);
+		for (auto &entry : pool.entries) {
+			entry.reset();
+		}
+	}
 }
 
 //===--------------------------------------------------------------------===//

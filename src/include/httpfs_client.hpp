@@ -4,6 +4,8 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/logging/log_type.hpp"
 
+#include <array>
+
 namespace duckdb {
 
 class HTTPFSInfoLogType : public LogType {
@@ -55,13 +57,21 @@ struct HTTPFSParams : public HTTPParams {
 
 class HTTPClientConnectionCache {
 public:
+	static constexpr size_t POOL_COUNT = 16;
+	static constexpr size_t POOL_SIZE = 16;
+	static_assert((POOL_COUNT & (POOL_COUNT - 1)) == 0, "POOL_COUNT must be a power of two");
+
 	unique_ptr<HTTPClient> Find(const string &base_url);
 	void Store(unique_ptr<HTTPClient> &&client);
 	void Clear();
 
 private:
-	mutex cache_lock {};
-	std::vector<unique_ptr<HTTPClient>> entries;
+	struct Pool {
+		mutex lock {};
+		std::vector<unique_ptr<HTTPClient>> entries {std::vector<unique_ptr<HTTPClient>>(POOL_SIZE)};
+	};
+
+	std::array<Pool, POOL_COUNT> pools {};
 };
 
 class HTTPFSUtil : public HTTPUtil {
