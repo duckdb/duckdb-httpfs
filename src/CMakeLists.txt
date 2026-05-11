@@ -3,7 +3,6 @@ set(HTTPFS_SOURCES
     s3fs.cpp
     httpfs.cpp
     http_state.cpp
-    crypto.cpp
     hash_functions.cpp
     create_secret_functions.cpp
     httpfs_extension.cpp
