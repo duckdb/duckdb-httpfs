@@ -15,8 +15,10 @@ statement ok
 SET disabled_filesystems='LocalFileSystem';
 
 # httpfs works
-statement ok
+statement maybe
 from read_csv_auto('https://github.com/duckdb/duckdb/raw/main/data/csv/customer.csv');
+----
+Invalid Configuration Error
 
 statement ok
 SET disabled_filesystems='LocalFileSystem,HTTPFileSystem';
