@@ -4,6 +4,7 @@
 #include "duckdb/common/encryption_functions.hpp"
 #include "duckdb/common/helper.hpp"
 
+#include <openssl/rand.h>
 #include <stddef.h>
 #include <string>
 
@@ -55,6 +56,11 @@ extern "C" {
 class DUCKDB_EXTENSION_API AESStateSSLFactory : public duckdb::EncryptionUtil {
 public:
 	explicit AESStateSSLFactory() {
+		// Force OpenSSL's DRBG to initialize single-threadedly. In OpenSSL 3.0/3.1,
+		// the first RAND_bytes call lazily initializes internal provider state via ossl_ht.
+		// Concurrent first calls (e.g. parallel ATTACH) race on that hash table.
+		unsigned char dummy;
+		RAND_bytes(&dummy, 1);
 	}
 
 	duckdb::shared_ptr<duckdb::EncryptionState>
