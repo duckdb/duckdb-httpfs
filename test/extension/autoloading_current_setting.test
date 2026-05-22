@@ -9,7 +9,7 @@ require-env LOCAL_EXTENSION_REPO
 require httpfs
 
 statement ok
-set extension_directory='__TEST_DIR__/autoloading_current_setting'
+set extension_directory='{TEST_DIR}/autoloading_current_setting'
 
 ### No autoloading: throw error with installation hint
 statement ok
@@ -38,7 +38,7 @@ select current_setting('s3_region');
 
 ### Autoloading with autoinstall and correct extension repo
 statement ok
-set autoinstall_extension_repository='${LOCAL_EXTENSION_REPO}';
+set autoinstall_extension_repository='{LOCAL_EXTENSION_REPO}';
 
 statement ok
 set autoinstall_known_extensions=true

@@ -49,7 +49,7 @@ COPY (select * from read_csv_auto('duckdb/data/csv/glob/a2/a2.csv')) to 's3://te
 foreach urlstyle path vhost
 
 statement ok
-SET s3_url_style='${urlstyle}'
+SET s3_url_style='{urlstyle}'
 
 # simple globbing
 query I

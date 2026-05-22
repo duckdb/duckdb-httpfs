@@ -16,7 +16,7 @@ public:
 	}
 
 	void *Ptr() {
-		return buffer.Ptr();
+		return buffer.GetDataMutable();
 	}
 
 	// The S3 multipart part number. Note that internally we start at 0 but AWS S3 starts at 1

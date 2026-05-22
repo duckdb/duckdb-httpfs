@@ -28,6 +28,6 @@ query I
         case WHEN regexp_matches(birthYear,'[0-9]+') THEN CAST(birthYear as integer) END as birthYear
       )
     FROM read_csv_auto('https://datasets.imdbws.com/name.basics.tsv.gz', delim='\t', quote='')
-  ) to '__TEST_DIR__/name_basics.parquet' (FORMAT 'parquet', CODEC 'ZSTD')
+  ) to '{TEST_DIR}/name_basics.parquet' (FORMAT 'parquet', CODEC 'ZSTD')
 ----
 12783090

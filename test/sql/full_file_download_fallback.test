@@ -18,13 +18,13 @@ statement ok
 call dbgen(sf=1);
 
 statement ok
-copy lineitem to '${PYTHON_HTTP_SERVER_DIR}/lineitem.csv'
+copy lineitem to '{PYTHON_HTTP_SERVER_DIR}/lineitem.csv'
 
 statement ok
 drop table lineitem;
 
 statement ok
-CREATE view lineitem AS FROM '${PYTHON_HTTP_SERVER_URL}/lineitem.csv';
+CREATE view lineitem AS FROM '{PYTHON_HTTP_SERVER_URL}/lineitem.csv';
 
 query I
 pragma tpch(6);

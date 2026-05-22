@@ -20,14 +20,14 @@ select min(VendorID::VARCHAR), max(VendorID::VARCHAR), min(tpep_pickup_datetime:
 
 # writer round-trip
 statement ok
-COPY yellow_cab TO '__TEST_DIR__/yellowcab.parquet' (FORMAT PARQUET);
+COPY yellow_cab TO '{TEST_DIR}/yellowcab.parquet' (FORMAT PARQUET);
 
 query IIIIIIIIIIIIIIIIIII nosort yellowcab
 SELECT * FROM yellow_cab
 ----
 
 query IIIIIIIIIIIIIIIIIII nosort yellowcab
-SELECT * FROM '__TEST_DIR__/yellowcab.parquet'
+SELECT * FROM '{TEST_DIR}/yellowcab.parquet'
 ----
 
 

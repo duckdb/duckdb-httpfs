@@ -9,7 +9,7 @@ require httpfs
 require-env LOCAL_EXTENSION_REPO
 
 statement ok
-set extension_directory='__TEST_DIR__/autoloading_reset_setting'
+set extension_directory='{TEST_DIR}/autoloading_reset_setting'
 
 ### No autoloading: throw error with installation hint
 statement ok
@@ -40,7 +40,7 @@ Extension
 
 ### Autoloading with correct tmp repo and autoinstall
 statement ok
-set autoinstall_extension_repository='${LOCAL_EXTENSION_REPO}';
+set autoinstall_extension_repository='{LOCAL_EXTENSION_REPO}';
 
 statement ok
 set autoinstall_known_extensions=true

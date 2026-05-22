@@ -37,7 +37,7 @@ query I
 SELECT
     sum(l_extendedprice * l_discount) AS revenue
 FROM
-    '${S3_LARGE_PARQUET_PRESIGNED_URL}' 
+    '{S3_LARGE_PARQUET_PRESIGNED_URL}' 
 WHERE
     l_shipdate >= CAST('1994-01-01' AS date)
     AND l_shipdate < CAST('1995-01-01' AS date)

@@ -10,7 +10,7 @@ require-env LOCAL_EXTENSION_REPO
 
 # Ensure we have a clean extension directory without any preinstalled extensions
 statement ok
-set extension_directory='__TEST_DIR__/autoloading_base'
+set extension_directory='{TEST_DIR}/autoloading_base'
 
 query I
 SELECT (count(*) > 0) FROM duckdb_extensions() WHERE install_path ILIKE '%duckdb_extension'
@@ -89,7 +89,7 @@ select * from thistablefunctionwillnotexistfosho();
 
 ### Autoloading with correct tmp repo
 statement ok
-set autoinstall_extension_repository='${LOCAL_EXTENSION_REPO}';
+set autoinstall_extension_repository='{LOCAL_EXTENSION_REPO}';
 
 statement ok
 SET s3_region='eu-west-1';
