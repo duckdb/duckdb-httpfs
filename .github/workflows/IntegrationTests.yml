@@ -33,13 +33,13 @@ jobs:
           fetch-depth: 0
           submodules: 'true'
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.10'
 
       - name: Install Ninja
         shell: bash
-        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build squid
 
       - name: Setup Ccache
         uses: hendrikmuhs/ccache-action@main
@@ -60,14 +60,13 @@ jobs:
       - name: Install and run http proxy squid
         shell: bash
         run: |
-          sudo apt-get install squid
           ./scripts/run_squid.sh --port 3128 --log_dir squid_logs &
 
       - name: Run & Populate Python test server
         shell: bash
         run: |
-          mkdir -p $PYTHON_HTTP_SERVER_DIR
-          cd $PYTHON_HTTP_SERVER_DIR
+          mkdir -p "$PYTHON_HTTP_SERVER_DIR"
+          cd "$PYTHON_HTTP_SERVER_DIR"
           python3 -m http.server 8008 &
 
       - name: Build
@@ -85,7 +84,7 @@ jobs:
         run: |
           source ./scripts/run_s3_test_server.sh
           source ./scripts/set_s3_test_server_variables.sh
-          ./build/release/test/unittest "*" --skip-error-messages "[]"
-          ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation='curl';" || true
-          ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation='httplib';" || true
-          ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_connection_caching=true;" || true
+          python3 duckdb/scripts/ci/run_tests.py ./build/release/test/unittest "*" --test-flags='--skip-error-messages "[]"'
+          python3 duckdb/scripts/ci/run_tests.py ./build/release/test/unittest "*" --test-flags=' --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation=\'curl\';"' || true
+          python3 duckdb/scripts/ci/run_tests.py ./build/release/test/unittest "*" --test-flags=' --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation=\'httplib\';"' || true
+          python3 duckdb/scripts/ci/run_tests.py ./build/release/test/unittest "*" --test-flags=' --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_connection_caching=true;"' || true
