@@ -10,7 +10,7 @@ defaults:
 jobs:
   linux-tests-httpfs:
     name: MinIO Tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-x64' || 'ubuntu-latest' }}
     env:
       S3_TEST_SERVER_AVAILABLE: 1
       AWS_DEFAULT_REGION: eu-west-1
