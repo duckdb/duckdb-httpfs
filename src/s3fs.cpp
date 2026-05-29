@@ -683,6 +683,12 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 			auto result = HTTPFileSystem::GetRequest(handle, http_url, headers);
 			string updated_bucket_region;
 			if (TryGetUpdatedBucketRegion(auth_params, *result, updated_bucket_region)) {
+				// A 3xx redirect status does not throw from the status callback, so the redirect response
+				// body may have been streamed into cached_file_handle. Reset it before retrying.
+				if (s3_handle.cached_file_handle) {
+					s3_handle.cached_file_handle->ResetBuffer();
+				}
+				s3_handle.length = 0;
 				s3_handle.SetRegion(std::move(updated_bucket_region));
 				continue;
 			}

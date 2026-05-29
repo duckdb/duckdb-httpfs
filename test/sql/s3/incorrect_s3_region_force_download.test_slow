@@ -6,6 +6,12 @@ require httpfs
 
 require parquet
 
+# override MinIO setup
+statement ok
+SET s3_access_key_id='';
+SET s3_secret_access_key='';
+SET s3_endpoint='s3.amazonaws.com';
+
 statement ok
 SET s3_region='us-east-1';
 SET force_download=true;
@@ -17,9 +23,6 @@ SELECT COUNT(*) > 0 FROM (
 );
 ----
 true
-
-statement ok
-SET force_download=false;
 
 query I
 SELECT COUNT(*) > 0 FROM (
