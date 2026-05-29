@@ -16,18 +16,32 @@ statement ok
 SET s3_region='us-east-1';
 SET force_download=true;
 
+# Full download path with wrong region (exercises the deadlock fix)
+statement ok
+CREATE TABLE full_download_result AS
+SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 100;
+
+statement ok
+SET s3_region='us-east-1';
+SET force_download=false;
+
+# Range read path with wrong region (exercises inner retry on GetRangeRequest)
+statement ok
+CREATE TABLE range_read_result AS
+SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 100;
+
+# Both paths must return exactly the same rows (catches buffer corruption from redirect-body leak)
 query I
-SELECT COUNT(*) > 0 FROM (
-	FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet')
-	LIMIT 1
-);
+SELECT COUNT(*) FROM full_download_result;
 ----
-true
+100
 
 query I
-SELECT COUNT(*) > 0 FROM (
-	FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet')
-	LIMIT 1
-);
+SELECT COUNT(*) FROM (FROM full_download_result EXCEPT FROM range_read_result);
 ----
-true
+0
+
+query I
+SELECT COUNT(*) FROM (FROM range_read_result EXCEPT FROM full_download_result);
+----
+0
