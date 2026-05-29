@@ -239,7 +239,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 				    error += " This could mean the file was changed. Try disabling the duckdb http metadata cache "
 				             "if enabled, and confirm the server supports range requests.";
 			    }
-			    throw HTTPException(error);
+			    throw HTTPException(response, error);
 		    }
 		    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() &&
 		        response.HasHeader("x-amz-version-id")) {
@@ -746,12 +746,23 @@ static optional_ptr<HTTPMetadataCache> TryGetMetadataCache(optional_ptr<FileOpen
 
 void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache) {
 	// We are going to download the file at full, we don't need to do no head request.
-	const auto &cache_entry = http_params.state->GetCachedFile(path);
-	cached_file_handle = cache_entry->GetHandle();
+	if (!cached_file_handle) {
+		const auto &cache_entry = http_params.state->GetCachedFile(path);
+		cached_file_handle = cache_entry->GetHandle();
+	}
 	if (!cached_file_handle->Initialized()) {
 		// Try to fully download the file first
-		const auto full_download_result = hfs.GetRequest(*this, path, {});
+		unique_ptr<HTTPResponse> full_download_result;
+		try {
+			full_download_result = hfs.GetRequest(*this, path, {});
+		} catch (...) {
+			cached_file_handle->ResetBuffer();
+			length = 0;
+			throw;
+		}
 		if (full_download_result->status != HTTPStatusCode::OK_200) {
+			cached_file_handle->ResetBuffer();
+			length = 0;
 			throw HTTPException(*full_download_result, "Full download failed to to URL \"%s\": %d (%s)",
 			                    full_download_result->url, static_cast<int>(full_download_result->status),
 			                    full_download_result->GetError());

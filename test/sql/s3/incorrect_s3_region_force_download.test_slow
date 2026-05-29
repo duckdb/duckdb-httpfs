@@ -1,0 +1,30 @@
+# name: test/sql/s3/incorrect_s3_region_force_download.test_slow
+# description: Test force_download and range reads when the incorrect S3 region is specified
+# group: [s3]
+
+require httpfs
+
+require parquet
+
+statement ok
+SET s3_region='us-east-1';
+SET force_download=true;
+
+query I
+SELECT COUNT(*) > 0 FROM (
+	FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet')
+	LIMIT 1
+);
+----
+true
+
+statement ok
+SET force_download=false;
+
+query I
+SELECT COUNT(*) > 0 FROM (
+	FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet')
+	LIMIT 1
+);
+----
+true

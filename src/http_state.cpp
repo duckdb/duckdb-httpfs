@@ -31,6 +31,18 @@ void CachedFileHandle::AllocateBuffer(idx_t size) {
 	file->capacity = size;
 }
 
+void CachedFileHandle::ResetBuffer() {
+	if (file->initialized) {
+		throw InternalException("Cannot reset a buffer for a cached file that was already initialized");
+	}
+	if (!lock) {
+		throw InternalException("Cannot reset a buffer for a cached file without lock");
+	}
+	file->data.reset();
+	file->capacity = 0;
+	file->size = 0;
+}
+
 void CachedFileHandle::GrowBuffer(idx_t new_capacity, idx_t bytes_to_copy) {
 	// copy shared ptr to old data
 	auto old_data = file->data;

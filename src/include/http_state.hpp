@@ -41,6 +41,8 @@ public:
 
 	//! allocate a buffer for the file
 	void AllocateBuffer(idx_t size);
+	//! Reset an uninitialized buffer after a failed full download
+	void ResetBuffer();
 	//! Indicate the file is fully downloaded and safe for parallel reading without lock
 	void SetInitialized(idx_t total_size);
 	//! Grow buffer to new size, copying over `bytes_to_copy` to the new buffer
