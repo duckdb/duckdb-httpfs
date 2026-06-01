@@ -657,9 +657,8 @@ bool TryGetUpdatedBucketRegion(const S3AuthParams &auth_params, std::exception &
 
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	constexpr idx_t MAX_REGION_REDIRECTS = 2;
-	for (idx_t attempt = 0;; attempt++) {
-		const bool can_retry = (attempt + 1 < MAX_REGION_REDIRECTS);
+
+	auto make_request = [&]() -> unique_ptr<HTTPResponse> {
 		auto auth_params = s3_handle.auth_params;
 		auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
 
@@ -681,39 +680,35 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 			                         "", "", "");
 		}
 
-		try {
-			auto result = HTTPFileSystem::GetRequest(handle, http_url, headers);
-			string updated_bucket_region;
-			if (can_retry && TryGetUpdatedBucketRegion(auth_params, *result, updated_bucket_region)) {
-				// A 3xx redirect status does not throw from the status callback, so the redirect response
-				// body may have been streamed into cached_file_handle. Reset it before retrying.
-				if (s3_handle.cached_file_handle) {
-					s3_handle.cached_file_handle->ResetBuffer();
-				}
-				s3_handle.SetRegion(std::move(updated_bucket_region));
-				continue;
+		return HTTPFileSystem::GetRequest(handle, http_url, headers);
+	};
+
+	try {
+		auto result = make_request();
+		string updated_bucket_region;
+		if (TryGetUpdatedBucketRegion(s3_handle.auth_params, *result, updated_bucket_region)) {
+			if (s3_handle.cached_file_handle) {
+				s3_handle.cached_file_handle->ResetBuffer();
 			}
-			// On the final attempt we return the result as-is; FullDownload's status check will surface
-			// a redirect status as HTTPException with the response attached, so S3FileHandle::Initialize
-			// can still extract the new region and retry once.
-			return result;
-		} catch (std::exception &ex) {
-			string updated_bucket_region;
-			if (can_retry && TryGetUpdatedBucketRegion(auth_params, ex, updated_bucket_region)) {
-				s3_handle.SetRegion(std::move(updated_bucket_region));
-				continue;
-			}
+			s3_handle.SetRegion(std::move(updated_bucket_region));
+			return make_request();
+		}
+		return result;
+	} catch (std::exception &ex) {
+		string updated_bucket_region;
+		if (!TryGetUpdatedBucketRegion(s3_handle.auth_params, ex, updated_bucket_region)) {
 			throw;
 		}
+		s3_handle.SetRegion(std::move(updated_bucket_region));
+		return make_request();
 	}
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                        idx_t file_offset, char *buffer_out, idx_t buffer_out_len) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	constexpr idx_t MAX_REGION_REDIRECTS = 2;
-	for (idx_t attempt = 0;; attempt++) {
-		const bool can_retry = (attempt + 1 < MAX_REGION_REDIRECTS);
+
+	auto make_request = [&]() -> unique_ptr<HTTPResponse> {
 		auto auth_params = s3_handle.auth_params;
 		auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
 
@@ -735,23 +730,24 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 			                         "", "", "");
 		}
 
-		try {
-			auto result =
-			    HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);
-			string updated_bucket_region;
-			if (can_retry && TryGetUpdatedBucketRegion(auth_params, *result, updated_bucket_region)) {
-				s3_handle.SetRegion(std::move(updated_bucket_region));
-				continue;
-			}
-			return result;
-		} catch (std::exception &ex) {
-			string updated_bucket_region;
-			if (can_retry && TryGetUpdatedBucketRegion(auth_params, ex, updated_bucket_region)) {
-				s3_handle.SetRegion(std::move(updated_bucket_region));
-				continue;
-			}
+		return HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);
+	};
+
+	try {
+		auto result = make_request();
+		string updated_bucket_region;
+		if (TryGetUpdatedBucketRegion(s3_handle.auth_params, *result, updated_bucket_region)) {
+			s3_handle.SetRegion(std::move(updated_bucket_region));
+			return make_request();
+		}
+		return result;
+	} catch (std::exception &ex) {
+		string updated_bucket_region;
+		if (!TryGetUpdatedBucketRegion(s3_handle.auth_params, ex, updated_bucket_region)) {
 			throw;
 		}
+		s3_handle.SetRegion(std::move(updated_bucket_region));
+		return make_request();
 	}
 }
 
