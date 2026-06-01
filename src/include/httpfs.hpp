@@ -147,6 +147,8 @@ protected:
 	virtual unique_ptr<HTTPClient> CreateClient();
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
+	//! Reset download state so a full download can be retried from scratch
+	void ResetDownloadState();
 
 	//! TODO: make base function virtual?
 	void TryAddLogger(FileOpener &opener);

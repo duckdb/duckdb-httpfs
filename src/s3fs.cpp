@@ -687,9 +687,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		auto result = make_request();
 		string updated_bucket_region;
 		if (TryGetUpdatedBucketRegion(s3_handle.auth_params, *result, updated_bucket_region)) {
-			if (s3_handle.cached_file_handle) {
-				s3_handle.cached_file_handle->ResetBuffer();
-			}
+			s3_handle.ResetDownloadState();
 			s3_handle.SetRegion(std::move(updated_bucket_region));
 			return make_request();
 		}
@@ -699,6 +697,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		if (!TryGetUpdatedBucketRegion(s3_handle.auth_params, ex, updated_bucket_region)) {
 			throw;
 		}
+		s3_handle.ResetDownloadState();
 		s3_handle.SetRegion(std::move(updated_bucket_region));
 		return make_request();
 	}
@@ -850,6 +849,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			    path, auth_params.region, correct_region);
 			SetRegion(std::move(correct_region));
 		}
+		ResetDownloadState();
 		HTTPFileHandle::Initialize(opener);
 	}
 
