@@ -12,36 +12,42 @@ SET s3_access_key_id='';
 SET s3_secret_access_key='';
 SET s3_endpoint='s3.amazonaws.com';
 
+# 301 redirect (pre-March-2019 regional endpoint)
+
 statement ok
 SET s3_region='us-east-1';
 SET force_download=true;
 
-# Full download path with wrong region (exercises the deadlock fix)
-statement ok
-CREATE TABLE full_download_result AS
+# Full download path with wrong region
+query I nosort region_redirect
 SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 100;
+----
 
 statement ok
 SET s3_region='us-east-1';
 SET force_download=false;
 
-# Range read path with wrong region (exercises inner retry on GetRangeRequest)
-statement ok
-CREATE TABLE range_read_result AS
+# Range read path with wrong region
+query I nosort region_redirect
 SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 100;
-
-# Both paths must return exactly the same rows (catches buffer corruption from redirect-body leak)
-query I
-SELECT COUNT(*) FROM full_download_result;
 ----
-100
 
-query I
-SELECT COUNT(*) FROM (FROM full_download_result EXCEPT FROM range_read_result);
-----
-0
+# 400 redirect (post-March-2019 regional endpoint)
+# ap-east-1 returns HTTP 400 instead of 301 for wrong-region requests,
+# exercising the exception retry path in S3FileSystem::GetRequest.
 
-query I
-SELECT COUNT(*) FROM (FROM range_read_result EXCEPT FROM full_download_result);
+statement ok
+SET s3_region='ap-east-1';
+SET force_download=true;
+
+query I nosort region_redirect
+SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 100;
 ----
-0
+
+statement ok
+SET s3_region='ap-east-1';
+SET force_download=false;
+
+query I nosort region_redirect
+SELECT * FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet') LIMIT 100;
+----
