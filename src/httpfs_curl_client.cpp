@@ -324,7 +324,6 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, 0);
 			curl_url_cleanup(url);
-			curl_easy_setopt(*curl, CURLOPT_TIMEOUT, info.params.timeout);
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
