@@ -256,11 +256,16 @@ public:
 		const idx_t bytes_received = request_info->body.size();
 		if (!request_info->header_collection.empty() &&
 		    request_info->header_collection.back().HasHeader("content-length")) {
-			const idx_t content_length_received =
-			    std::stoi(request_info->header_collection.back().GetHeaderValue("content-length"));
-			if (bytes_received != content_length_received) {
-				// Something is off, might happen in case of unreliable network
-				// TODO: consider logging this
+			try {
+				// Use stoull (not stoi) — Content-Length can exceed INT_MAX for files >2GB.
+				const idx_t content_length_received =
+				    std::stoull(request_info->header_collection.back().GetHeaderValue("content-length"));
+				if (bytes_received != content_length_received) {
+					// Something is off, might happen in case of unreliable network
+					// TODO: consider logging this
+				}
+			} catch (const std::exception &) {
+				// Content-Length header contains a non-numeric value — skip validation.
 			}
 		}
 
