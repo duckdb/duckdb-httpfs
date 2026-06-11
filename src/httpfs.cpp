@@ -15,6 +15,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "http_state.hpp"
 
+#include <chrono>
 #include <map>
 #include <string>
 
