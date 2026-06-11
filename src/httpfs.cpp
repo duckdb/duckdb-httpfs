@@ -489,7 +489,7 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders
                                      char *buffer_out, idx_t buffer_out_len) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 
-	const auto timestamp_before = Timestamp::GetCurrentTimestamp();
+	const auto timestamp_before = std::chrono::steady_clock::now();
 	auto res = GetRangeRequest(handle, url, header_map, file_offset, buffer_out, buffer_out_len);
 
 	if (res) {
@@ -499,8 +499,9 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders
 
 			if (!hfh.flags.RequireParallelAccess()) {
 				// Update range request statistics
-				const auto duration =
-				    NumericCast<idx_t>(Timestamp::GetCurrentTimestamp().value - timestamp_before.value);
+				const auto timestamp_after = std::chrono::steady_clock::now();
+				const auto duration = NumericCast<idx_t>(
+				    std::chrono::duration_cast<std::chrono::microseconds>(timestamp_after - timestamp_before).count());
 				hfh.AddStatistics(file_offset, buffer_out_len, duration);
 			}
 
