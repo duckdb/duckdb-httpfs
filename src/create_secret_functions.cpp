@@ -35,6 +35,9 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 			scope.push_back("s3://");
 			scope.push_back("s3n://");
 			scope.push_back("s3a://");
+			for (auto &scheme : S3FileSystem::GetCustomUrlSchemes()) {
+				scope.push_back(scheme);
+			}
 		} else if (input.type == "r2") {
 			scope.push_back("r2://");
 		} else if (input.type == "gcs") {
