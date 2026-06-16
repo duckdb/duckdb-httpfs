@@ -40,6 +40,33 @@ static std::string SelectCURLCertPath() {
 	return std::string();
 }
 
+// libcurl progress callback. libcurl invokes this periodically during transfers
+// (including connect / TLS handshake / body I/O). Returning a non-zero value
+// causes libcurl to abort the transfer with CURLE_ABORTED_BY_CALLBACK.
+//
+// Invocation cadence is controlled by libcurl (typically every few hundred ms,
+// faster during active I/O), so this is safe for use as an interrupt poll. The
+// userdata is a pointer to a std::function<bool()> owned by the HTTPFSCurlClient
+// for the lifetime of one request.
+static int RequestProgressCallback(void *clientp, curl_off_t /*dltotal*/, curl_off_t /*dlnow*/, curl_off_t /*ultotal*/,
+                                   curl_off_t /*ulnow*/) {
+	if (!clientp) {
+		return 0;
+	}
+	auto *cancel_fn = static_cast<std::function<bool()> *>(clientp);
+	if (!*cancel_fn) {
+		return 0;
+	}
+	try {
+		return (*cancel_fn)() ? 1 : 0;
+	} catch (...) {
+		// A throwing cancel hook is a programming error; libcurl can't propagate
+		// exceptions across the C boundary. Treat as "cancel" so we exit the
+		// transfer cleanly rather than terminating the process.
+		return 1;
+	}
+}
+
 static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 	size_t totalSize = size * nmemb;
 	std::string *str = static_cast<std::string *>(userp);
@@ -212,6 +239,17 @@ public:
 				curl_easy_setopt(*curl, CURLOPT_PROXYPASSWORD, http_params.http_proxy_password.c_str());
 			}
 		}
+
+		// Wire the per-request cancellation hook. The callback is installed
+		// unconditionally (with userdata pointing at our stored std::function);
+		// when the function is empty the callback returns 0 (continue) cheaply.
+		// Storing the hook on the client keeps the userdata pointer stable
+		// across cached-client reuse, where Initialize() runs again with new
+		// params.
+		cancel_fn = http_params.should_cancel;
+		curl_easy_setopt(*curl, CURLOPT_NOPROGRESS, 0L);
+		curl_easy_setopt(*curl, CURLOPT_XFERINFOFUNCTION, RequestProgressCallback);
+		curl_easy_setopt(*curl, CURLOPT_XFERINFODATA, &cancel_fn);
 	}
 
 	~HTTPFSCurlClient() {
@@ -512,6 +550,17 @@ private:
 		auto response = make_uniq<HTTPResponse>(status_code);
 		if (res != CURLcode::CURLE_OK) {
 			response->request_error = curl_easy_strerror(res);
+			if (res == CURLcode::CURLE_ABORTED_BY_CALLBACK) {
+				// Surface cancellation as HTTP 499 (nginx's "Client Closed
+				// Request"). Cast through the integer value because the
+				// HTTPStatusCode enum in duckdb-core does not yet have a
+				// dedicated identifier; a follow-up duckdb-core PR can add
+				// `Cancelled_499 = 499`. Callers can detect cancellation via
+				// either `response->status == static_cast<HTTPStatusCode>(499)`
+				// or `response->request_error` containing "callback".
+				response->status = static_cast<HTTPStatusCode>(499);
+				response->request_error = "Request cancelled by callback";
+			}
 			return response;
 		}
 		response->body = request_info->body;
@@ -537,6 +586,11 @@ private:
 	CURLU *curl_base_url = nullptr;
 	string stored_bearer_token;
 	string stored_cert_file_path;
+	// Cancellation hook copied from HTTPFSParams::should_cancel on each
+	// Initialize(). Address-of is passed to libcurl as XFERINFODATA; the curl
+	// progress callback dereferences it to decide whether to abort. Stored on
+	// the client so the userdata pointer is stable across cached-client reuse.
+	std::function<bool()> cancel_fn;
 
 	static mutex &GetRefLock() {
 		static mutex mtx;

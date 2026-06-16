@@ -53,6 +53,14 @@ struct HTTPFSParams : public HTTPParams {
 
 	// Additional fields needs to be appended at the end and need to be propagated to duckdb-wasm
 	// TODO: make this unnecessary
+
+	//! Optional cancellation hook. When set and returns true during an in-flight
+	//! transfer, libcurl aborts with CURLE_ABORTED_BY_CALLBACK and the resulting
+	//! HTTPResponse is marked with status 499 ("client closed request") and a
+	//! "Request cancelled" request_error. The closure must remain valid for the
+	//! duration of any request issued with this HTTPFSParams; copy it into the
+	//! params struct rather than storing a reference to short-lived state.
+	std::function<bool()> should_cancel;
 };
 
 class HTTPClientConnectionCache {
