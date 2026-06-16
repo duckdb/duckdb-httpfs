@@ -1,0 +1,185 @@
+# name: test/sql/copy/s3/glob_test_blockchain.test_slow
+# description: Glob stress tests on aws-public-blockchain — daily date= hive partitions across tables
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+set ignore_error_messages
+
+statement ok
+CREATE SECRET blockchain (TYPE s3, SCOPE 's3://aws-public-blockchain', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-east-2');
+
+statement ok
+CALL enable_logging('HTTP');
+
+#
+# P1: Single day, single table
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/transactions/date=2024-01-01/*');
+----
+1
+
+endloop
+
+#
+# P2: Wildcard across tables (blocks + transactions) for one day
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/*/date=2024-01-01/*');
+----
+2
+
+endloop
+
+#
+# P7: Date range pattern — all of January 2024 across tables
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/*/date=2024-01-*/*');
+----
+62
+
+endloop
+
+#
+# P8: Blocks only, January 2024
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/blocks/date=2024-01-*/*');
+----
+31
+
+endloop
+
+#
+# P2b: Date range across tables — December 2024 (wildcard after narrow prefix btc/)
+# no-recursive faster: delimiter walks tables then date prefix vs recursive enumerates all of btc/
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/*/date=2024-12-*/*');
+----
+62
+
+endloop
+
+#
+# P2c: Wildcard at chain level — single date across chains (btc, eth, ...)
+# recursive faster: prefix is v1.0/ which is small, recursive avoids per-chain directory walks
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/*/transactions/date=2024-12-12/*');
+----
+2
+
+endloop
+
+#
+# P9: Zero results vs one result — exact date that doesn't exist
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/transactions/date=2099-01-01/*');
+----
+0
+
+endloop
+
+#
+# P10: Multiple * in one segment — all first-of-month dates
+# recursive enumerates ALL objects under blocks/, no-recursive uses delimiter to walk dates
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/blocks/date=*-*-01/*');
+----
+206
+
+endloop
+
+#
+# P5: Fail-fast — non-existent table
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://aws-public-blockchain/v1.0/btc/fake_table/date=2024-01-01/*');
+----
+0
+
+endloop
+
+# Wire cost assertions
+query IIIII
+SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') FROM duckdb_logs_parsed('HTTP') WHERE response.status IN ('OK_200', 'PartialContent_206', 'Accepted_202') GROUP BY context_id ORDER BY context_id;
+----
+1	0	1	0	0
+1	0	1	0	0
+13	0	13	0	0
+13	0	13	0	0
+13	0	13	0	0
+13	0	13	0	0
+1	0	1	0	0
+1	0	1	0	0
+13	0	13	0	0
+13	0	13	0	0
+36	0	36	0	0
+36	0	36	0	0
+1	0	1	0	0
+1	0	1	0	0
+7	0	7	0	0
+7	0	7	0	0
+1	0	1	0	0
+1	0	1	0	0

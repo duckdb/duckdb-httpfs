@@ -1,0 +1,110 @@
+# name: test/sql/copy/s3/glob_test_ookla.test_slow
+# description: Glob stress tests on ookla-open-data — 3-level hive partitioned (type/year/quarter)
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+set ignore_error_messages
+
+statement ok
+CREATE SECRET ookla (TYPE s3, SCOPE 's3://ookla-open-data', endpoint 's3.amazonaws.com', key_id '', secret '', region 'us-west-2');
+
+statement ok
+CALL enable_logging('HTTP');
+
+#
+# P1: Specific leaf — single quarter
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://ookla-open-data/parquet/performance/type=fixed/year=2024/quarter=1/*.parquet');
+----
+1
+
+endloop
+
+#
+# P2: Mid-path wildcard — all quarters in one year for fixed
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://ookla-open-data/parquet/performance/type=fixed/year=2024/quarter=*/*.parquet');
+----
+4
+
+endloop
+
+#
+# P2b: Wildcard at type level — both fixed and mobile for one year
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://ookla-open-data/parquet/performance/type=*/year=2024/**/*.parquet');
+----
+8
+
+endloop
+
+#
+# P3: Full recursive glob over all performance data
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://ookla-open-data/parquet/performance/**/*.parquet');
+----
+56
+
+endloop
+
+#
+# P5: Fail-fast on non-existent year
+#
+
+foreach allow_globbing true false
+
+statement ok
+SET s3_allow_recursive_globbing = ${allow_globbing};
+
+query I
+SELECT count(*) FROM glob('s3://ookla-open-data/parquet/performance/type=fixed/year=1999/quarter=*/*.parquet');
+----
+0
+
+endloop
+
+# Wire cost assertions — all globs above
+query IIIII
+SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') FROM duckdb_logs_parsed('HTTP') WHERE response.status IN ('OK_200', 'PartialContent_206', 'Accepted_202') GROUP BY context_id ORDER BY context_id;
+----
+1	0	1	0	0
+1	0	1	0	0
+1	0	1	0	0
+1	0	1	0	0
+1	0	1	0	0
+1	0	1	0	0
+1	0	1	0	0
+1	0	1	0	0
+1	0	1	0	0
+1	0	1	0	0
