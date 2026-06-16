@@ -10,7 +10,7 @@ require-env LOCAL_EXTENSION_REPO
 
 # Ensure we have a clean extension directory without any preinstalled extensions
 statement ok
-set extension_directory='__TEST_DIR__/autoloading_load_only'
+set extension_directory='{TEST_DIR}/autoloading_load_only'
 
 ### No autoloading nor installing: throw error with installation hint
 statement ok
@@ -38,7 +38,7 @@ SET s3_region='eu-west-1';
 
 ### Manually install the extension from the local repo
 statement ok
-INSTALL httpfs FROM '${LOCAL_EXTENSION_REPO}'
+INSTALL httpfs FROM '{LOCAL_EXTENSION_REPO}'
 
 # now autoloading works!
 statement ok

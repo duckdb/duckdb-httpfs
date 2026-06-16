@@ -98,7 +98,7 @@ select size from read_text('hf://spaces/samansmink/duckdb_ci_tests/README.md');
 require-env HUGGING_FACE_TOKEN
 
 statement ok
-CREATE SECRET hf1 (TYPE HUGGINGFACE, TOKEN '${HUGGING_FACE_TOKEN}');
+CREATE SECRET hf1 (TYPE HUGGINGFACE, TOKEN '{HUGGING_FACE_TOKEN}');
 
 query III rowsort
 FROM parquet_scan('hf://datasets/samansmink/duckdb_ci_private/hive_data/**/*.parquet', FILENAME=1, hive_partitioning=0);
@@ -112,7 +112,7 @@ DROP SECRET hf1
 # Same can be achieved with an http secret setting the bearer token manually
 
 statement ok
-CREATE SECRET http1 (TYPE HTTP, BEARER_TOKEN '${HUGGING_FACE_TOKEN}');
+CREATE SECRET http1 (TYPE HTTP, BEARER_TOKEN '{HUGGING_FACE_TOKEN}');
 
 query III rowsort
 FROM parquet_scan('hf://datasets/samansmink/duckdb_ci_private/hive_data/**/*.parquet', FILENAME=1, hive_partitioning=0);
@@ -126,7 +126,7 @@ DROP SECRET http1
 # Note that the huggingface secret takes precedence over the http secret
 
 statement ok
-CREATE SECRET hf2 (TYPE HUGGINGFACE, TOKEN '${HUGGING_FACE_TOKEN}');
+CREATE SECRET hf2 (TYPE HUGGINGFACE, TOKEN '{HUGGING_FACE_TOKEN}');
 
 statement ok
 CREATE SECRET http2 (TYPE HTTP, BEARER_TOKEN 'hocus pocus this token is bogus');
@@ -155,7 +155,7 @@ statement ok
 CREATE SECRET http3 (
     TYPE HTTP, 
     EXTRA_HTTP_HEADERS MAP{
-		'Authorization': 'Bearer ${HUGGING_FACE_TOKEN}',
+		'Authorization': 'Bearer {HUGGING_FACE_TOKEN}',
 	}
 );
 

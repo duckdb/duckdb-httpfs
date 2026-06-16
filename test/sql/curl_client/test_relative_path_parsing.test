@@ -14,22 +14,22 @@ statement ok
 CREATE TABLE lineitem as (SELECT 1 FROM range(0,5));
 
 statement ok
-copy lineitem to '${PYTHON_HTTP_SERVER_DIR}/lineitem.csv'
+copy lineitem to '{PYTHON_HTTP_SERVER_DIR}/lineitem.csv'
 
 foreach httpfs_implementation curl httplib
 
 query I
-SELECT count(*) FROM '${PYTHON_HTTP_SERVER_URL}/lineitem.csv';
+SELECT count(*) FROM '{PYTHON_HTTP_SERVER_URL}/lineitem.csv';
 ----
 6
 
 foreach parts ./ // /./
 
 statement ok
-SET httpfs_client_implementation='${httpfs_implementation}';
+SET httpfs_client_implementation='{httpfs_implementation}';
 
 query I
-SELECT count(*) FROM '${PYTHON_HTTP_SERVER_URL}/${parts}lineitem.csv';
+SELECT count(*) FROM '{PYTHON_HTTP_SERVER_URL}/{parts}lineitem.csv';
 ----
 6
 

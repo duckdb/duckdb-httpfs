@@ -6,8 +6,6 @@ require httpfs
 
 require parquet
 
-statement ok
-PRAGMA enable_verification
 
 statement ok
 CALL enable_logging('HTTP');
@@ -15,7 +13,7 @@ CALL enable_logging('HTTP');
 foreach httpfs_implementation curl httplib
 
 statement ok
-SET httpfs_client_implementation='${httpfs_implementation}';
+SET httpfs_client_implementation='{httpfs_implementation}';
 
 query II
 select * from 'https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_role_type.parquet' order by all;

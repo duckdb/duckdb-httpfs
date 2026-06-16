@@ -22,11 +22,11 @@ statement ok
 CREATE SECRET (
     TYPE S3,
     PROVIDER config,
-    KEY_ID '${AWS_ACCESS_KEY_ID}',
-    SECRET '${AWS_SECRET_ACCESS_KEY}',
-    REGION '${AWS_DEFAULT_REGION}',
-    ENDPOINT '${DUCKDB_S3_ENDPOINT}',
-    USE_SSL '${DUCKDB_S3_USE_SSL}'
+    KEY_ID '{AWS_ACCESS_KEY_ID}',
+    SECRET '{AWS_SECRET_ACCESS_KEY}',
+    REGION '{AWS_DEFAULT_REGION}',
+    ENDPOINT '{DUCKDB_S3_ENDPOINT}',
+    USE_SSL '{DUCKDB_S3_USE_SSL}'
 )
 
 # ATTACH a DuckDB database over HTTPFS
@@ -39,18 +39,18 @@ USE db
 loop i 1 9
 
 query I
-PRAGMA tpch(${i})
+PRAGMA tpch({i})
 ----
-<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q0${i}.csv
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q0{i}.csv
 
 endloop
 
 loop i 10 23
 
 query I
-PRAGMA tpch(${i})
+PRAGMA tpch({i})
 ----
-<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q${i}.csv
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q{i}.csv
 
 endloop
 

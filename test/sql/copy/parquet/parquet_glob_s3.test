@@ -62,7 +62,7 @@ COPY vals2 FROM 's3://test-bucket/parquet_glob_s3/nonexistentfolderblablabla/t*.
 foreach urlstyle path vhost
 
 statement ok
-SET s3_url_style='${urlstyle}'
+SET s3_url_style='{urlstyle}'
 
 # Begin tests
 query I

@@ -94,6 +94,11 @@ public:
 		return TransformResult(client->Delete(info.path, headers));
 	}
 
+	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
+		auto headers = TransformHeaders(info.headers, info.params);
+		return TransformResult(client->Options(info.path, headers));
+	}
+
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
 		if (state) {
 			state->post_count++;

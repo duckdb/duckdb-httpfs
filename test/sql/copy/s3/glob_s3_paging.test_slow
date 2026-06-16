@@ -37,7 +37,7 @@ SET enable_http_metadata_cache=true;
 foreach urlstyle path vhost
 
 statement ok
-SET s3_url_style='${urlstyle}'
+SET s3_url_style='{urlstyle}'
 
 ## For both formats we generate 2000 files which we will glob to test the paging mechanism of aws ListObjectV2 call is handled properly
 foreach format parquet csv
@@ -51,7 +51,7 @@ foreach k 0 1 2 3 4 5 6 7 8 9
 foreach l 0 1 2 3 4 5 6 7 8 9
 
 statement ok
-COPY (select (${i}${j}${k}${l})::INT as column0) to 's3://test-bucket/parquet_glob_s3_paging/paging/t${i}${j}${k}${l}-${urlstyle}-urls.${format}';
+COPY (select ({i}{j}{k}{l})::INT as column0) to 's3://test-bucket/parquet_glob_s3_paging/paging/t{i}{j}{k}{l}-{urlstyle}-urls.{format}';
 
 endloop
 
@@ -63,7 +63,7 @@ endloop
 
 # Begin tests
 query I
-select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*-${urlstyle}-urls.${format}'
+select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*-{urlstyle}-urls.{format}'
 ----
 1999000
 
@@ -83,7 +83,7 @@ loop i 0 2
 
 # Begin tests
 query I
-select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*-${urlstyle}-urls.${format}'
+select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*-{urlstyle}-urls.{format}'
 ----
 1999000
 
@@ -99,7 +99,7 @@ CALL enable_logging('HTTP');
 foreach s3_allow_recursive_globs true false
 
 statement ok
-SET s3_allow_recursive_globbing = ${s3_allow_recursive_globs}
+SET s3_allow_recursive_globbing = {s3_allow_recursive_globs}
 
 query I
 SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder/*');
@@ -118,6 +118,6 @@ FROM (FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD
 ----
 3	0	3	0	0
 11	0	11	0	0
-9	0	9	0	0
-9	0	9	0	0
-
+11	0	11	0	0
+11	0	11	0	0
+11	0	11	0	0

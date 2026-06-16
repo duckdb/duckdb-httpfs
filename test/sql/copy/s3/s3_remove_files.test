@@ -24,7 +24,7 @@ set ignore_error_messages
 foreach url_style path vhost
 
 statement ok
-SET s3_url_style='${url_style}'
+SET s3_url_style='{url_style}'
 
 # Step 1: Clean up any leftover files from previous test runs (OVERWRITE clears the directory)
 # and create initial partitioned file (part_col=1)

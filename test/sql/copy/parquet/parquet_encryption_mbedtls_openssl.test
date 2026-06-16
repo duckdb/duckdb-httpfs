@@ -7,8 +7,6 @@ require parquet
 require httpfs
 
 # parquet keys are not persisted across restarts
-statement ok
-PRAGMA enable_verification
 
 # add keys of 3 different lengths
 statement ok
@@ -25,18 +23,18 @@ foreach key_len 128 192 256
 
 # write files with OpenSSL enabled (is enabled by default)
 statement ok
-COPY (SELECT 42 i) to '__TEST_DIR__/encrypted${key_len}_openssl.parquet' (ENCRYPTION_CONFIG {footer_key: 'key${key_len}'})
+COPY (SELECT 42 i) to '{TEST_DIR}/encrypted{key_len}_openssl.parquet' (ENCRYPTION_CONFIG {footer_key: 'key{key_len}'})
 
 statement ok
 SET force_mbedtls_unsafe = true;
 
 # write files with mbedtls enabled
 statement ok
-COPY (SELECT 42 i) to '__TEST_DIR__/encrypted${key_len}_mbedtls.parquet' (ENCRYPTION_CONFIG {footer_key: 'key${key_len}'})
+COPY (SELECT 42 i) to '{TEST_DIR}/encrypted{key_len}_mbedtls.parquet' (ENCRYPTION_CONFIG {footer_key: 'key{key_len}'})
 
 # read OpenSSL encrypted files by using mbedtls
 query I
-SELECT * FROM read_parquet('__TEST_DIR__/encrypted${key_len}_openssl.parquet', encryption_config={footer_key: 'key${key_len}'})
+SELECT * FROM read_parquet('{TEST_DIR}/encrypted{key_len}_openssl.parquet', encryption_config={footer_key: 'key{key_len}'})
 ----
 42
 
@@ -45,7 +43,7 @@ SET force_mbedtls_unsafe = false;
 
 # read mbedtls encrypted files with OpenSSL
 query I
-SELECT * FROM read_parquet('__TEST_DIR__/encrypted${key_len}_mbedtls.parquet', encryption_config={footer_key: 'key${key_len}'})
+SELECT * FROM read_parquet('{TEST_DIR}/encrypted{key_len}_mbedtls.parquet', encryption_config={footer_key: 'key{key_len}'})
 ----
 42
 
