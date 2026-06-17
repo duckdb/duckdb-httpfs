@@ -25,7 +25,7 @@ set ignore_error_messages
 statement ok
 CREATE TABLE test as SELECT * FROM range(0,10) tbl(i);
 
-foreach url_style path vhost
+foreach url_style path vhost virtual
 # Have to set these because they get altered during the loop
 statement ok
 SET s3_secret_access_key='${AWS_SECRET_ACCESS_KEY}';
