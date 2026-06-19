@@ -746,18 +746,23 @@ static optional_ptr<HTTPMetadataCache> TryGetMetadataCache(optional_ptr<FileOpen
 
 void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache) {
 	// We are going to download the file at full, we don't need to do no head request.
-	if (!cached_file_handle) {
-		const auto &cache_entry = http_params.state->GetCachedFile(path);
-		cached_file_handle = cache_entry->GetHandle();
-	}
+	const auto &cache_entry = http_params.state->GetCachedFile(path);
+	cached_file_handle = cache_entry->GetHandle();
 	if (!cached_file_handle->Initialized()) {
-		// Try to fully download the file first
-		unique_ptr<HTTPResponse> full_download_result;
-		full_download_result = hfs.GetRequest(*this, path, {});
-		if (full_download_result->status != HTTPStatusCode::OK_200) {
-			throw HTTPException(*full_download_result, "Full download failed to to URL \"%s\": %d (%s)",
-			                    full_download_result->url, static_cast<int>(full_download_result->status),
-			                    full_download_result->GetError());
+		// Try to fully download the file first. On any failure we reset the buffer and release the
+		// handle (and with it the lock on the cached file) so the download can be retried from
+		// scratch with a fresh handle, without deadlocking on the still-held lock.
+		try {
+			auto full_download_result = hfs.GetRequest(*this, path, {});
+			if (full_download_result->status != HTTPStatusCode::OK_200) {
+				throw HTTPException(*full_download_result, "Full download failed to to URL \"%s\": %d (%s)",
+				                    full_download_result->url, static_cast<int>(full_download_result->status),
+				                    full_download_result->GetError());
+			}
+		} catch (...) {
+			ResetDownloadState();
+			cached_file_handle.reset();
+			throw;
 		}
 		// Mark the file as initialized, set its final length, and unlock it to allowing parallel reads
 		cached_file_handle->SetInitialized(length);
