@@ -233,10 +233,10 @@ S3AuthParams S3AuthParams::ReadFrom(S3KeyValueReader &secret_reader, const strin
 
 	if (StringUtil::StartsWith(file_path, "gcs://") || StringUtil::StartsWith(file_path, "gs://")) {
 		// For GCS urls we force the endpoint and vhost path style, allowing only to be overridden by secrets
-		if (result.endpoint.empty() || endpoint_result.GetScope() != SettingScope::SECRET) {
+		if (result.endpoint.empty() || !endpoint_result || endpoint_result.GetScope() != SettingScope::SECRET) {
 			result.endpoint = "storage.googleapis.com";
 		}
-		if (result.url_style.empty() || url_style_result.GetScope() != SettingScope::SECRET) {
+		if (result.url_style.empty() || !url_style_result || url_style_result.GetScope() != SettingScope::SECRET) {
 			result.url_style = "path";
 		}
 		// Read bearer token for GCS

@@ -30,8 +30,8 @@ public:
 	SettingLookupResult TryGetSecretKeyOrSetting(const string &secret_key, const string &setting_name, TYPE &result) {
 		Value temp_result;
 		auto setting_scope = reader.TryGetSecretKeyOrSetting(secret_key, setting_name, temp_result);
-		if (!temp_result.IsNull() &&
-		    !(setting_scope.GetScope() == SettingScope::GLOBAL && !use_env_variables_for_secret_settings)) {
+		if (!temp_result.IsNull() && !(setting_scope && setting_scope.GetScope() == SettingScope::GLOBAL &&
+		                               !use_env_variables_for_secret_settings)) {
 			result = temp_result.GetValue<TYPE>();
 		}
 		return setting_scope;
