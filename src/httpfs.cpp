@@ -493,6 +493,15 @@ void HTTPFileHandle::AdaptReadBufferSize(idx_t next_read_offset) {
 	read_buffer = read_buffer.GetAllocator()->Allocate(read_buffer.GetSize() * 2);
 }
 
+static bool RespondedWithRangeRequestNotSupported(const HTTPResponse &res) {
+	if (!res.HasRequestError()) {
+		return false;
+	}
+	ErrorData error(res.GetRequestError());
+	return error.Type() == RangeRequestNotSupportedException::TYPE &&
+	       error.RawMessage() == RangeRequestNotSupportedException::MESSAGE;
+}
+
 bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset,
                                      char *buffer_out, idx_t buffer_out_len) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
@@ -518,16 +527,15 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, string url, HTTPHeaders
 
 		// Request failed and we have a request error
 		if (res->HasRequestError()) {
-			ErrorData error(res->GetRequestError());
 
 			// Special case: we can do a retry with a full file download
-			if (error.Type() == RangeRequestNotSupportedException::TYPE &&
-			    error.RawMessage() == RangeRequestNotSupportedException::MESSAGE) {
+			if (RespondedWithRangeRequestNotSupported(*res)) {
 				auto &hfh = handle.Cast<HTTPFileHandle>();
 				if (hfh.http_params.auto_fallback_to_full_download) {
 					return false;
 				}
 			}
+			ErrorData error(res->GetRequestError());
 			error.Throw();
 		}
 		throw HTTPException(*res, "Request returned HTTP %d for HTTP %s to '%s'", static_cast<int>(res->status),
@@ -863,8 +871,13 @@ void HTTPFileHandle::LoadFileInfo() {
 				auto range_res = hfs.GetRangeRequest(*this, path, {}, 0, nullptr, 2);
 				if (range_res->status != HTTPStatusCode::PartialContent_206 &&
 				    range_res->status != HTTPStatusCode::Accepted_202 && range_res->status != HTTPStatusCode::OK_200) {
-					// It failed again
-					throw hfs.GetHTTPError(*this, *range_res, path);
+					// It failed again, check whether we can fall back to full download
+					if (RespondedWithRangeRequestNotSupported(*range_res) &&
+					    http_params.auto_fallback_to_full_download) {
+						force_full_download = true;
+					} else {
+						throw hfs.GetHTTPError(*this, *range_res, path);
+					}
 				}
 				res = std::move(range_res);
 			} else {
