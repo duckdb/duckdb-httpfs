@@ -545,7 +545,8 @@ bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_b
 			throw InternalException("Cached file not initialized properly");
 		}
 		if (hfh.cached_file_handle->GetSize() < location + nr_bytes) {
-			throw InternalException("Cached file length can't satisfy the requested Read");
+			throw IOException("Cached file length can't satisfy the requested Read. You can try to resolve this by "
+			                  "enabling `SET force_download=true`");
 		}
 		memcpy(buffer, hfh.cached_file_handle->GetData() + location, nr_bytes);
 		DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
