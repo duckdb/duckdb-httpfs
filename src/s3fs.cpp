@@ -77,9 +77,18 @@ HTTPHeaders CreateS3Header(string url, string query, string host, string service
 	}
 	if (content_type.length() > 0) {
 		signed_headers += "content-type;";
+#ifdef EMSCRIPTEN
+		// DuckDB-Wasm's XHR transport does not auto-add a Content-Type for a
+		// Uint8Array PUT/POST body, so it must be emitted here to match the
+		// value signed into the canonical request below. Native curl/httplib
+		// re-add the default application/octet-stream themselves, so suppressing it in
+		// the #else branch (see #234) is correct only off-Emscripten.
+		res["content-type"] = content_type;
+#else
 		if (content_type != "application/octet-stream") {
 			res["content-type"] = content_type;
 		}
+#endif
 	}
 	signed_headers += "host;x-amz-content-sha256;x-amz-date";
 	if (use_requester_pays) {
