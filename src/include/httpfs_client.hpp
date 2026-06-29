@@ -103,7 +103,7 @@ public:
 	string GetName() const override;
 
 	//! Whether connection caching is enabled
-	bool connection_caching_enabled = false;
+	bool connection_caching_enabled = true;
 
 private:
 	//! Send request with connection caching (acquire from pool, run, store back)

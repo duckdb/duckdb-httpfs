@@ -164,7 +164,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 #endif
 	};
 	config.AddExtensionOption("httpfs_connection_caching", "Enable connection caching for HTTP requests",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), callback_httpfs_connection_caching);
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), callback_httpfs_connection_caching);
 
 	config.AddExtensionOption("enable_global_s3_configuration",
 	                          "Automatically fetch AWS credentials from environment variables.", LogicalType::BOOLEAN,
