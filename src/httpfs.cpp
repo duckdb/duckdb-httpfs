@@ -240,7 +240,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 				    error += " This could mean the file was changed. Try disabling the duckdb http metadata cache "
 				             "if enabled, and confirm the server supports range requests.";
 			    }
-			    throw HTTPException(error);
+			    throw HTTPException(response, error);
 		    }
 		    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() &&
 		        response.HasHeader("x-amz-version-id")) {
@@ -767,12 +767,20 @@ void HTTPFileHandle::FullDownload(HTTPFileSystem &hfs, bool &should_write_cache)
 	const auto &cache_entry = http_params.state->GetCachedFile(path);
 	cached_file_handle = cache_entry->GetHandle();
 	if (!cached_file_handle->Initialized()) {
-		// Try to fully download the file first
-		const auto full_download_result = hfs.GetRequest(*this, path, {});
-		if (full_download_result->status != HTTPStatusCode::OK_200) {
-			throw HTTPException(*full_download_result, "Full download failed to to URL \"%s\": %d (%s)",
-			                    full_download_result->url, static_cast<int>(full_download_result->status),
-			                    full_download_result->GetError());
+		// Try to fully download the file first. On any failure we reset the buffer and release the
+		// handle (and with it the lock on the cached file) so the download can be retried from
+		// scratch with a fresh handle, without deadlocking on the still-held lock.
+		try {
+			auto full_download_result = hfs.GetRequest(*this, path, {});
+			if (full_download_result->status != HTTPStatusCode::OK_200) {
+				throw HTTPException(*full_download_result, "Full download failed to to URL \"%s\": %d (%s)",
+				                    full_download_result->url, static_cast<int>(full_download_result->status),
+				                    full_download_result->GetError());
+			}
+		} catch (...) {
+			ResetDownloadState();
+			cached_file_handle.reset();
+			throw;
 		}
 		// Mark the file as initialized, set its final length, and unlock it to allowing parallel reads
 		cached_file_handle->SetInitialized(length);
@@ -826,6 +834,13 @@ optional_idx TryParseContentLength(const HTTPHeaders &headers) {
 	} catch (...) {
 		return optional_idx();
 	}
+}
+
+void HTTPFileHandle::ResetDownloadState() {
+	if (cached_file_handle) {
+		cached_file_handle->ResetBuffer();
+	}
+	length = 0;
 }
 
 void HTTPFileHandle::LoadFileInfo() {

@@ -599,57 +599,155 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, string s3
 	return HTTPFileSystem::HeadRequest(handle, http_url, headers);
 }
 
+namespace {
+
+bool IsWrongRegionStatus(HTTPStatusCode status) {
+	return status == HTTPStatusCode::MovedPermanently_301 || status == HTTPStatusCode::BadRequest_400;
+}
+
+bool IsWrongRegionStatus(const string &status_code) {
+	return status_code == "301" || status_code == "400";
+}
+
+bool TrySetUpdatedBucketRegion(const S3AuthParams &auth_params, const string &response_region,
+                               string &updated_bucket_region) {
+	if (response_region == auth_params.region) {
+		return false;
+	}
+	updated_bucket_region = response_region;
+	return true;
+}
+
+bool TryGetUpdatedBucketRegion(const S3AuthParams &auth_params, HTTPStatusCode status, const HTTPHeaders &headers,
+                               string &updated_bucket_region) {
+	if (!IsWrongRegionStatus(status) || !headers.HasHeader("x-amz-bucket-region")) {
+		return false;
+	}
+	return TrySetUpdatedBucketRegion(auth_params, headers.GetHeaderValue("x-amz-bucket-region"), updated_bucket_region);
+}
+
+bool TryGetUpdatedBucketRegion(const S3AuthParams &auth_params, const unordered_map<string, string> &extra_info,
+                               string &updated_bucket_region) {
+	auto status_code = extra_info.find("status_code");
+	if (status_code == extra_info.end() || !IsWrongRegionStatus(status_code->second)) {
+		return false;
+	}
+	auto response_region = extra_info.find("header_x-amz-bucket-region");
+	if (response_region == extra_info.end()) {
+		return false;
+	}
+	return TrySetUpdatedBucketRegion(auth_params, response_region->second, updated_bucket_region);
+}
+
+bool TryGetUpdatedBucketRegion(const S3AuthParams &auth_params, const HTTPResponse &response,
+                               string &updated_bucket_region) {
+	return TryGetUpdatedBucketRegion(auth_params, response.status, response.headers, updated_bucket_region);
+}
+
+bool TryGetUpdatedBucketRegion(const S3AuthParams &auth_params, const ErrorData &error, string &updated_bucket_region) {
+	return TryGetUpdatedBucketRegion(auth_params, error.ExtraInfo(), updated_bucket_region);
+}
+
+bool TryGetUpdatedBucketRegion(const S3AuthParams &auth_params, std::exception &ex, string &updated_bucket_region) {
+	ErrorData error(ex);
+	return TryGetUpdatedBucketRegion(auth_params, error, updated_bucket_region);
+}
+
+} // namespace
+
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	auto auth_params = s3_handle.auth_params;
-	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
 
-	string query_string;
-	if (!s3_handle.version_id.empty()) {
-		query_string = "versionId=" + UrlEncode(s3_handle.version_id, true);
+	auto make_request = [&]() -> unique_ptr<HTTPResponse> {
+		auto auth_params = s3_handle.auth_params;
+		auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
+
+		string query_string;
+		if (!s3_handle.version_id.empty()) {
+			query_string = "versionId=" + UrlEncode(s3_handle.version_id, true);
+		}
+
+		string http_url = parsed_s3_url.GetHTTPUrl(auth_params, query_string);
+
+		HTTPHeaders headers;
+		if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
+			// Use bearer token for GCS
+			headers["Authorization"] = "Bearer " + auth_params.oauth2_bearer_token;
+			headers["Host"] = parsed_s3_url.host;
+		} else {
+			// Use existing S3 authentication
+			headers = CreateS3Header(parsed_s3_url.path, query_string, parsed_s3_url.host, "s3", "GET", auth_params, "",
+			                         "", "", "");
+		}
+
+		return HTTPFileSystem::GetRequest(handle, http_url, headers);
+	};
+
+	try {
+		auto result = make_request();
+		string updated_bucket_region;
+		if (TryGetUpdatedBucketRegion(s3_handle.auth_params, *result, updated_bucket_region)) {
+			s3_handle.ResetDownloadState();
+			s3_handle.SetRegion(std::move(updated_bucket_region));
+			return make_request();
+		}
+		return result;
+	} catch (std::exception &ex) {
+		string updated_bucket_region;
+		if (!TryGetUpdatedBucketRegion(s3_handle.auth_params, ex, updated_bucket_region)) {
+			throw;
+		}
+		s3_handle.ResetDownloadState();
+		s3_handle.SetRegion(std::move(updated_bucket_region));
+		return make_request();
 	}
-
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, query_string);
-
-	HTTPHeaders headers;
-	if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
-		// Use bearer token for GCS
-		headers["Authorization"] = "Bearer " + auth_params.oauth2_bearer_token;
-		headers["Host"] = parsed_s3_url.host;
-	} else {
-		// Use existing S3 authentication
-		headers = CreateS3Header(parsed_s3_url.path, query_string, parsed_s3_url.host, "s3", "GET", auth_params, "", "",
-		                         "", "");
-	}
-
-	return HTTPFileSystem::GetRequest(handle, http_url, headers);
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                        idx_t file_offset, char *buffer_out, idx_t buffer_out_len) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	auto auth_params = s3_handle.auth_params;
-	auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
 
-	string query_string;
-	if (!s3_handle.version_id.empty()) {
-		query_string = "versionId=" + UrlEncode(s3_handle.version_id, true);
+	auto make_request = [&]() -> unique_ptr<HTTPResponse> {
+		auto auth_params = s3_handle.auth_params;
+		auto parsed_s3_url = S3UrlParse(s3_url, auth_params);
+
+		string query_string;
+		if (!s3_handle.version_id.empty()) {
+			query_string = "versionId=" + UrlEncode(s3_handle.version_id, true);
+		}
+
+		string http_url = parsed_s3_url.GetHTTPUrl(auth_params, query_string);
+
+		HTTPHeaders headers;
+		if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
+			// Use bearer token for GCS
+			headers["Authorization"] = "Bearer " + auth_params.oauth2_bearer_token;
+			headers["Host"] = parsed_s3_url.host;
+		} else {
+			// Use existing S3 authentication
+			headers = CreateS3Header(parsed_s3_url.path, query_string, parsed_s3_url.host, "s3", "GET", auth_params, "",
+			                         "", "", "");
+		}
+
+		return HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);
+	};
+
+	try {
+		auto result = make_request();
+		string updated_bucket_region;
+		if (TryGetUpdatedBucketRegion(s3_handle.auth_params, *result, updated_bucket_region)) {
+			s3_handle.SetRegion(std::move(updated_bucket_region));
+			return make_request();
+		}
+		return result;
+	} catch (std::exception &ex) {
+		string updated_bucket_region;
+		if (!TryGetUpdatedBucketRegion(s3_handle.auth_params, ex, updated_bucket_region)) {
+			throw;
+		}
+		s3_handle.SetRegion(std::move(updated_bucket_region));
+		return make_request();
 	}
-
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, query_string);
-
-	HTTPHeaders headers;
-	if (IsGCSRequest(s3_url) && !auth_params.oauth2_bearer_token.empty()) {
-		// Use bearer token for GCS
-		headers["Authorization"] = "Bearer " + auth_params.oauth2_bearer_token;
-		headers["Host"] = parsed_s3_url.host;
-	} else {
-		// Use existing S3 authentication
-		headers = CreateS3Header(parsed_s3_url.path, query_string, parsed_s3_url.host, "s3", "GET", auth_params, "", "",
-		                         "", "");
-	}
-
-	return HTTPFileSystem::GetRangeRequest(handle, http_url, headers, file_offset, buffer_out, buffer_out_len);
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map) {
@@ -724,16 +822,10 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		}
 		string correct_region;
 		if (!refreshed_secret) {
-			auto &extra_info = error.ExtraInfo();
-			auto entry = extra_info.find("status_code");
-			if (entry != extra_info.end()) {
-				if (entry->second == "301" || entry->second == "400") {
-					auto new_region = extra_info.find("header_x-amz-bucket-region");
-					if (new_region != extra_info.end()) {
-						correct_region = new_region->second;
-					}
-				}
-				if (entry->second == "403") {
+			const auto &extra_info = error.ExtraInfo();
+			if (!TryGetUpdatedBucketRegion(auth_params, error, correct_region)) {
+				auto entry = extra_info.find("status_code");
+				if (entry != extra_info.end() && entry->second == "403") {
 					// 403: FORBIDDEN
 					string extra_text;
 					if (IsGCSRequest(path)) {
@@ -743,8 +835,6 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 					}
 					throw Exception(extra_info, error.Type(), error.RawMessage() + extra_text);
 				}
-			}
-			if (correct_region.empty()) {
 				throw;
 			}
 		}
@@ -759,6 +849,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 			    path, auth_params.region, correct_region);
 			SetRegion(std::move(correct_region));
 		}
+		ResetDownloadState();
 		HTTPFileHandle::Initialize(opener);
 	}
 
@@ -1419,27 +1510,26 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		string updated_bucket_region;
 		if (result->status == HTTPStatusCode::MovedPermanently_301) {
 			string moved_error;
-			if (it == 0 && result->HasHeader("x-amz-bucket-region")) {
+			if (it == 0 && TryGetUpdatedBucketRegion(s3_auth_params, *result, updated_bucket_region)) {
+				// bucket region was updated below
+			} else if (!result->HasHeader("x-amz-bucket-region")) {
+				moved_error = "HTTP response did not contain header_x-amz-bucket-region";
+			} else {
 				auto response_region = result->GetHeaderValue("x-amz-bucket-region");
 				if (response_region == s3_auth_params.region) {
 					moved_error = "suggested region \"" + response_region +
 					              "\" is the same as the region we used to make the request";
 				} else {
-					updated_bucket_region = response_region;
+					moved_error = "received another redirect to region \"" + response_region + "\" after retrying";
 				}
-			} else {
-				moved_error = "HTTP response did not contain header_x-amz-bucket-region";
 			}
 			if (!moved_error.empty()) {
 				throw HTTPException(*result, "HTTP 301 response when running glob \"%s\" but %s", path, moved_error);
 			}
 		}
 		if (error.HasError()) {
-			if (it == 0 && result->HasHeader("x-amz-bucket-region")) {
-				auto response_region = result->GetHeaderValue("x-amz-bucket-region");
-				if (response_region != s3_auth_params.region) {
-					updated_bucket_region = response_region;
-				}
+			if (it == 0 && updated_bucket_region.empty()) {
+				TryGetUpdatedBucketRegion(s3_auth_params, *result, updated_bucket_region);
 			}
 			if (updated_bucket_region.empty()) {
 				// no updated region found
