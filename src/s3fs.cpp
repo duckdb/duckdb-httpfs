@@ -426,9 +426,54 @@ void S3FileSystem::ReadQueryParams(const string &url_query_param, S3AuthParams &
 	}
 }
 
+namespace {
+//! Additional URL schemes routed to the S3-compatible filesystem, configured
+//! via the 's3_compatible_url_schemes' setting (e.g. "oss://", "cos://").
+mutex custom_scheme_lock;
+vector<string> custom_url_schemes;
+} // namespace
+
+void S3FileSystem::SetCustomUrlSchemes(const string &schemes_csv) {
+	//! Schemes already handled by built-in filesystems; allowing these would hijack their routing
+	static const vector<string> reserved_schemes = {"s3://", "s3a://",   "s3n://", "gcs://",  "gs://",
+	                                                "r2://", "http://",  "https://", "hf://", "file://"};
+	vector<string> result;
+	for (auto &scheme : StringUtil::Split(schemes_csv, ',')) {
+		auto trimmed = StringUtil::Lower(scheme);
+		StringUtil::Trim(trimmed);
+		if (trimmed.empty()) {
+			continue;
+		}
+		// Accept both 'oss' and 'oss://'
+		if (!StringUtil::EndsWith(trimmed, "://")) {
+			trimmed += "://";
+		}
+		for (auto &reserved : reserved_schemes) {
+			if (trimmed == reserved) {
+				throw InvalidInputException("Scheme '%s' is already handled by a built-in filesystem and cannot be "
+				                            "added to 's3_compatible_url_schemes'",
+				                            trimmed);
+			}
+		}
+		result.push_back(std::move(trimmed));
+	}
+	lock_guard<mutex> guard(custom_scheme_lock);
+	custom_url_schemes = std::move(result);
+}
+
+vector<string> S3FileSystem::GetCustomUrlSchemes() {
+	lock_guard<mutex> guard(custom_scheme_lock);
+	return custom_url_schemes;
+}
+
 string S3FileSystem::TryGetPrefix(const string &url) {
 	const string prefixes[] = {"s3://", "s3a://", "s3n://", "gcs://", "gs://", "r2://"};
 	for (auto &prefix : prefixes) {
+		if (StringUtil::StartsWith(StringUtil::Lower(url), prefix)) {
+			return prefix;
+		}
+	}
+	for (auto &prefix : GetCustomUrlSchemes()) {
 		if (StringUtil::StartsWith(StringUtil::Lower(url), prefix)) {
 			return prefix;
 		}
@@ -439,7 +484,8 @@ string S3FileSystem::TryGetPrefix(const string &url) {
 string S3FileSystem::GetPrefix(const string &url) {
 	auto prefix = TryGetPrefix(url);
 	if (prefix.empty()) {
-		throw IOException("URL needs to start with s3://, gcs:// or r2://");
+		throw IOException("URL needs to start with s3://, gcs:// or r2:// (or a scheme listed in the "
+		                  "'s3_compatible_url_schemes' setting)");
 	}
 	return prefix;
 }
@@ -778,6 +824,11 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 
 bool S3FileSystem::CanHandleFile(const string &fpath) {
 
+	for (auto &prefix : GetCustomUrlSchemes()) {
+		if (fpath.rfind(prefix, 0) == 0) {
+			return true;
+		}
+	}
 	return fpath.rfind("s3://", 0) * fpath.rfind("s3a://", 0) * fpath.rfind("s3n://", 0) * fpath.rfind("gcs://", 0) *
 	           fpath.rfind("gs://", 0) * fpath.rfind("r2://", 0) ==
 	       0;

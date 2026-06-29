@@ -101,6 +101,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption(
+	    "s3_compatible_url_schemes",
+	    "Comma-separated list of additional URL schemes routed to the S3-compatible filesystem (e.g. 'oss, cos'). "
+	    "Can only be set globally.",
+	    LogicalType::VARCHAR, Value(""),
+	    [](ClientContext &context, SetScope scope, Value &parameter) {
+		    if (scope == SetScope::SESSION || scope == SetScope::LOCAL) {
+			    throw InvalidInputException("s3_compatible_url_schemes can only be set globally: SET GLOBAL "
+			                                "s3_compatible_url_schemes = '%s'",
+			                                parameter.ToString());
+		    }
+		    S3FileSystem::SetCustomUrlSchemes(parameter.ToString());
+	    },
+	    SetScope::GLOBAL);
+	config.AddExtensionOption(
 	    "s3_allow_recursive_globbing",
 	    "Whether globs on S3-like storage are optimized with recursive strategy (alterative is listing)",
 	    LogicalType::BOOLEAN, Value(true));

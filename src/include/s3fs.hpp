@@ -192,6 +192,11 @@ public:
 
 	static string TryGetPrefix(const string &url);
 
+	//! Configure additional URL schemes routed to the S3-compatible filesystem
+	//! (set via the 's3_compatible_url_schemes' setting, e.g. "oss, cos")
+	static void SetCustomUrlSchemes(const string &schemes_csv);
+	static vector<string> GetCustomUrlSchemes();
+
 	//! Wrapper around BufferManager::Allocate to limit the number of buffers
 	BufferHandle Allocate(idx_t part_size, uint16_t max_threads);
 
