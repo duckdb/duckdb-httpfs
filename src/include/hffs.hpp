@@ -16,6 +16,10 @@ struct ParsedHFUrl {
 	string revision = "main";
 	//! For DuckDB this may be a sensible default?
 	string repo_type = "datasets";
+
+	bool HasRevision() const {
+		return repo_type != "buckets";
+	}
 };
 
 class HuggingFaceFileSystem : public HTTPFileSystem {
