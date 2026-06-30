@@ -12,7 +12,7 @@ class HTTPState;
 
 class CURLHandle {
 public:
-	CURLHandle(const string &token, const string &cert_path);
+	CURLHandle(const string &token, const string &cert_path, const bool use_native_ca);
 	~CURLHandle();
 
 public:
