@@ -495,7 +495,7 @@ private:
 				curl_headers.Add(entry.first + ": " + entry.second);
 			}
 		}
-		return curl_headers;
+		return std::move(curl_headers);
 	}
 
 	void ResetRequestInfo() {
