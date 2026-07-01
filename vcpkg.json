@@ -1,6 +1,9 @@
 {
   "dependencies": [
     "openssl",
-    "curl"
+    {
+      "name": "curl",
+      "features": ["zstd"]
+    }
   ]
 }
