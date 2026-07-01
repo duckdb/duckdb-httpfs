@@ -1,6 +1,7 @@
 #pragma once
 
 #include <curl/curl.h>
+#include <utility>
 
 #include "duckdb/common/http_util.hpp"
 
@@ -36,6 +37,16 @@ public:
 	}
 	CURLRequestHeaders() {
 	}
+	CURLRequestHeaders(CURLRequestHeaders &&other) noexcept {
+		headers = other.headers;
+		other.headers = nullptr;
+	}
+	CURLRequestHeaders &operator=(CURLRequestHeaders &&other) noexcept {
+		std::swap(headers, other.headers);
+		return *this;
+	}
+	CURLRequestHeaders(const CURLRequestHeaders &) = delete;
+	CURLRequestHeaders &operator=(const CURLRequestHeaders &) = delete;
 
 	~CURLRequestHeaders() {
 		if (headers) {
