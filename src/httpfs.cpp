@@ -15,6 +15,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "http_state.hpp"
 
+#include <cinttypes>
 #include <chrono>
 #include <map>
 #include <string>
@@ -553,8 +554,9 @@ bool HTTPFileSystem::ReadInternal(FileHandle &handle, void *buffer, int64_t nr_b
 			throw InternalException("Cached file not initialized properly");
 		}
 		if (hfh.cached_file_handle->GetSize() < location + nr_bytes) {
-			throw IOException("Cached file length can't satisfy the requested Read. You can try to resolve this by "
-			                  "enabling `SET force_download=true`");
+			throw InternalException("Cached file length: %" PRIu64
+			                        " can't satisfy the requested Read, location: %" PRIu64 ", length: %" PRIu64 ".",
+			                        hfh.cached_file_handle->GetSize(), location, nr_bytes);
 		}
 		memcpy(buffer, hfh.cached_file_handle->GetData() + location, nr_bytes);
 		DUCKDB_LOG_FILE_SYSTEM_READ(handle, nr_bytes, location);
@@ -664,6 +666,16 @@ void HTTPFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 
 	bool should_write_cache = false;
 	hfh.FullDownload(*this, should_write_cache);
+
+	if (hfh.cached_file_handle->GetSize() < location + nr_bytes) {
+		throw HTTPException(Exception::ConstructMessage(
+		    "The size of the fully downloaded file: %" PRIu64 " can't satisfy the requested Read, location: %" PRIu64
+		    ", length: %" PRIu64
+		    ". This can happen when the Content-Lenght reported by HEAD request exceeds the downloaded "
+		    "Content-Length (from the GET request). You can try to resolve this by "
+		    "enabling `SET force_download=true`",
+		    hfh.cached_file_handle->GetSize(), location, nr_bytes));
+	}
 
 	if (!ReadInternal(handle, buffer, nr_bytes, location)) {
 		throw HTTPException("Failed to read from HTTP file after automatically retrying a full file download.");
