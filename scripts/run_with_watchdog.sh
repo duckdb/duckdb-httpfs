@@ -16,12 +16,12 @@
 #
 # Tunables (env):
 #   WATCHDOG_STALL_SECS  no-output window that triggers a backtrace dump (def 240)
-#   WATCHDOG_MAX_SECS    hard cap; kill + fail after this many seconds  (def 1800)
+#   WATCHDOG_MAX_SECS    hard cap; kill + fail after this many seconds  (def 900)
 #   WATCHDOG_POLL_SECS   how often to check for progress                (def 10)
 set -uo pipefail
 
 STALL_SECS="${WATCHDOG_STALL_SECS:-240}"
-MAX_SECS="${WATCHDOG_MAX_SECS:-1800}"
+MAX_SECS="${WATCHDOG_MAX_SECS:-900}"
 POLL="${WATCHDOG_POLL_SECS:-10}"
 
 LOG="$(mktemp)"
