@@ -39,7 +39,7 @@ jobs:
 
       - name: Install Ninja
         shell: bash
-        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build gdb
 
       - name: Setup Ccache
         uses: hendrikmuhs/ccache-action@main
@@ -85,7 +85,10 @@ jobs:
         run: |
           source ./scripts/run_s3_test_server.sh
           source ./scripts/set_s3_test_server_variables.sh
-          ./build/release/test/unittest "*" --skip-error-messages "[]"
-          ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation='curl';" || true
-          ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation='httplib';" || true
-          ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_connection_caching=true;" || true
+          # Wrapped in a stall-watchdog: on a hung/pathologically-slow test it dumps
+          # an all-thread backtrace and fails in minutes instead of burning the 6h
+          # job cap silently. See scripts/run_with_watchdog.sh.
+          ./scripts/run_with_watchdog.sh ./build/release/test/unittest "*" --skip-error-messages "[]"
+          ./scripts/run_with_watchdog.sh ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation='curl';" || true
+          ./scripts/run_with_watchdog.sh ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_client_implementation='httplib';" || true
+          ./scripts/run_with_watchdog.sh ./build/release/test/unittest "*" --skip-error-messages "[]" --statically-loaded-extensions "[httpfs,parquet,core_functions]" --on-init "SET httpfs_connection_caching=true;" || true
