@@ -1,4 +1,6 @@
 #include "httpfs.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "duckdb/logging/log_manager.hpp"
 
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/exception/http_exception.hpp"

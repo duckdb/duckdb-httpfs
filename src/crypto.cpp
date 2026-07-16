@@ -1,4 +1,5 @@
 #include "crypto.hpp"
+#include "duckdb/storage/storage_info.hpp"
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/exception.hpp"

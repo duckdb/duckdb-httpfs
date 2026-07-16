@@ -1,4 +1,5 @@
 #include "s3fs.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "hash_functions.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
