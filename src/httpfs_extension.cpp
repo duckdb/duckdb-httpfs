@@ -1,4 +1,5 @@
 #include "httpfs_extension.hpp"
+#include "duckdb/logging/logger.hpp"
 
 #include "httpfs_client.hpp"
 #include "create_secret_functions.hpp"

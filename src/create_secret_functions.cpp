@@ -1,4 +1,5 @@
 #include "create_secret_functions.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "s3fs.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/local_file_system.hpp"
