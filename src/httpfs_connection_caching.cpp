@@ -27,10 +27,9 @@ unique_ptr<HTTPClient> HTTPClientConnectionCache::Find(const string &base_url) {
 	for (size_t i = 0; i < POOL_COUNT; i++) {
 		const size_t idx = (start + i) & (POOL_COUNT - 1);
 		auto &pool = pools[idx];
-		unique_lock<mutex> lock(pool.lock, std::try_to_lock);
-		if (!lock) {
-			continue;
-		}
+		// block instead of skipping: a spurious miss dials a new connection (DNS + TLS),
+		// which is far more expensive than waiting for this short critical section
+		lock_guard<mutex> lock(pool.lock);
 		for (auto &entry : pool.entries) {
 			if (entry && entry->GetBaseUrl() == base_url) {
 				cache_pool_idx = idx;
@@ -46,14 +45,11 @@ void HTTPClientConnectionCache::Store(unique_ptr<HTTPClient> &&client) {
 		return;
 	}
 	const size_t start = cache_pool_idx;
-	// Pass 1: prefer an empty slot in any reachable pool
+	// Pass 1: prefer an empty slot in any pool
 	for (size_t i = 0; i < POOL_COUNT; i++) {
 		const size_t idx = (start + i) & (POOL_COUNT - 1);
 		auto &pool = pools[idx];
-		unique_lock<mutex> lock(pool.lock, std::try_to_lock);
-		if (!lock) {
-			continue;
-		}
+		lock_guard<mutex> lock(pool.lock);
 		for (auto &entry : pool.entries) {
 			if (!entry) {
 				entry = std::move(client);
@@ -62,21 +58,12 @@ void HTTPClientConnectionCache::Store(unique_ptr<HTTPClient> &&client) {
 			}
 		}
 	}
-	// Pass 2: every reachable pool is full — evict at random in the first lockable pool
+	// Pass 2: every pool is full — evict at random in the starting pool
 	RandomEngine engine;
-	for (size_t i = 0; i < POOL_COUNT; i++) {
-		const size_t idx = (start + i) & (POOL_COUNT - 1);
-		auto &pool = pools[idx];
-		unique_lock<mutex> lock(pool.lock, std::try_to_lock);
-		if (!lock) {
-			continue;
-		}
-		const size_t slot = engine.NextRandomInteger() % pool.entries.size();
-		pool.entries[slot] = std::move(client);
-		cache_pool_idx = idx;
-		return;
-	}
-	// Every pool busy — drop the client; will reconnect next time.
+	auto &pool = pools[start];
+	lock_guard<mutex> lock(pool.lock);
+	const size_t slot = engine.NextRandomInteger() % pool.entries.size();
+	pool.entries[slot] = std::move(client);
 }
 
 void HTTPClientConnectionCache::Clear() {

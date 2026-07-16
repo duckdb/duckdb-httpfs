@@ -1078,14 +1078,29 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	}
 }
 
-unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
-	// Try to fetch a cached client
-	auto cached_client = client_cache.GetClient();
-	if (cached_client) {
-		return cached_client;
+//! Whether clients are checked out from the shared connection pool instead of the per-handle cache.
+//! Only the curl util pools clients (one pool per database instance); every other configuration
+//! keeps per-handle reuse so it does not pay a fresh connection per request.
+static bool UseSharedConnectionPool(const HTTPParams &http_params) {
+#ifndef EMSCRIPTEN
+	auto &util = http_params.http_util;
+	if (util.GetName() == "HTTPFS-Curl") {
+		return static_cast<const HTTPFSCurlUtil &>(util).connection_caching_enabled;
 	}
+#endif
+	return false;
+}
 
-	// Create a new client
+unique_ptr<HTTPClient> HTTPFileHandle::GetClient() {
+	if (!UseSharedConnectionPool(http_params)) {
+		// no shared pool for this configuration - reuse this handle's cached client
+		auto cached_client = client_cache.GetClient();
+		if (cached_client) {
+			return cached_client;
+		}
+	}
+	// with the shared pool enabled InitializeClient consults the pool, so that concurrent handles
+	// share connections instead of each hoarding a private pool
 	return CreateClient();
 }
 
@@ -1096,7 +1111,12 @@ unique_ptr<HTTPClient> HTTPFileHandle::CreateClient() {
 }
 
 void HTTPFileHandle::StoreClient(unique_ptr<HTTPClient> client) {
-	client_cache.StoreClient(std::move(client));
+	if (!UseSharedConnectionPool(http_params)) {
+		client_cache.StoreClient(std::move(client));
+		return;
+	}
+	// return the client to the shared connection pool so other handles can reuse it
+	http_params.http_util.CloseClient(std::move(client));
 }
 
 HTTPFileHandle::~HTTPFileHandle() {

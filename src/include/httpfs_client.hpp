@@ -58,7 +58,7 @@ struct HTTPFSParams : public HTTPParams {
 class HTTPClientConnectionCache {
 public:
 	static constexpr size_t POOL_COUNT = 16;
-	static constexpr size_t POOL_SIZE = 16;
+	static constexpr size_t POOL_SIZE = 32;
 	static_assert((POOL_COUNT & (POOL_COUNT - 1)) == 0, "POOL_COUNT must be a power of two");
 
 	unique_ptr<HTTPClient> Find(const string &base_url);
