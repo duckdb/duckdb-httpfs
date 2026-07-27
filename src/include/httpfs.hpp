@@ -14,6 +14,15 @@
 
 namespace duckdb {
 
+struct SuffixReadResult {
+	//! Total file size parsed from the suffix response
+	idx_t file_size = 0;
+	//! Absolute offset where the returned suffix starts
+	idx_t start_offset = 0;
+	//! Number of bytes returned in the caller-provided buffer
+	idx_t bytes_read = 0;
+};
+
 class RangeRequestNotSupportedException {
 public:
 	// Call static Throw instead: if thrown as exception DuckDB can't catch it.
@@ -99,6 +108,7 @@ public:
 	string etag;
 	string version_id;
 	bool force_full_download;
+	bool defer_file_info = false;
 	bool initialized = false;
 
 	bool auto_fallback_to_full_file_download = true;
@@ -135,6 +145,7 @@ public:
 	bool TryGetNetworkThroughput(NetworkThroughputEstimate &result);
 
 	void AddHeaders(HTTPHeaders &map);
+	void EnsureFileInfoLoaded();
 
 	// Get a Client to run requests over
 	unique_ptr<HTTPClient> GetClient();
@@ -236,6 +247,7 @@ public:
 
 	//! HTTP request overrides.
 	virtual unique_ptr<HTTPResponse> HeadRequest(FileHandle &handle, string url, HTTPHeaders header_map);
+	virtual bool TryReadSuffix(FileHandle &handle, data_ptr_t buffer, idx_t buffer_len, SuffixReadResult &result);
 	// Get Request with range parameter that GETs exactly buffer_out_len bytes from the url
 	virtual unique_ptr<HTTPResponse> GetRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map,
 	                                                 idx_t file_offset, char *buffer_out, idx_t buffer_out_len);
@@ -264,6 +276,8 @@ protected:
 	//! Internal read helpers shared by buffered and direct reads.
 	bool TryRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map, idx_t file_offset, char *buffer_out,
 	                     idx_t buffer_out_len);
+	bool TryReadSuffixRequest(FileHandle &handle, string url, HTTPHeaders header_map, data_ptr_t buffer,
+	                          idx_t buffer_len, SuffixReadResult &result);
 	bool ReadInternal(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location);
 
 	//! Shared request runners used by subclasses that need custom request setup/retry behavior.
@@ -288,6 +302,9 @@ protected:
 	                                            bool auto_fallback_to_full_file_download, idx_t file_offset,
 	                                            char *buffer_out, idx_t buffer_out_len, HTTPErrorCallback get_error,
 	                                            HTTPSendCallback send_request);
+	bool RunGetSuffixRequest(HTTPFileHandle &handle, string url, HTTPHeaders header_map, HTTPFSParams &http_params,
+	                         idx_t buffer_len, data_ptr_t buffer_out, SuffixReadResult &result,
+	                         HTTPErrorCallback get_error, HTTPSendCallback send_request);
 
 private:
 	// Global cache

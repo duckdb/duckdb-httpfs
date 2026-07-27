@@ -288,6 +288,44 @@ static void SetRangeRequestNotSupported(HTTPResponse &response) {
 	}
 }
 
+struct ParsedContentRange {
+	idx_t start;
+	idx_t end;
+	idx_t file_size;
+};
+
+static bool TryParseContentRange(const HTTPHeaders &headers, ParsedContentRange &result) {
+	if (!headers.HasHeader("Content-Range")) {
+		return false;
+	}
+	string content_range = headers.GetHeaderValue("Content-Range");
+	StringUtil::Trim(content_range);
+	auto space_pos = content_range.find(' ');
+	if (space_pos == string::npos || !StringUtil::CIEquals(content_range.substr(0, space_pos), "bytes")) {
+		return false;
+	}
+	auto dash_pos = content_range.find('-', space_pos + 1);
+	auto slash_pos = content_range.find('/', dash_pos + 1);
+	if (dash_pos == string::npos || slash_pos == string::npos) {
+		return false;
+	}
+	auto size_string = content_range.substr(slash_pos + 1);
+	if (size_string == "*") {
+		return false;
+	}
+	try {
+		result.start = std::stoull(content_range.substr(space_pos + 1, dash_pos - space_pos - 1));
+		result.end = std::stoull(content_range.substr(dash_pos + 1, slash_pos - dash_pos - 1));
+		result.file_size = std::stoull(size_string);
+	} catch (...) {
+		return false;
+	}
+	if (result.start > result.end || result.end >= result.file_size) {
+		return false;
+	}
+	return true;
+}
+
 unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh, string url, HTTPHeaders header_map,
                                                             HTTPFSParams &http_params, const string &etag,
                                                             bool auto_fallback_to_full_file_download, idx_t file_offset,
@@ -403,6 +441,88 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
 	return response;
 }
 
+bool HTTPFileSystem::RunGetSuffixRequest(HTTPFileHandle &hfh, string url, HTTPHeaders header_map,
+                                         HTTPFSParams &http_params, idx_t buffer_len, data_ptr_t buffer_out,
+                                         SuffixReadResult &result, HTTPErrorCallback get_error,
+                                         HTTPSendCallback send_request) {
+	if (buffer_len == 0) {
+		return false;
+	}
+	result = SuffixReadResult();
+
+	header_map.Insert("Range", "bytes=-" + to_string(buffer_len));
+	ParsedContentRange range;
+	bool usable_response = false;
+	idx_t out_offset = 0;
+
+	GetRequestInfo get_request(
+	    url, header_map, http_params,
+	    [&](const HTTPResponse &response) {
+		    if (static_cast<int>(response.status) >= 400) {
+			    throw get_error(response);
+		    }
+		    if (response.status != HTTPStatusCode::PartialContent_206 ||
+		        !TryParseContentRange(response.headers, range)) {
+			    return false;
+		    }
+		    const auto expected_bytes = range.end - range.start + 1;
+		    if (expected_bytes > buffer_len) {
+			    return false;
+		    }
+		    usable_response = true;
+		    result.file_size = range.file_size;
+		    result.start_offset = range.start;
+
+		    if (response.HasHeader("Last-Modified")) {
+			    HTTPFileSystem::TryParseLastModifiedTime(response.GetHeaderValue("Last-Modified"), hfh.last_modified);
+		    }
+		    if (response.HasHeader("ETag")) {
+			    hfh.etag = response.GetHeaderValue("ETag");
+		    }
+		    if (http_params.s3_version_id_pinning && response.HasHeader("x-amz-version-id")) {
+			    lock_guard<mutex> lck(hfh.mu);
+			    if (hfh.version_id.empty()) {
+				    hfh.version_id = response.GetHeaderValue("x-amz-version-id");
+			    }
+		    }
+		    hfh.length = range.file_size;
+		    hfh.initialized = true;
+		    hfh.file_state->MarkRangeRequestsSupported();
+		    return true;
+	    },
+	    [&](const_data_ptr_t data, idx_t data_length) {
+		    if (!usable_response) {
+			    return false;
+		    }
+		    if (data_length + out_offset > buffer_len) {
+			    throw HTTPException(StringUtil::Format(
+			        "Server sent back more data than expected for suffix range request to '%s'", url));
+		    }
+		    memcpy(buffer_out + out_offset, data, data_length);
+		    out_offset += data_length;
+		    result.bytes_read = out_offset;
+		    return true;
+	    });
+
+	auto response = send_request(get_request);
+	if (!response || response->HasRequestError()) {
+		return false;
+	}
+	if (!usable_response || response->status != HTTPStatusCode::PartialContent_206) {
+		return false;
+	}
+	const auto expected_bytes = range.end - range.start + 1;
+	if (result.bytes_read != expected_bytes) {
+		return false;
+	}
+	const auto elapsed_nanos =
+	    TimePoint::ElapsedNanos(get_request.request_monotonic_start, get_request.request_monotonic_end);
+	const double total_seconds = elapsed_nanos > 0 ? static_cast<double>(elapsed_nanos) / 1e9 : 0;
+	const idx_t bytes = get_request.bytes_received != 0 ? get_request.bytes_received : result.bytes_read;
+	hfh.RecordNetworkSample(total_seconds, bytes, get_request.have_time_to_fst_byte, get_request.time_to_fst_byte_sec);
+	return true;
+}
+
 unique_ptr<HTTPResponse> HTTPFileSystem::PostRequest(HTTPInput &input, string url, HTTPHeaders header_map,
                                                      string &buffer_out, char *buffer_in, idx_t buffer_in_len,
                                                      string params) {
@@ -489,6 +609,28 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	return response;
 }
 
+bool HTTPFileSystem::TryReadSuffix(FileHandle &handle, data_ptr_t buffer, idx_t buffer_len, SuffixReadResult &result) {
+	auto &hfh = handle.Cast<HTTPFileHandle>();
+	D_ASSERT(hfh.file_state);
+	return TryReadSuffixRequest(handle, hfh.path, {}, buffer, buffer_len, result);
+}
+
+bool HTTPFileSystem::TryReadSuffixRequest(FileHandle &handle, string url, HTTPHeaders header_map, data_ptr_t buffer,
+                                          idx_t buffer_len, SuffixReadResult &result) {
+	auto &hfh = handle.Cast<HTTPFileHandle>();
+	D_ASSERT(hfh.file_state);
+	AddUserAgentIfAvailable(hfh.http_params, header_map);
+	AddHandleHeaders(hfh.http_params, header_map);
+
+	auto http_client = hfh.GetClient();
+	auto success = RunGetSuffixRequest(
+	    hfh, url, header_map, hfh.http_params, buffer_len, buffer, result,
+	    [&](const HTTPResponse &response) { return GetHTTPError(handle, response, url); },
+	    [&](BaseRequest &request) { return hfh.http_params.http_util.Request(request, http_client); });
+	hfh.StoreClient(std::move(http_client));
+	return success;
+}
+
 HTTPInput::HTTPInput(unique_ptr<HTTPParams> params_p)
     : params(std::move(params_p)), http_params(params->Cast<HTTPFSParams>()) {
 }
@@ -517,6 +659,10 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		auto force_full_download_entry = info.find("force_full_download");
 		if (force_full_download_entry != info.end()) {
 			force_full_download = force_full_download_entry->second.GetValue<bool>();
+		}
+		auto defer_file_info_entry = info.find("defer_file_info");
+		if (defer_file_info_entry != info.end()) {
+			defer_file_info = BooleanValue::Get(defer_file_info_entry->second);
 		}
 		if (lm_entry != info.end() && etag_entry != info.end() && fs_entry != info.end()) {
 			// we found all relevant entries (last_modified, etag and file size)
@@ -852,16 +998,19 @@ void HTTPFileSystem::FileSync(FileHandle &handle) {
 
 int64_t HTTPFileSystem::GetFileSize(FileHandle &handle) {
 	auto &sfh = handle.Cast<HTTPFileHandle>();
+	sfh.EnsureFileInfoLoaded();
 	return sfh.length;
 }
 
 timestamp_t HTTPFileSystem::GetLastModifiedTime(FileHandle &handle) {
 	auto &sfh = handle.Cast<HTTPFileHandle>();
+	sfh.EnsureFileInfoLoaded();
 	return sfh.last_modified;
 }
 
 string HTTPFileSystem::GetVersionTag(FileHandle &handle) {
 	auto &sfh = handle.Cast<HTTPFileHandle>();
+	sfh.EnsureFileInfoLoaded();
 	return sfh.etag;
 }
 
@@ -1068,6 +1217,10 @@ void HTTPFileHandle::LoadFileInfo() {
 	initialized = true;
 }
 
+void HTTPFileHandle::EnsureFileInfoLoaded() {
+	LoadFileInfo();
+}
+
 void HTTPFileHandle::TryAddLogger(FileOpener &opener) {
 	auto context = opener.TryGetClientContext();
 	if (context) {
@@ -1150,11 +1303,15 @@ void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
 
 			should_write_cache = true;
 		}
+
+		if (defer_file_info) {
+			return;
+		}
 	}
+
 	LoadFileInfo();
 
 	if (flags.OpenForReading()) {
-
 		const auto has_cache_state = (http_params.state != nullptr) && (length == 0);
 		const auto always_download = force_full_download;
 		const auto meets_threshold = (length < http_params.force_download_threshold) && (length != 0);

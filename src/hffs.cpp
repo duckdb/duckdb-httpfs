@@ -265,6 +265,13 @@ unique_ptr<HTTPResponse> HuggingFaceFileSystem::HeadRequest(FileHandle &handle, 
 	return HTTPFileSystem::HeadRequest(handle, http_url, header_map);
 }
 
+bool HuggingFaceFileSystem::TryReadSuffix(FileHandle &handle, data_ptr_t buffer, idx_t buffer_len,
+                                          SuffixReadResult &result) {
+	auto &hf_handle = handle.Cast<HFFileHandle>();
+	auto http_url = HuggingFaceFileSystem::GetFileUrl(hf_handle.parsed_url);
+	return TryReadSuffixRequest(handle, http_url, {}, buffer, buffer_len, result);
+}
+
 unique_ptr<HTTPResponse> HuggingFaceFileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                            CachedFileDownload &download) {
 	auto &hf_handle = handle.Cast<HFFileHandle>();

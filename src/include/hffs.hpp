@@ -25,6 +25,7 @@ public:
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 
 	duckdb::unique_ptr<HTTPResponse> HeadRequest(FileHandle &handle, string hf_url, HTTPHeaders header_map) override;
+	bool TryReadSuffix(FileHandle &handle, data_ptr_t buffer, idx_t buffer_len, SuffixReadResult &result) override;
 	duckdb::unique_ptr<HTTPResponse> GetRequest(FileHandle &handle, string hf_url, HTTPHeaders header_map,
 	                                            CachedFileDownload &download) override;
 	duckdb::unique_ptr<HTTPResponse> GetRangeRequest(FileHandle &handle, string hf_url, HTTPHeaders header_map,

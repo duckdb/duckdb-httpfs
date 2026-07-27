@@ -1042,6 +1042,20 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, string s3
 	});
 }
 
+bool S3FileSystem::TryReadSuffix(FileHandle &handle, data_ptr_t buffer, idx_t buffer_len, SuffixReadResult &result) {
+	auto &s3_handle = handle.Cast<S3FileHandle>();
+	auto response =
+	    RunS3HandleRequestWithAuthRefresh(s3_handle, s3_handle.path, "GET", true, [&](S3RequestData &request_data) {
+		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		    const auto success = RunGetSuffixRequest(
+		        s3_handle, request_data.http_url, request_data.headers, params, buffer_len, buffer, result,
+		        [&](const HTTPResponse &response) { return GetS3RequestError(request_data, response); },
+		        [&](BaseRequest &request) { return SendS3HandleRequestWithClientCache(s3_handle, params, request); });
+		    return make_uniq<HTTPResponse>(success ? HTTPStatusCode::PartialContent_206 : HTTPStatusCode::INVALID);
+	    });
+	return response && response->status == HTTPStatusCode::PartialContent_206;
+}
+
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                   CachedFileDownload &download) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
