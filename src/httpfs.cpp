@@ -55,8 +55,6 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_wait_ms", result->retry_wait_ms, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_retry_backoff", result->retry_backoff, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_keep_alive", result->keep_alive, info);
-	FileOpener::TryGetCurrentSetting(opener, "enable_curl_server_cert_verification",
-	                                 result->enable_curl_server_cert_verification, info);
 	FileOpener::TryGetCurrentSetting(opener, "enable_server_cert_verification", result->enable_server_cert_verification,
 	                                 info);
 	FileOpener::TryGetCurrentSetting(opener, "ca_cert_file", result->ca_cert_file, info);
@@ -139,7 +137,6 @@ unique_ptr<HTTPParams> HTTPFSParams::Clone() const {
 	result->force_download = force_download;
 	result->auto_fallback_to_full_download = auto_fallback_to_full_download;
 	result->enable_server_cert_verification = enable_server_cert_verification;
-	result->enable_curl_server_cert_verification = enable_curl_server_cert_verification;
 	result->hf_max_per_page = hf_max_per_page;
 	result->ca_cert_file = ca_cert_file;
 	result->bearer_token = bearer_token;

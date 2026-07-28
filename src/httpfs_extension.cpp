@@ -70,11 +70,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    LogicalType::BOOLEAN, Value(true));
 	config.AddExtensionOption("allow_asterisks_in_http_paths", "Allow '*' character in URLs users can query",
 	                          LogicalType::BOOLEAN, Value(false));
-	config.AddExtensionOption("enable_curl_server_cert_verification",
-	                          "Enable server side certificate verification for CURL backend.", LogicalType::BOOLEAN,
-	                          Value(true));
 	config.AddExtensionOption("enable_server_cert_verification", "Enable server side certificate verification.",
-	                          LogicalType::BOOLEAN, Value(false));
+	                          LogicalType::BOOLEAN, Value(true));
+	// the enable_curl_server_cert_verification setting is deprecated. It is unified with
+	// enable_server_cert_verification
+	auto callback_enable_curl_server_cert_verification = [](ClientContext &context, SetScope scope, Value &parameter) {
+		DUCKDB_LOG_WARNING(context, "the enable_curl_server_cert_verification setting is deprecated. Use "
+		                            "enable_server_cert_verification instead");
+		DBConfig::GetConfig(context).SetOption("enable_server_cert_verification", parameter);
+	};
+	config.AddExtensionOption("enable_curl_server_cert_verification",
+	                          "Deprecated: alias for enable_server_cert_verification.", LogicalType::BOOLEAN,
+	                          Value(true), callback_enable_curl_server_cert_verification);
 	auto callback_ca_cert_file = [](ClientContext &context, SetScope scope, Value &parameter) {
 		if (parameter.IsNull()) {
 			throw InvalidInputException("NULL it's not a valid option for ca_cert_file");
