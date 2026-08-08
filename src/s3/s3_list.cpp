@@ -111,6 +111,10 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 		finished = true;
 		return;
 	}
+	if (!s3_auth_params.version_id.empty()) {
+		// A version id refers to a single object, so cannot reasonably apply to a glob
+		throw NotImplementedException("The s3_version_id parameter cannot be used with glob patterns");
+	}
 
 	shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
 

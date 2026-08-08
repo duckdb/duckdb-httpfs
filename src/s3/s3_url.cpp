@@ -59,6 +59,7 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthParams &params)
 	GetQueryParam("s3_session_token", params.session_token, query_params);
 	GetQueryParam("s3_endpoint", params.endpoint, query_params);
 	GetQueryParam("s3_url_style", params.url_style, query_params);
+	GetQueryParam("s3_version_id", params.version_id, query_params);
 	auto found_param = query_params.find("s3_use_ssl");
 	if (found_param != query_params.end()) {
 		if (found_param->second == "true") {
@@ -84,7 +85,7 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthParams &params)
 	if (!query_params.empty()) {
 		throw IOException("Invalid query parameters found. Supported parameters are:\n's3_region', 's3_access_key_id', "
 		                  "'s3_secret_access_key', 's3_session_token',\n's3_endpoint', 's3_url_style', 's3_use_ssl', "
-		                  "'s3_requester_pays'");
+		                  "'s3_requester_pays', 's3_version_id'");
 	}
 }
 

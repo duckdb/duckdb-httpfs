@@ -100,6 +100,10 @@ unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, 
 	S3AuthParams auth_params = S3AuthParams::ReadFrom(opener, info);
 
 	S3Url::Resolve(file.path, auth_params);
+	if (flags.OpenForWriting() && !auth_params.version_id.empty()) {
+		throw NotImplementedException("Cannot write to \"%s\": s3_version_id is only supported for reading",
+		                              S3Url::GetDisplayUrl(file.path, auth_params));
+	}
 
 	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
 	auto params = http_util.InitializeParameters(opener, info);

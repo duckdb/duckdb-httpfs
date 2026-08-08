@@ -74,6 +74,8 @@ public:
 	bool s3_url_compatibility_mode = false;
 	bool requester_pays = false;
 	string oauth2_bearer_token;
+	//! Explicit object version as set by "s3_version_id" query parameter
+	string version_id;
 };
 
 struct AWSEnvironmentCredentialsProvider {

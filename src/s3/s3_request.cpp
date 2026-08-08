@@ -431,9 +431,15 @@ S3RequestData S3RequestExecutor::CreateHandleRequestData(EncryptionUtil &encrypt
                                                          const string &s3_url, RequestType request_type,
                                                          const string &version_id) {
 	auto captured = s3_handle.request_session->Capture();
+	auto effective_version_id = version_id;
+	if (effective_version_id.empty()) {
+		// Use the "s3_version_id" query parameter, if set
+		effective_version_id = captured.snapshot->Cast<S3RequestSnapshot>().auth_params.version_id;
+	}
 	return S3RequestExecutor::CreateRequestData(
 	    encryption_util, captured, s3_url, request_type, S3RequestTarget::OBJECT, [&](const ParsedS3Url &) {
-		    return version_id.empty() ? S3RequestQuery() : S3RequestQuery({{"versionId", version_id}});
+		    return effective_version_id.empty() ? S3RequestQuery()
+		                                        : S3RequestQuery({{"versionId", effective_version_id}});
 	    });
 }
 
@@ -850,6 +856,12 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 
 unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
+	auto captured = s3_handle.request_session->Capture();
+	auto &auth_params = captured.snapshot->Cast<S3RequestSnapshot>().auth_params;
+	if (!auth_params.version_id.empty()) {
+		throw NotImplementedException("Cannot delete \"%s\": s3_version_id is only supported for reading",
+		                              S3Url::GetDisplayUrl(s3_url, auth_params));
+	}
 	return S3RequestExecutor::RunHandle(
 	    GetEncryptionUtil(), s3_handle, s3_url, RequestType::DELETE_REQUEST, {}, [&](S3RequestData &request_data) {
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
