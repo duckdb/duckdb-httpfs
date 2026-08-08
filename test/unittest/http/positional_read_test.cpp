@@ -367,6 +367,36 @@ static void RunImmutableS3ReadCondition(const string &client_implementation, boo
 	RequireQueryOk(con, "COMMIT");
 }
 
+static void RunUserSpecifiedVersionRead(const string &client_implementation, bool pinning_enabled) {
+	MockS3ServerConfig config;
+	config.metadata.version_id = "user-version";
+	config.metadata.version_on_head = true;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureS3ReadTest(db, con, server, client_implementation);
+	if (pinning_enabled) {
+		RequireQueryOk(con, "SET s3_version_id_pinning=true");
+	}
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	auto handle = fs.OpenFile(server.S3Path() + "?s3_version_id=user-version",
+	                          FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	auto outcome = TryReadHandle(con, *handle, 0, 5);
+	INFO(outcome.error);
+	REQUIRE_FALSE(outcome.failed);
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(observations.size() >= 2);
+	for (auto &observation : observations) {
+		REQUIRE(observation.version_id == "user-version");
+	}
+	RequireQueryOk(con, "COMMIT");
+}
+
 static void RunConditionalFullDownload(const string &client_implementation) {
 	MockS3ServerConfig config;
 	config.range.behavior = MockS3RangeBehavior::IGNORE_RANGE;
@@ -528,6 +558,13 @@ TEST_CASE("S3 GET responses do not change the handle's read condition", "[httpfs
 	RunImmutableS3ReadCondition("httplib", false);
 	RunImmutableS3ReadCondition("curl", true);
 	RunImmutableS3ReadCondition("httplib", true);
+}
+
+TEST_CASE("explicit s3_version_id is carried by every request when reading", "[httpfs][positional-read][s3-version]") {
+	RunUserSpecifiedVersionRead("curl", false);
+	RunUserSpecifiedVersionRead("httplib", false);
+	RunUserSpecifiedVersionRead("curl", true);
+	RunUserSpecifiedVersionRead("httplib", true);
 }
 
 TEST_CASE("HTTP full downloads retain their read condition", "[httpfs][positional-read][full-download]") {

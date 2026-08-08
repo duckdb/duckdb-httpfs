@@ -436,6 +436,26 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		REQUIRE_THROWS(S3Url::Resolve("s3://bucket/key?S3_region=one", auth_params));
 	}
 
+	SECTION("s3_version_id is captured for reads") {
+		S3AuthParams auth_params;
+		auth_params.endpoint = "s3.amazonaws.com";
+		auto parsed_url = S3Url::Resolve("s3://bucket/key?s3_version_id=abc%2F123", auth_params);
+		REQUIRE(auth_params.version_id == "abc/123");
+		REQUIRE(parsed_url.key == "key");
+		REQUIRE(parsed_url.trimmed_s3_url == "s3://bucket/key");
+	}
+
+	SECTION("unknown query parameters report the known set") {
+		S3AuthParams auth_params;
+		auth_params.endpoint = "s3.amazonaws.com";
+		try {
+			S3Url::Resolve("s3://bucket/key?bla=bla", auth_params);
+			FAIL("Unknown query parameter should fail");
+		} catch (std::exception &ex) {
+			REQUIRE(string(ex.what()).find("'s3_version_id'") != string::npos);
+		}
+	}
+
 	SECTION("display URLs redact parameters unless compatibility mode treats them as key bytes") {
 		S3AuthParams auth_params;
 		REQUIRE(S3Url::GetDisplayUrl("s3://bucket/key?s3_secret_access_key=secret", auth_params) == "s3://bucket/key");
