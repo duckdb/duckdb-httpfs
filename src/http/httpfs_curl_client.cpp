@@ -248,19 +248,35 @@ CURLHandle::CURLHandle(const string &token, const string &cert_path_p,
 		curl_easy_setopt(curl, CURLOPT_XOAUTH2_BEARER, token.c_str());
 		curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
 	}
+	uses_certificate_store_cache =
+	    !cert_path.empty() && certificate_store_cache && CurlCertificateStoreCache::IsSupported();
 	if (!cert_path.empty()) {
-		if (certificate_store_cache && CurlCertificateStoreCache::IsSupported()) {
+		if (uses_certificate_store_cache) {
 			curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, ConfigureSSLContext);
 			curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, this);
 		} else {
 			curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
 		}
 	}
-	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_AUTO_CLIENT_CERT | CURLSSLOPT_NATIVE_CA);
+	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
+	if (!uses_certificate_store_cache) {
+		ssl_options |= CURLSSLOPT_NATIVE_CA;
+	}
+	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, ssl_options);
 }
 
 CURLHandle::~CURLHandle() {
 	curl_easy_cleanup(curl);
+}
+
+void CURLHandle::SetVerifySSL(bool verify_ssl_p) {
+	verify_ssl = verify_ssl_p;
+	// libcurl populates its X509 store before invoking CURLOPT_SSL_CTX_FUNCTION. On the cached OpenSSL path, tell
+	// libcurl not to populate that redundant store; ConfigureSSLContext installs the shared store and enables peer
+	// verification directly on the SSL_CTX instead.
+	const bool curl_verifies_peer = verify_ssl && !uses_certificate_store_cache;
+	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, curl_verifies_peer ? 1L : 0L);
+	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
 }
 
 CURLcode CURLHandle::ConfigureSSLContext(CURL *, void *ssl_context, void *user_data) {
@@ -274,7 +290,9 @@ CURLcode CURLHandle::ConfigureSSLContext(CURL *, void *ssl_context, void *user_d
 		if (result != CURLE_OK) {
 			return result;
 		}
-		SSL_CTX_set_cert_store(static_cast<SSL_CTX *>(ssl_context), store);
+		auto context = static_cast<SSL_CTX *>(ssl_context);
+		SSL_CTX_set_cert_store(context, store);
+		SSL_CTX_set_verify(context, SSL_VERIFY_PEER, nullptr);
 		return CURLE_OK;
 	} catch (std::bad_alloc &) {
 		return CURLE_OUT_OF_MEMORY;
@@ -349,8 +367,6 @@ private:
 			const bool verify_ssl =
 			    params.override_verify_ssl ? params.verify_ssl : params.enable_curl_server_cert_verification;
 			client.curl->SetVerifySSL(verify_ssl);
-			curl_easy_setopt(*client.curl, CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
-			curl_easy_setopt(*client.curl, CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
 		}
 
 		static void ConfigureTimeoutsAndCallbacks(HTTPFSCurlClient &client, const HTTPFSParams &params) {

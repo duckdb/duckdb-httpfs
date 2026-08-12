@@ -88,9 +88,7 @@ public:
 	CURLcode Execute() {
 		return curl_easy_perform(curl);
 	}
-	void SetVerifySSL(bool verify_ssl_p) {
-		verify_ssl = verify_ssl_p;
-	}
+	void SetVerifySSL(bool verify_ssl);
 
 private:
 	static CURLcode ConfigureSSLContext(CURL *curl, void *ssl_context, void *user_data);
@@ -98,6 +96,7 @@ private:
 	CURL *curl = nullptr;
 	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 	string cert_path;
+	bool uses_certificate_store_cache = false;
 	bool verify_ssl = true;
 };
 

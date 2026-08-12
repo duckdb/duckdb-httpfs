@@ -67,8 +67,7 @@ static TestCertificate GenerateTestCertificate(EVP_PKEY &key, optional_ptr<X509>
 	AddTestCertificateExtension(*certificate, *issuer_certificate, NID_key_usage,
 	                            is_ca ? "critical,keyCertSign,cRLSign" : "critical,digitalSignature,keyEncipherment");
 	if (!is_ca) {
-		AddTestCertificateExtension(*certificate, *issuer_certificate, NID_subject_alt_name,
-		                            "DNS:localhost,IP:127.0.0.1");
+		AddTestCertificateExtension(*certificate, *issuer_certificate, NID_subject_alt_name, "DNS:localhost");
 	}
 	if (!X509_sign(certificate.get(), &issuer_key, EVP_sha256())) {
 		throw InternalException("Failed to sign test certificate");
@@ -114,8 +113,8 @@ public:
 		TestDeleteFile(ca_path);
 	}
 
-	string URL() const {
-		return StringUtil::Format("https://localhost:%d/object", port);
+	string URL(const string &host = "localhost") const {
+		return StringUtil::Format("https://%s:%d/object", host, port);
 	}
 
 	const string &CAPath() const {
@@ -347,8 +346,6 @@ TEST_CASE("Parallel HTTPS range requests share the Curl certificate store", "[ht
 			headers.Add("Range: bytes=0-1");
 			curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 			curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers.headers);
-			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
 			curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
 			results[thread_idx] = handle.Execute();
@@ -378,8 +375,6 @@ TEST_CASE("Parallel HTTPS range requests share the Curl certificate store", "[ht
 	CURL *disabled_curl = disabled_handle;
 	auto url = server.URL();
 	curl_easy_setopt(disabled_curl, CURLOPT_URL, url.c_str());
-	curl_easy_setopt(disabled_curl, CURLOPT_SSL_VERIFYPEER, 0L);
-	curl_easy_setopt(disabled_curl, CURLOPT_SSL_VERIFYHOST, 0L);
 	curl_easy_setopt(disabled_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
 	REQUIRE(disabled_handle.Execute() == CURLE_OK);
 	REQUIRE(disabled_load_count == 0);
@@ -398,10 +393,36 @@ TEST_CASE("Parallel HTTPS range requests share the Curl certificate store", "[ht
 	untrusted_handle.SetVerifySSL(true);
 	CURL *untrusted_curl = untrusted_handle;
 	curl_easy_setopt(untrusted_curl, CURLOPT_URL, url.c_str());
-	curl_easy_setopt(untrusted_curl, CURLOPT_SSL_VERIFYPEER, 1L);
-	curl_easy_setopt(untrusted_curl, CURLOPT_SSL_VERIFYHOST, 2L);
 	curl_easy_setopt(untrusted_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
 	REQUIRE(untrusted_handle.Execute() == CURLE_PEER_FAILED_VERIFICATION);
+
+	CURLHandle wrong_host_handle("", server.CAPath(), cache);
+	wrong_host_handle.SetVerifySSL(true);
+	CURL *wrong_host_curl = wrong_host_handle;
+	auto wrong_host_url = server.URL("127.0.0.1");
+	curl_easy_setopt(wrong_host_curl, CURLOPT_URL, wrong_host_url.c_str());
+	curl_easy_setopt(wrong_host_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
+	REQUIRE(wrong_host_handle.Execute() == CURLE_PEER_FAILED_VERIFICATION);
+
+	CURLHandle fallback_handle("", server.CAPath(), nullptr);
+	fallback_handle.SetVerifySSL(true);
+	CURL *fallback_curl = fallback_handle;
+	curl_easy_setopt(fallback_curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(fallback_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
+	REQUIRE(fallback_handle.Execute() == CURLE_OK);
+
+	auto failing_cache = make_shared_ptr<CurlCertificateStoreCache>(
+	    [&](const string &, CurlCertificateStoreCache::FileIdentity &result) {
+		    result = identity;
+		    return true;
+	    },
+	    [&](const string &, X509_STORE *&) { return CURLE_SSL_CACERT_BADFILE; }, []() { return 0; });
+	CURLHandle failing_handle("", server.CAPath(), failing_cache);
+	failing_handle.SetVerifySSL(true);
+	CURL *failing_curl = failing_handle;
+	curl_easy_setopt(failing_curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(failing_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
+	REQUIRE(failing_handle.Execute() == CURLE_SSL_CACERT_BADFILE);
 #endif
 }
 
