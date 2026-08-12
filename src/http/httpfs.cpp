@@ -94,7 +94,7 @@ private:
 		}
 	}
 
-	SettingLookupResult TryGetSetting(const string &key, Value &value) {
+	SettingLookupResult TryGetSetting(const Identifier &key, Value &value) {
 		if (info) {
 			return FileOpener::TryGetCurrentSetting(opener, key, value, *info);
 		}

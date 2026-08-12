@@ -16,7 +16,8 @@ public:
 
 public:
 	template <class TYPE>
-	SettingLookupResult TryGetSecretKeyOrSetting(const string &secret_key, const string &setting_name, TYPE &result) {
+	SettingLookupResult TryGetSecretKeyOrSetting(const Identifier &secret_key, const Identifier &setting_name,
+	                                             TYPE &result) {
 		Value temp_result;
 		auto setting_scope = reader.TryGetSecretKeyOrSetting(secret_key, setting_name, temp_result);
 		if (!temp_result.IsNull() && !(setting_scope && setting_scope.GetScope() == SettingScope::GLOBAL &&
@@ -27,13 +28,13 @@ public:
 	}
 
 	template <class TYPE>
-	SettingLookupResult TryGetSecretKey(const string &secret_key, TYPE &value_out) {
+	SettingLookupResult TryGetSecretKey(const Identifier &secret_key, TYPE &value_out) {
 		return reader.TryGetSecretKey(secret_key, value_out);
 	}
 
 	template <class TYPE>
-	SettingLookupResult TryGetSecretKeysOrSetting(const string &secret_key, const string &legacy_secret_key,
-	                                              const string &setting_name, TYPE &result) {
+	SettingLookupResult TryGetSecretKeysOrSetting(const Identifier &secret_key, const Identifier &legacy_secret_key,
+	                                              const Identifier &setting_name, TYPE &result) {
 		Value temp_result;
 		auto setting_scope = reader.TryGetSecretKey(secret_key, temp_result);
 		if (!setting_scope) {
@@ -82,7 +83,7 @@ public:
 	}
 
 public:
-	void SetExtensionOptionValue(const string &key, const char *env_var);
+	void SetExtensionOptionValue(const Identifier &key, const char *env_var);
 	void SetAll();
 
 public:
