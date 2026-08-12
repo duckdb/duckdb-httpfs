@@ -31,6 +31,7 @@ struct FileOpenerInfo;
 class HTTPState;
 class HTTPFSUtil;
 class HTTPException;
+class CurlCertificateStoreCache;
 
 enum class HTTPClientReuseMode : uint8_t { SESSION_LOCAL, SHARED, NONE };
 
@@ -111,6 +112,8 @@ public:
 
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
+	HTTPFSCurlUtil();
+
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 	void CloseClient(unique_ptr<HTTPClient> &&client) override;
 	void ClearCachedConnections() override;
@@ -133,6 +136,7 @@ public:
 
 private:
 	HTTPClientConnectionCache connection_cache;
+	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 };
 
 #endif

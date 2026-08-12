@@ -5,6 +5,11 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
 #include <curl/curl.h>
+#include <openssl/crypto.h>
+#include <openssl/ssl.h>
+#include <chrono>
+#include <cstring>
+#include <new>
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
 
@@ -38,6 +43,154 @@ static string SelectCURLCertPath() {
 		}
 	}
 	return string();
+}
+
+struct CurlCertificateStoreCache::Entry {
+	~Entry() {
+		if (store) {
+			X509_STORE_free(store);
+		}
+	}
+
+	annotated_mutex lock;
+	X509_STORE *store DUCKDB_GUARDED_BY(lock) = nullptr;
+	FileIdentity identity DUCKDB_GUARDED_BY(lock);
+	int64_t loaded_at DUCKDB_GUARDED_BY(lock) = 0;
+};
+
+bool CurlCertificateStoreCache::FileIdentity::operator==(const FileIdentity &other) const {
+	return size == other.size && modification_seconds == other.modification_seconds &&
+	       modification_nanoseconds == other.modification_nanoseconds && device == other.device && file == other.file;
+}
+
+static bool ReadCertificateFileIdentity(const string &path, CurlCertificateStoreCache::FileIdentity &result) {
+	struct stat metadata;
+	if (stat(path.c_str(), &metadata) != 0) {
+		return false;
+	}
+	result.size = metadata.st_size;
+	result.modification_seconds = metadata.st_mtime;
+#if defined(__APPLE__)
+	result.modification_nanoseconds = metadata.st_mtimespec.tv_nsec;
+#elif defined(__linux__)
+	result.modification_nanoseconds = metadata.st_mtim.tv_nsec;
+#endif
+	result.device = metadata.st_dev;
+	result.file = metadata.st_ino;
+	return true;
+}
+
+static CURLcode LoadCertificateStore(const string &path, X509_STORE *&result) {
+	result = X509_STORE_new();
+	if (!result) {
+		return CURLE_OUT_OF_MEMORY;
+	}
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (!X509_STORE_load_file(result, path.c_str())) {
+#else
+	if (!X509_STORE_load_locations(result, path.c_str(), nullptr)) {
+#endif
+		X509_STORE_free(result);
+		result = nullptr;
+		return CURLE_SSL_CACERT_BADFILE;
+	}
+	unsigned long flags = X509_V_FLAG_TRUSTED_FIRST;
+#ifdef X509_V_FLAG_PARTIAL_CHAIN
+	flags |= X509_V_FLAG_PARTIAL_CHAIN;
+#endif
+	if (!X509_STORE_set_flags(result, flags)) {
+		X509_STORE_free(result);
+		result = nullptr;
+		return CURLE_SSL_CACERT_BADFILE;
+	}
+	return CURLE_OK;
+}
+
+static int64_t CertificateStoreMonotonicSeconds() {
+	return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
+	    .count();
+}
+
+CurlCertificateStoreCache::CurlCertificateStoreCache()
+    : CurlCertificateStoreCache(ReadCertificateFileIdentity, LoadCertificateStore, CertificateStoreMonotonicSeconds) {
+}
+
+CurlCertificateStoreCache::CurlCertificateStoreCache(MetadataProvider metadata_provider_p, StoreLoader store_loader_p,
+                                                     Clock clock_p, int64_t timeout_seconds_p)
+    : metadata_provider(std::move(metadata_provider_p)), store_loader(std::move(store_loader_p)),
+      clock(std::move(clock_p)), timeout_seconds(timeout_seconds_p) {
+}
+
+CurlCertificateStoreCache::~CurlCertificateStoreCache() = default;
+
+shared_ptr<CurlCertificateStoreCache::Entry> CurlCertificateStoreCache::GetOrCreateEntry(const string &path) {
+	annotated_lock_guard<annotated_mutex> guard(entries_lock);
+	auto entry = entries.find(path);
+	if (entry != entries.end()) {
+		return entry->second;
+	}
+	auto result = make_shared_ptr<Entry>();
+	entries.emplace(path, result);
+	return result;
+}
+
+CURLcode CurlCertificateStoreCache::Acquire(const string &path, X509_STORE *&result) {
+	result = nullptr;
+	auto entry = GetOrCreateEntry(path);
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	FileIdentity current_identity;
+	if (!metadata_provider(path, current_identity)) {
+		return CURLE_SSL_CACERT_BADFILE;
+	}
+	const auto now = clock();
+	const bool expired = entry->store && timeout_seconds >= 0 && now - entry->loaded_at >= timeout_seconds;
+	if (!entry->store || !(entry->identity == current_identity) || expired) {
+		X509_STORE *replacement = nullptr;
+		auto load_result = store_loader(path, replacement);
+		if (load_result != CURLE_OK) {
+			if (replacement) {
+				X509_STORE_free(replacement);
+			}
+			return load_result;
+		}
+		if (!replacement) {
+			return CURLE_SSL_CACERT_BADFILE;
+		}
+		if (entry->store) {
+			X509_STORE_free(entry->store);
+		}
+		entry->store = replacement;
+		entry->identity = current_identity;
+		entry->loaded_at = now;
+	}
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+	if (!X509_STORE_up_ref(entry->store)) {
+		return CURLE_OUT_OF_MEMORY;
+	}
+	result = entry->store;
+	return CURLE_OK;
+#else
+	return CURLE_NOT_BUILT_IN;
+#endif
+}
+
+bool CurlCertificateStoreCache::IsSupported() {
+#if !defined(_WIN32) && OPENSSL_VERSION_NUMBER >= 0x10100000L
+	auto version = curl_version_info(CURLVERSION_NOW);
+	if (!version || !version->ssl_version || !StringUtil::StartsWith(version->ssl_version, "OpenSSL/")) {
+		return false;
+	}
+	string linked_version = OpenSSL_version(OPENSSL_VERSION);
+	if (!StringUtil::StartsWith(linked_version, "OpenSSL ")) {
+		return false;
+	}
+	const auto prefix_length = strlen("OpenSSL ");
+	auto version_end = linked_version.find(' ', prefix_length);
+	auto expected = "OpenSSL/" + linked_version.substr(prefix_length, version_end - prefix_length);
+	return StringUtil::StartsWith(version->ssl_version, expected);
+#else
+	return false;
+#endif
 }
 
 static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -84,7 +237,9 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	return total_size;
 }
 
-CURLHandle::CURLHandle(const string &token, const string &cert_path) {
+CURLHandle::CURLHandle(const string &token, const string &cert_path_p,
+                       shared_ptr<CurlCertificateStoreCache> certificate_store_cache_p)
+    : certificate_store_cache(std::move(certificate_store_cache_p)), cert_path(cert_path_p) {
 	curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize curl");
@@ -94,13 +249,38 @@ CURLHandle::CURLHandle(const string &token, const string &cert_path) {
 		curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
 	}
 	if (!cert_path.empty()) {
-		curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
+		if (certificate_store_cache && CurlCertificateStoreCache::IsSupported()) {
+			curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, ConfigureSSLContext);
+			curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, this);
+		} else {
+			curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
+		}
 	}
 	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_AUTO_CLIENT_CERT | CURLSSLOPT_NATIVE_CA);
 }
 
 CURLHandle::~CURLHandle() {
 	curl_easy_cleanup(curl);
+}
+
+CURLcode CURLHandle::ConfigureSSLContext(CURL *, void *ssl_context, void *user_data) {
+	auto &handle = *static_cast<CURLHandle *>(user_data);
+	if (!handle.verify_ssl) {
+		return CURLE_OK;
+	}
+	try {
+		X509_STORE *store = nullptr;
+		auto result = handle.certificate_store_cache->Acquire(handle.cert_path, store);
+		if (result != CURLE_OK) {
+			return result;
+		}
+		SSL_CTX_set_cert_store(static_cast<SSL_CTX *>(ssl_context), store);
+		return CURLE_OK;
+	} catch (std::bad_alloc &) {
+		return CURLE_OUT_OF_MEMORY;
+	} catch (...) {
+		return CURLE_SSL_CACERT_BADFILE;
+	}
 }
 
 CURLURLHandle::CURLURLHandle() : CURLURLHandle(curl_url()) {
@@ -160,7 +340,7 @@ private:
 			if (cert_file_path.empty()) {
 				cert_file_path = SelectCURLCertPath();
 			}
-			client.curl = make_uniq<CURLHandle>(params.bearer_token, cert_file_path);
+			client.curl = make_uniq<CURLHandle>(params.bearer_token, cert_file_path, client.certificate_store_cache);
 			client.stored_bearer_token = params.bearer_token;
 		}
 
@@ -168,6 +348,7 @@ private:
 			curl_easy_setopt(*client.curl, CURLOPT_FORBID_REUSE, params.keep_alive ? 0L : 1L);
 			const bool verify_ssl =
 			    params.override_verify_ssl ? params.verify_ssl : params.enable_curl_server_cert_verification;
+			client.curl->SetVerifySSL(verify_ssl);
 			curl_easy_setopt(*client.curl, CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
 			curl_easy_setopt(*client.curl, CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
 		}
@@ -360,7 +541,9 @@ private:
 	};
 
 public:
-	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) : HTTPClient(proto_host_port) {
+	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port,
+	                 shared_ptr<CurlCertificateStoreCache> certificate_store_cache_p)
+	    : HTTPClient(proto_host_port), certificate_store_cache(std::move(certificate_store_cache_p)) {
 		string normalized_path = NormalizePathToBeAdded(proto_host_port);
 		curl_url_set(curl_base_url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
 		stored_bearer_token = "";
@@ -708,6 +891,7 @@ private:
 	CURLURLHandle curl_base_url;
 	string stored_bearer_token;
 	string stored_cert_file_path;
+	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 };
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
@@ -729,7 +913,8 @@ unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params,
 			    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", proto_host_port));
 		}
 	}
-	auto client = make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
+	auto client =
+	    make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port, certificate_store_cache);
 	return std::move(client);
 }
 
