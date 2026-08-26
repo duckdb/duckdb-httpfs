@@ -102,12 +102,12 @@ statement ok
 SET s3_allow_recursive_globbing = ${s3_allow_recursive_globs}
 
 query I
-SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-folder/*');
+SELECT count(*) FROM glob('s3://test-bucket/parquet_glob_s3_paging*/some-non-existent-folder/*');
 ----
 0
 
 query I
-SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/paging/*');
+SELECT count(*) FROM glob('s3://test-bucket/parquet_glob_s3_paging*/paging/*');
 ----
 8000
 
@@ -128,4 +128,3 @@ FROM (FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD
 11	0	11	0	0
 9	0	9	0	0
 9	0	9	0	0
-

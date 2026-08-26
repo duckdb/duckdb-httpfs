@@ -65,18 +65,29 @@ public:
 			}
 			return result;
 		} else {
-			return TransformResult(client->Get(
+			HTTPStatusCode response_status = HTTPStatusCode::INVALID;
+			string error_body;
+			auto result = TransformResult(client->Get(
 			    info.path.c_str(), headers,
 			    [&](const duckdb_httplib_openssl::Response &response) {
 				    auto http_response = TransformResponse(response);
-				    return info.response_handler(*http_response);
+				    response_status = http_response->status;
+				    return !info.response_handler || info.response_handler(*http_response);
 			    },
 			    [&](const char *data, size_t data_length) {
 				    if (state) {
 					    state->total_bytes_received += data_length;
 				    }
-				    return info.content_handler(const_data_ptr_cast(data), data_length);
+				    if (static_cast<int>(response_status) >= 400) {
+					    error_body.append(data, data_length);
+					    return true;
+				    }
+				    return !info.content_handler || info.content_handler(const_data_ptr_cast(data), data_length);
 			    }));
+			if (result && static_cast<int>(result->status) >= 400) {
+				result->body = std::move(error_body);
+			}
+			return result;
 		}
 	}
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
