@@ -4,6 +4,7 @@
 #include "s3/s3fs.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 
 namespace duckdb {
 
@@ -109,6 +110,16 @@ unique_ptr<BaseSecret> CreateS3SecretFunctions::CreateSecretFunctionInternal(Cli
 	return S3SecretBuilder(input).Create();
 }
 
+//! Only the secret manager's built-in storages. Re-creating a refreshed secret into an extension-registered storage
+//! writes session-local credentials to a shared store: it throws where the session cannot write, and silently mutates
+//! the store where it can. See duckdb/duckdb-httpfs#412.
+static bool RefreshMayWriteToStorage(const string &storage_mode) {
+	auto storage = Identifier(storage_mode);
+	return storage.empty() || storage == SecretManager::TEMPORARY_STORAGE_NAME ||
+	       storage == SecretManager::LOCAL_FILE_STORAGE_NAME || storage == SecretManager::TRANSACTION_STORAGE_NAME ||
+	       storage == SecretManager::CONNECTION_STORAGE_NAME;
+}
+
 CreateSecretInput CreateS3SecretFunctions::GenerateRefreshSecretInfo(const SecretEntry &secret_entry,
                                                                      Value &refresh_info) {
 	const auto &kv_secret = secret_entry.secret->Cast<KeyValueSecret>();
@@ -120,7 +131,10 @@ CreateSecretInput CreateS3SecretFunctions::GenerateRefreshSecretInfo(const Secre
 	result.type = kv_secret.GetType();
 	result.name = kv_secret.GetName();
 	result.provider = Identifier(kv_secret.GetProvider());
-	if (result.persist_type != SecretPersistType::TRANSACTION) {
+	if (result.persist_type == SecretPersistType::TRANSACTION || !RefreshMayWriteToStorage(secret_entry.storage_mode)) {
+		// No storage write; storage_type must stay empty, TRANSACTION secrets reject an explicit storage.
+		result.persist_type = SecretPersistType::TRANSACTION;
+	} else {
 		result.storage_type = Identifier(secret_entry.storage_mode);
 	}
 	result.scope = kv_secret.GetScope();
