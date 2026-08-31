@@ -4,6 +4,7 @@
 #include "s3/s3fs.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 
 namespace duckdb {
 
@@ -121,7 +122,10 @@ CreateSecretInput CreateS3SecretFunctions::GenerateRefreshSecretInfo(const Secre
 	result.name = kv_secret.GetName();
 	result.provider = Identifier(kv_secret.GetProvider());
 	if (result.persist_type != SecretPersistType::TRANSACTION) {
-		result.storage_type = Identifier(secret_entry.storage_mode);
+		// A refresh re-resolves session-local credentials, so it never writes to the storage the secret came from:
+		// the refreshed copy lands in the session-scoped refresh overlay and shadows the original.
+		result.persist_type = SecretPersistType::TEMPORARY;
+		result.storage_type = Identifier(SecretManager::REFRESH_STORAGE_NAME);
 	}
 	result.scope = kv_secret.GetScope();
 
