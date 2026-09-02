@@ -16,6 +16,7 @@
 #include "duckdb/common/array.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
@@ -259,6 +260,9 @@ static void RunS3RegionRedirectScenario(const string &client_implementation, boo
 	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
 	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
 	S3TestHelper::RequireQueryOk(con, "SET enable_logging=true");
+	if (!list_request) {
+		S3TestHelper::RequireQueryOk(con, "SET enable_http_metadata_cache=true");
+	}
 	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
 CREATE SECRET s3_region_redirect (
 	TYPE S3,
@@ -288,24 +292,41 @@ CREATE SECRET s3_region_redirect (
 			REQUIRE(handle);
 		}
 		S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = fs.OpenFile(S3TestHelper::S3_PATH, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+		char result;
+		handle->Read(QueryContext(*con.context), &result, 1, 0);
+		REQUIRE(result == server.ObjectData()[0]);
+		S3TestHelper::RequireQueryOk(con, "COMMIT");
 	}
 
 	auto observations = server.Observations();
 	INFO(MockS3DescribeObservations(observations));
 	bool saw_redirect = false;
 	bool saw_success = false;
+	bool saw_cached_region_get = false;
+	idx_t head_count = 0;
 	for (const auto &observation : observations) {
 		REQUIRE(MockS3HeaderValues(observation, "X-AmZ-Meta-Region") == vector<string> {"region-value"});
 		REQUIRE(StringUtil::Contains(observation.authorization, "x-amz-meta-region"));
+		head_count += observation.method == "HEAD";
 		if (observation.status == 301 && observation.region == "eu-west-1") {
 			saw_redirect = true;
 		}
 		if (observation.status == 200 && observation.region == "us-east-1") {
 			saw_success = true;
 		}
+		if (observation.method == "GET" && observation.region == "us-east-1") {
+			saw_cached_region_get = true;
+		}
 	}
 	REQUIRE(saw_redirect);
 	REQUIRE(saw_success);
+	if (!list_request) {
+		REQUIRE(head_count == 2);
+		REQUIRE(saw_cached_region_get);
+	}
 
 	auto logs = con.Query("SELECT count(*) FROM duckdb_logs WHERE message LIKE '%incorrect region%'");
 	REQUIRE(logs);
@@ -314,10 +335,14 @@ CREATE SECRET s3_region_redirect (
 	REQUIRE(logs->GetValue(0, 0).GetValue<int64_t>() == 1);
 }
 
-static void ConfigureGCSBearer(Connection &con, MockS3Server &server, const string &client_implementation) {
+static void ConfigureGCSClient(Connection &con, const string &client_implementation) {
 	S3TestHelper::RequireQueryOk(con,
 	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
 	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
+}
+
+static void ConfigureGCSBearer(Connection &con, MockS3Server &server, const string &client_implementation) {
+	ConfigureGCSClient(con, client_implementation);
 	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
 CREATE SECRET gcs_bearer (
 	TYPE GCS,
@@ -328,6 +353,93 @@ CREATE SECRET gcs_bearer (
 	URL_STYLE 'path'
 ))",
 	                                                     server.Endpoint()));
+}
+
+static void RunGCSHMACDefaultRegionScenario(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.auth.stale_key_id = "NEVER_STALE";
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	ConfigureGCSClient(con, client_implementation);
+	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+	S3TestHelper::RequireQueryOk(con, "SET enable_http_metadata_cache=true");
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET gcs_hmac (
+	TYPE GCS,
+	SCOPE 'gcs://refresh-bucket/',
+	KEY_ID 'FRESH_KEY',
+	SECRET 'FRESH_SECRET',
+	ENDPOINT '%s',
+	USE_SSL false,
+	URL_STYLE 'path'
+))",
+	                                                     server.Endpoint()));
+
+	const string gcs_path = "gcs://refresh-bucket/object.bin";
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto glob_result = fs.Glob("gcs://refresh-bucket/*.bin", FileGlobOptions::ALLOW_EMPTY, nullptr);
+	auto listed_files = glob_result->GetAllFiles();
+	REQUIRE(listed_files.size() == 1);
+	REQUIRE(listed_files[0].extended_info);
+	REQUIRE(listed_files[0].extended_info->options.count("s3_region") == 0);
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto read_byte = [&](const OpenFileInfo &file, idx_t offset) {
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+		REQUIRE(handle);
+		char result;
+		handle->Read(QueryContext(*con.context), &result, 1, offset);
+		REQUIRE(result == server.ObjectData()[offset]);
+		S3TestHelper::RequireQueryOk(con, "COMMIT");
+	};
+	read_byte(OpenFileInfo(gcs_path), 0);
+
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE OR REPLACE SECRET gcs_hmac (
+	TYPE GCS,
+	SCOPE 'gcs://refresh-bucket/',
+	KEY_ID 'FRESH_KEY',
+	SECRET 'FRESH_SECRET',
+	REGION 'eu-west-1',
+	ENDPOINT '%s',
+	USE_SSL false,
+	URL_STYLE 'path'
+))",
+	                                                     server.Endpoint()));
+	read_byte(listed_files[0], 1);
+
+	auto observations = server.Observations();
+	INFO(client_implementation);
+	INFO(MockS3DescribeObservations(observations));
+	idx_t head_count = 0;
+	bool saw_auto_get = false;
+	bool saw_explicit_get = false;
+	for (const auto &observation : observations) {
+		if (observation.target.find("object.bin") == string::npos) {
+			continue;
+		}
+		if (observation.method == "HEAD") {
+			head_count++;
+			REQUIRE(observation.region == "auto");
+			REQUIRE(StringUtil::Contains(observation.authorization, "/auto/s3/aws4_request"));
+		} else if (observation.method == "GET") {
+			if (observation.region == "auto") {
+				saw_auto_get = true;
+				REQUIRE(StringUtil::Contains(observation.authorization, "/auto/s3/aws4_request"));
+			} else if (observation.region == "eu-west-1") {
+				saw_explicit_get = true;
+				REQUIRE(StringUtil::Contains(observation.authorization, "/eu-west-1/s3/aws4_request"));
+			}
+		}
+	}
+	REQUIRE(head_count == 1);
+	REQUIRE(saw_auto_get);
+	REQUIRE(saw_explicit_get);
 }
 
 static void RunGCSBearerRequestScenario(const string &client_implementation) {
@@ -861,6 +973,101 @@ TEST_CASE("S3 URL compatibility mode reads canonical and legacy secret keys", "[
 	}
 }
 
+TEST_CASE("GCS HMAC signing region follows provider defaults", "[httpfs][s3][gcs][provider][signing]") {
+	SECTION("regionless HMAC uses auto") {
+		S3AuthParams auth_params;
+		auth_params.provider_type = S3ProviderType::GCS;
+		auth_params.access_key_id = "key";
+		auth_params.secret_access_key = "secret";
+		S3Provider::InitializeAuthParams(auth_params);
+		REQUIRE(auth_params.region == "auto");
+		REQUIRE(auth_params.endpoint == "storage.googleapis.com");
+		REQUIRE(auth_params.url_style == "path");
+	}
+
+	SECTION("explicit regions win") {
+		S3AuthParams auth_params;
+		auth_params.provider_type = S3ProviderType::GCS;
+		auth_params.access_key_id = "key";
+		auth_params.secret_access_key = "secret";
+		auth_params.region = "eu-west-1";
+		S3Provider::InitializeAuthParams(auth_params);
+		REQUIRE(auth_params.region == "eu-west-1");
+	}
+
+	SECTION("partial HMAC material still selects signing") {
+		for (const auto &use_key_id : {false, true}) {
+			S3AuthParams auth_params;
+			auth_params.provider_type = S3ProviderType::GCS;
+			if (use_key_id) {
+				auth_params.access_key_id = "key";
+			} else {
+				auth_params.secret_access_key = "secret";
+			}
+			S3Provider::InitializeAuthParams(auth_params);
+			REQUIRE(S3Provider::GetAuthType(auth_params) == S3AuthType::SIGV4);
+			REQUIRE(auth_params.region == "auto");
+		}
+	}
+
+	SECTION("URL overrides reapply or replace the default") {
+		S3AuthParams empty_override;
+		empty_override.provider_type = S3ProviderType::GCS;
+		empty_override.access_key_id = "key";
+		empty_override.secret_access_key = "secret";
+		empty_override.region = "eu-west-1";
+		S3Provider::InitializeAuthParams(empty_override);
+		S3Url::Resolve("gcs://bucket/key?s3_region=", empty_override);
+		REQUIRE(empty_override.region == "auto");
+
+		S3AuthParams explicit_override;
+		explicit_override.provider_type = S3ProviderType::GCS;
+		explicit_override.access_key_id = "key";
+		explicit_override.secret_access_key = "secret";
+		S3Provider::InitializeAuthParams(explicit_override);
+		S3Url::Resolve("gcs://bucket/key?s3_region=asia-east1", explicit_override);
+		REQUIRE(explicit_override.region == "asia-east1");
+	}
+
+	SECTION("URL credentials receive the default during finalization") {
+		S3AuthParams auth_params;
+		auth_params.provider_type = S3ProviderType::GCS;
+		S3Provider::InitializeAuthParams(auth_params);
+		REQUIRE(auth_params.region.empty());
+		S3Url::Resolve("gcs://bucket/key?s3_access_key_id=key&s3_secret_access_key=secret", auth_params);
+		REQUIRE(auth_params.region == "auto");
+	}
+
+	SECTION("authentication modes that do not sign remain unchanged") {
+		S3AuthParams bearer;
+		bearer.provider_type = S3ProviderType::GCS;
+		bearer.oauth2_bearer_token = "token";
+		bearer.access_key_id = "key";
+		bearer.secret_access_key = "secret";
+		S3Provider::InitializeAuthParams(bearer);
+		REQUIRE(S3Provider::GetAuthType(bearer) == S3AuthType::BEARER);
+		REQUIRE(bearer.region.empty());
+
+		S3AuthParams anonymous;
+		anonymous.provider_type = S3ProviderType::GCS;
+		S3Provider::InitializeAuthParams(anonymous);
+		REQUIRE(S3Provider::GetAuthType(anonymous) == S3AuthType::ANONYMOUS);
+		REQUIRE(anonymous.region.empty());
+	}
+
+	SECTION("other providers retain their custom-endpoint behavior") {
+		for (const auto provider_type : {S3ProviderType::S3, S3ProviderType::R2}) {
+			S3AuthParams auth_params;
+			auth_params.provider_type = provider_type;
+			auth_params.access_key_id = "key";
+			auth_params.secret_access_key = "secret";
+			auth_params.SetEndpoint("storage.example.com");
+			S3Provider::InitializeAuthParams(auth_params);
+			REQUIRE(auth_params.region.empty());
+		}
+	}
+}
+
 TEST_CASE("S3 provider policy selects request authentication", "[httpfs][s3][provider][signing]") {
 	::AESStateSSLFactory encryption_util;
 	ParsedS3Url parsed_url;
@@ -1378,6 +1585,15 @@ TEST_CASE("GCS bearer authentication is shared by object, list and bulk-delete r
 	}
 	SECTION("curl") {
 		RunGCSBearerRequestScenario("curl");
+	}
+}
+
+TEST_CASE("GCS HMAC signing defaults to the auto region", "[httpfs][s3][gcs][signing]") {
+	SECTION("httplib") {
+		RunGCSHMACDefaultRegionScenario("httplib");
+	}
+	SECTION("curl") {
+		RunGCSHMACDefaultRegionScenario("curl");
 	}
 }
 

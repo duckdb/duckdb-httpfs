@@ -208,7 +208,8 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 	auto result = HTTPFileHandle::GetCacheEntry();
 	auto captured = request_session->Capture();
 	auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-	if (!snapshot.auth_params.region.empty()) {
+	if (snapshot.region_redirected) {
+		D_ASSERT(!snapshot.auth_params.region.empty());
 		result.properties["s3_region"] = snapshot.auth_params.region;
 	}
 	return result;

@@ -232,7 +232,8 @@ void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
 			s3_key.path = std::move(result_full_url);
 			auto captured = request_session->Capture();
 			auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-			if (!snapshot.auth_params.region.empty()) {
+			if (snapshot.region_redirected) {
+				D_ASSERT(!snapshot.auth_params.region.empty());
 				s3_key.extended_info->options["s3_region"] = snapshot.auth_params.region;
 			}
 			expanded_files.push_back(std::move(s3_key));

@@ -274,6 +274,12 @@ static void ApplyProviderDefaults(S3AuthParams &auth_params) {
 }
 
 static void ApplyDerivedDefaults(S3AuthParams &auth_params) {
+	if (auth_params.provider_type == S3ProviderType::GCS) {
+		if (auth_params.region.empty() && S3Provider::GetAuthType(auth_params) == S3AuthType::SIGV4) {
+			auth_params.region = "auto";
+		}
+		return;
+	}
 	if (auth_params.provider_type != S3ProviderType::S3 ||
 	    (auth_params.endpoint_mode == S3EndpointMode::EXPLICIT && !EndpointIsAWS(auth_params.endpoint))) {
 		return;
