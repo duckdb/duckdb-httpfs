@@ -661,6 +661,65 @@ CREATE SECRET delete_endpoint_mode (
 	REQUIRE(bulk_delete_requests == 2);
 }
 
+enum class BulkDeleteProviderProfile : uint8_t { S3, R2_SCHEME, R2_ENDPOINT };
+
+static void RunBulkDeleteBatchLimitScenario(const string &client_implementation, BulkDeleteProviderProfile profile) {
+	const bool uses_r2_profile = profile != BulkDeleteProviderProfile::S3;
+	const auto key_count = uses_r2_profile ? 701 : 1000;
+
+	MockS3ServerConfig config;
+	config.auth.stale_key_id = "NEVER_STALE";
+	config.bulk_delete.maximum_key_count = uses_r2_profile ? 700 : 1000;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con,
+	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
+	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
+	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+
+	const auto uses_r2_endpoint = profile == BulkDeleteProviderProfile::R2_ENDPOINT;
+	auto endpoint = uses_r2_endpoint ? "account.r2.cloudflarestorage.com" : server.Endpoint();
+	if (uses_r2_endpoint) {
+		S3TestHelper::RequireQueryOk(con, StringUtil::Format("SET http_proxy='http://%s'", server.Endpoint()));
+	}
+	auto secret_type = profile == BulkDeleteProviderProfile::R2_SCHEME ? "R2" : "S3";
+	auto scheme = profile == BulkDeleteProviderProfile::R2_SCHEME ? "r2" : "s3";
+	auto region = uses_r2_profile ? "auto" : "us-east-1";
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET delete_batch_limit (
+	TYPE %s,
+	KEY_ID 'FRESH_KEY',
+	SECRET 'FRESH_SECRET',
+	REGION '%s',
+	ENDPOINT '%s',
+	USE_SSL false,
+	URL_STYLE 'path'
+))",
+	                                                     secret_type, region, endpoint));
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	fs.RemoveFiles(S3TestHelper::CreateBulkDeletePaths(scheme, key_count));
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	vector<idx_t> observed_batch_sizes;
+	for (const auto &observation : observations) {
+		if (observation.method == "POST" && StringUtil::EndsWith(observation.target, "?delete=")) {
+			observed_batch_sizes.push_back(observation.delete_key_count);
+		}
+	}
+	if (uses_r2_profile) {
+		REQUIRE(observed_batch_sizes == vector<idx_t> {700, 1});
+	} else {
+		REQUIRE(observed_batch_sizes == vector<idx_t> {1000});
+	}
+}
+
 static void RunGCSListAuthErrorScenario(const string &client_implementation) {
 	MockS3ServerConfig config;
 	config.auth.stale_authorization = "Bearer gcs-test-token";
@@ -750,6 +809,28 @@ TEST_CASE("S3 provider selects multipart upload policy", "[httpfs][s3][provider]
 	require_policy(S3ProviderType::S3, "evilr2.cloudflarestorage.com", adaptive_policy);
 	require_policy(S3ProviderType::S3, "objects.example.com", adaptive_policy);
 	require_policy(S3ProviderType::S3, "a.b.r2.cloudflarestorage.com", adaptive_policy);
+}
+
+TEST_CASE("S3 provider selects bulk delete limits", "[httpfs][s3][provider][delete]") {
+	auto require_limit = [](S3ProviderType provider_type, const string &endpoint, idx_t expected) {
+		S3AuthParams auth_params;
+		auth_params.provider_type = provider_type;
+		auth_params.endpoint = endpoint;
+		INFO(endpoint);
+		REQUIRE(S3Provider::GetBulkDeleteMaxBatchSize(auth_params) == expected);
+	};
+
+	require_limit(S3ProviderType::R2, "localhost:9000", 700);
+	require_limit(S3ProviderType::S3, "account.r2.cloudflarestorage.com", 700);
+	require_limit(S3ProviderType::S3, "account.eu.r2.cloudflarestorage.com", 700);
+	require_limit(S3ProviderType::S3, "ACCOUNT.FEDRAMP.R2.CLOUDFLARESTORAGE.COM:443/path", 700);
+
+	require_limit(S3ProviderType::S3, "s3.amazonaws.com", 1000);
+	require_limit(S3ProviderType::GCS, "account.r2.cloudflarestorage.com", 1000);
+	require_limit(S3ProviderType::S3, "r2.cloudflarestorage.com", 1000);
+	require_limit(S3ProviderType::S3, "account.r2.cloudflarestorage.com.example.com", 1000);
+	require_limit(S3ProviderType::S3, "evilr2.cloudflarestorage.com", 1000);
+	require_limit(S3ProviderType::S3, "a.b.r2.cloudflarestorage.com", 1000);
 }
 
 TEST_CASE("S3 endpoint provenance controls AWS endpoint derivation", "[httpfs][s3][provider][endpoint]") {
@@ -1893,6 +1974,20 @@ TEST_CASE("S3 bulk delete preserves endpoint provenance", "[httpfs][s3][delete][
 	}
 	SECTION("curl") {
 		RunBulkDeleteEndpointModeIdentityScenario("curl");
+	}
+}
+
+TEST_CASE("S3 bulk delete follows provider batch limits", "[httpfs][s3][delete][provider]") {
+	for (const string client_implementation : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client_implementation << " keeps the S3 batch limit") {
+			RunBulkDeleteBatchLimitScenario(client_implementation, BulkDeleteProviderProfile::S3);
+		}
+		DYNAMIC_SECTION(client_implementation << " applies the R2 scheme batch limit") {
+			RunBulkDeleteBatchLimitScenario(client_implementation, BulkDeleteProviderProfile::R2_SCHEME);
+		}
+		DYNAMIC_SECTION(client_implementation << " recognizes the R2 endpoint batch limit") {
+			RunBulkDeleteBatchLimitScenario(client_implementation, BulkDeleteProviderProfile::R2_ENDPOINT);
+		}
 	}
 }
 

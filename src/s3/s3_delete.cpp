@@ -201,7 +201,7 @@ static string GetS3DeleteContentMD5(const string &body) {
 
 unique_ptr<HTTPResponse> S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session,
                                                               const string &secret_lookup_url, const string &body,
-                                                              string &result,
+                                                              idx_t key_count, string &result,
                                                               optional_ptr<S3RequestContext> request_context) {
 	auto payload_hash =
 	    S3RequestUtil::GetPayloadHash(GetEncryptionUtil(), const_data_ptr_cast(body.data()), body.length());
@@ -213,6 +213,13 @@ unique_ptr<HTTPResponse> S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession
 	    },
 	    payload_hash, "application/xml", content_md5,
 	    [&](S3RequestData &request_data) {
+		    auto maximum_key_count = S3Provider::GetBulkDeleteMaxBatchSize(request_data.auth_params);
+		    if (key_count > maximum_key_count) {
+			    throw IOException(
+			        "Cannot send S3 bulk delete with %llu keys because the current provider policy allows "
+			        "at most %llu keys per request",
+			        key_count, maximum_key_count);
+		    }
 		    result.clear();
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    return RunPostRequest(request_data.http_url, request_data.headers, params, result,
@@ -253,23 +260,22 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 		batch.secret_lookup_paths.push_back(path);
 	}
 
-	constexpr idx_t MAX_KEYS_PER_REQUEST = 1000;
-
 	for (auto &batch_entry : delete_batches) {
 		auto &batch = batch_entry.second;
 		const vector<string> &keys = batch.keys;
 		const vector<string> &secret_lookup_paths = batch.secret_lookup_paths;
 		auto &url_info = batch.url_info;
+		auto maximum_key_count = S3Provider::GetBulkDeleteMaxBatchSize(url_info.auth_params);
 		auto delete_session =
 		    S3RequestExecutor::CreateSession(opener, secret_lookup_paths.front(), url_info.auth_params);
 
-		for (idx_t batch_start = 0; batch_start < keys.size(); batch_start += MAX_KEYS_PER_REQUEST) {
-			auto batch_end = MinValue<idx_t>(batch_start + MAX_KEYS_PER_REQUEST, keys.size());
+		for (idx_t batch_start = 0; batch_start < keys.size(); batch_start += maximum_key_count) {
+			auto batch_end = MinValue<idx_t>(batch_start + maximum_key_count, keys.size());
 			auto body = S3XMLWriter::WriteDeleteObjectsRequest(keys, batch_start, batch_end);
 			string result;
 			S3RequestContext request_context;
-			auto res = RunS3BulkDeleteRequest(*delete_session, secret_lookup_paths[batch_start], body, result,
-			                                  request_context);
+			auto res = RunS3BulkDeleteRequest(*delete_session, secret_lookup_paths[batch_start], body,
+			                                  batch_end - batch_start, result, request_context);
 
 			if (res->HasRequestError()) {
 				throw IOException("S3 bulk delete request for \"%s\" could not be completed: %s",

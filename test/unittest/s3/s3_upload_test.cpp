@@ -425,6 +425,113 @@ CREATE SECRET refresh_upload_policy (
 		}
 	}
 
+	static void RunCompatibleObjectPutResponse(const string &client_implementation, int status, string payload) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+		config.upload.object_put.status = status;
+		config.upload.object_put.etag = MockS3ETagBehavior::OMIT;
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		if (!payload.empty()) {
+			handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		}
+		handle->Close();
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(server.UploadedObject() == payload);
+		REQUIRE(Count(observations, "PUT") == 1);
+		REQUIRE(Count(observations, "POST") == 0);
+		for (const auto &observation : observations) {
+			if (observation.method == "PUT") {
+				REQUIRE(observation.status == status);
+				REQUIRE_FALSE(observation.part_number.IsValid());
+			}
+		}
+	}
+
+	static void RunUnsupportedObjectPutResponse(const string &client_implementation) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+		config.upload.object_put.status = 204;
+		config.upload.object_put.etag = MockS3ETagBehavior::OMIT;
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		string payload = "unsupported single PUT response";
+		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		auto error = RequireError([&]() { handle->Close(); });
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+		auto observations = server.Observations();
+		INFO(error);
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(StringUtil::Contains(error, "204"));
+		REQUIRE(Count(observations, "PUT") == 1);
+		REQUIRE(Count(observations, "POST") == 0);
+	}
+
+	static void RunUnsupportedPartPutResponse(const string &client_implementation, int status,
+	                                          MockS3ETagBehavior etag) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+		config.upload.multipart_part_put.status = status;
+		config.upload.multipart_part_put.etag = etag;
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		auto payload = CreateMultipartPayload();
+		auto first_error = RequireError(
+		    [&]() { handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size()); });
+		auto second_error = RequireError([&]() { handle->Close(); });
+		REQUIRE(second_error == first_error);
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+		auto observations = server.Observations();
+		INFO(first_error);
+		INFO(MockS3DescribeObservations(observations));
+		if (status == 200) {
+			REQUIRE(StringUtil::Contains(first_error, "Unexpected response when uploading to S3"));
+		} else {
+			REQUIRE(StringUtil::Contains(first_error, to_string(status)));
+		}
+		REQUIRE(Count(observations, "POST", "uploads") == 1);
+		REQUIRE(Count(observations, "PUT", "partNumber") == 1);
+		REQUIRE(Count(observations, "POST", "uploadId") == 0);
+		REQUIRE(Count(observations, "DELETE", "uploadId") == 1);
+		for (const auto &observation : observations) {
+			if (observation.method == "PUT" && observation.part_number.IsValid()) {
+				REQUIRE(observation.status == status);
+			}
+		}
+	}
+
 	static void RunMultipart(const string &client_implementation) {
 		const string upload_id = "upload-baseline-id";
 		MockS3ServerConfig config;
@@ -1298,6 +1405,27 @@ CREATE SECRET refresh_upload_policy (
 		}
 		SECTION("single PUT") {
 			RunSinglePut(client_implementation);
+		}
+		SECTION("empty PUT accepts 201 without an ETag") {
+			RunCompatibleObjectPutResponse(client_implementation, 201, "");
+		}
+		SECTION("single PUT accepts 201 without an ETag") {
+			RunCompatibleObjectPutResponse(client_implementation, 201, "compatible single PUT response");
+		}
+		SECTION("single PUT accepts 200 without an ETag") {
+			RunCompatibleObjectPutResponse(client_implementation, 200, "single PUT without an ETag");
+		}
+		SECTION("single PUT rejects unsupported 204 responses") {
+			RunUnsupportedObjectPutResponse(client_implementation);
+		}
+		SECTION("multipart parts reject 201 responses") {
+			RunUnsupportedPartPutResponse(client_implementation, 201, MockS3ETagBehavior::VALUE);
+		}
+		SECTION("multipart parts reject missing ETags") {
+			RunUnsupportedPartPutResponse(client_implementation, 200, MockS3ETagBehavior::OMIT);
+		}
+		SECTION("multipart parts reject empty ETags") {
+			RunUnsupportedPartPutResponse(client_implementation, 200, MockS3ETagBehavior::EMPTY);
 		}
 		SECTION("multipart upload") {
 			RunMultipart(client_implementation);

@@ -376,6 +376,11 @@ static bool EndpointIsR2(const string &endpoint) {
 	return jurisdiction == "eu" || jurisdiction == "us" || jurisdiction == "fedramp";
 }
 
+static bool UsesR2CompatibilityProfile(const S3AuthParams &auth_params) {
+	return auth_params.provider_type == S3ProviderType::R2 ||
+	       (auth_params.provider_type == S3ProviderType::S3 && EndpointIsR2(auth_params.endpoint));
+}
+
 static S3MultipartUploadPolicy DefaultMultipartUploadPolicy() {
 	static constexpr idx_t MIB = 1024ULL * 1024ULL;
 	static constexpr idx_t GIB = 1024ULL * MIB;
@@ -391,11 +396,14 @@ static S3MultipartUploadPolicy R2MultipartUploadPolicy() {
 }
 
 S3MultipartUploadPolicy S3Provider::GetMultipartUploadPolicy(const S3AuthParams &auth_params) {
-	if (auth_params.provider_type == S3ProviderType::R2 ||
-	    (auth_params.provider_type == S3ProviderType::S3 && EndpointIsR2(auth_params.endpoint))) {
+	if (UsesR2CompatibilityProfile(auth_params)) {
 		return R2MultipartUploadPolicy();
 	}
 	return DefaultMultipartUploadPolicy();
+}
+
+idx_t S3Provider::GetBulkDeleteMaxBatchSize(const S3AuthParams &auth_params) {
+	return UsesR2CompatibilityProfile(auth_params) ? 700 : 1000;
 }
 
 string S3Provider::GetBadRequestError(const S3AuthParams &auth_params, const string &correct_region) {

@@ -182,6 +182,60 @@ static void RunBulkDeleteEndpointRefreshScenario(const string &client_implementa
 	REQUIRE(S3TestHelper::CountObservations(fresh_observations, "POST", S3TestHelper::STALE_KEY_ID, 200) == 1);
 }
 
+static void RunBulkDeleteR2PolicyRefreshScenario(const string &client_implementation, idx_t key_count) {
+	MockS3ServerConfig config;
+	config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+	config.auth.refresh_target = MockS3RefreshTarget::BULK_DELETE_POST;
+	config.bulk_delete.maximum_key_count = 700;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto test_id = S3TestHelper::ConfigureEndpointRefresh(db, con, "objects.example.com",
+	                                                      "account.r2.cloudflarestorage.com", client_implementation,
+	                                                      true, StringUtil::Format("http://%s", server.Endpoint()));
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	string error;
+	try {
+		auto &fs = FileSystem::GetFileSystem(*con.context);
+		fs.RemoveFiles(S3TestHelper::CreateBulkDeletePaths("s3", key_count));
+	} catch (std::exception &ex) {
+		error = ex.what();
+	}
+	INFO(error);
+	if (key_count <= 700) {
+		REQUIRE(error.empty());
+		S3TestHelper::RequireQueryOk(con, "COMMIT");
+	} else {
+		REQUIRE(error.find("Cannot send S3 bulk delete with 1000 keys") != string::npos);
+		REQUIRE(error.find("at most 700 keys per request") != string::npos);
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+	}
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	idx_t stale_requests = 0;
+	idx_t fresh_requests = 0;
+	for (const auto &observation : observations) {
+		if (observation.method != "POST" || !StringUtil::EndsWith(observation.target, "?delete=")) {
+			continue;
+		}
+		if (observation.key_id == S3TestHelper::STALE_KEY_ID) {
+			stale_requests++;
+			REQUIRE(observation.status == 403);
+			REQUIRE(observation.delete_key_count == key_count);
+		} else if (observation.key_id == S3TestHelper::FRESH_KEY_ID) {
+			fresh_requests++;
+			REQUIRE(observation.status == 200);
+			REQUIRE(observation.delete_key_count == key_count);
+		}
+	}
+	REQUIRE(stale_requests == 1);
+	REQUIRE(fresh_requests == (key_count <= 700 ? 1 : 0));
+	S3TestHelper::AssertSingleRefresh(test_id);
+}
+
 static void RunDeleteRefreshScenario(const string &client_implementation, bool connection_caching) {
 	auto observations = RunRefreshScenario(MockS3RefreshTarget::DELETE_OBJECT, client_implementation,
 	                                       connection_caching, [](Connection &con, const string &) {
@@ -738,6 +792,17 @@ TEST_CASE("HTTPFS bulk delete follows a refreshed S3 endpoint", "[httpfs][s3][re
 	}
 	SECTION("curl") {
 		RunBulkDeleteEndpointRefreshScenario("curl");
+	}
+}
+
+TEST_CASE("HTTPFS bulk delete revalidates R2 limits after endpoint refresh", "[httpfs][s3][refresh][delete]") {
+	for (const string client_implementation : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client_implementation << " accepts a compatible prepared batch") {
+			RunBulkDeleteR2PolicyRefreshScenario(client_implementation, 700);
+		}
+		DYNAMIC_SECTION(client_implementation << " rejects an oversized prepared batch before dispatch") {
+			RunBulkDeleteR2PolicyRefreshScenario(client_implementation, 1000);
+		}
 	}
 }
 

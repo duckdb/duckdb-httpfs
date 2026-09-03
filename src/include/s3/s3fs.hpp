@@ -145,7 +145,7 @@ protected:
 
 private:
 	unique_ptr<HTTPResponse> RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
-	                                                const string &body, string &result,
+	                                                const string &body, idx_t key_count, string &result,
 	                                                optional_ptr<S3RequestContext> request_context = nullptr);
 
 public:

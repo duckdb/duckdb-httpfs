@@ -638,6 +638,27 @@ static void RunMalformedListRecoveryTest(const string &client_implementation, bo
 	RequireIdenticalFreshListAttempts(observations, 3);
 }
 
+static void RunNamespaceMismatchListRecoveryTest(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.failures.malformed_success_lists = 1;
+	config.failures.malformed_list_behavior = MockS3MalformedListBehavior::FOREIGN_NAMESPACE_KEY;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureListRetryTest(db, con, server, client_implementation, 1);
+
+	auto result = con.Query("SELECT file FROM glob('s3://refresh-bucket/*.bin') ORDER BY file");
+	REQUIRE(result);
+	auto observations = server.Observations();
+	INFO((result->HasError() ? result->GetError() : string()));
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).ToString() == "s3://refresh-bucket/object.bin");
+	RequireIdenticalFreshListAttempts(observations, 2);
+}
+
 static void RunMalformedPaginatedListRecoveryTest() {
 	MockS3ServerConfig config;
 	config.failures.malformed_success_lists = 2;
@@ -874,6 +895,12 @@ TEST_CASE("S3 glob retries malformed successful ListObjectsV2 responses", "[http
 	}
 	SECTION("replays the exact paginated request") {
 		RunMalformedPaginatedListRecoveryTest();
+	}
+	SECTION("httplib rejects required fields from a foreign namespace") {
+		RunNamespaceMismatchListRecoveryTest("httplib");
+	}
+	SECTION("curl rejects required fields from a foreign namespace") {
+		RunNamespaceMismatchListRecoveryTest("curl");
 	}
 }
 

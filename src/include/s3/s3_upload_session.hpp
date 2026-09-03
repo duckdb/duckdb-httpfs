@@ -144,10 +144,10 @@ private:
 	void CompleteMultipartUpload();
 
 	//! S3 upload and cleanup requests.
-	string Upload(const_data_ptr_t data, idx_t size, const S3RequestQuery &query);
+	unique_ptr<HTTPResponse> RunUploadRequest(const_data_ptr_t data, idx_t size, const S3RequestQuery &query,
+	                                          S3RequestContext &request_context);
+	void UploadObject(const_data_ptr_t data, idx_t size);
 	void UploadPart(PreparedPart &part);
-	void UploadSingle(BufferedPart &buffered_part);
-	void UploadEmpty();
 	shared_ptr<const ErrorData> AbortMultipartUpload(const string &upload_id);
 
 	//! Request diagnostics.

@@ -222,6 +222,12 @@ CREATE SECRET refresh_s3 (
 
 void S3TestHelper::ConfigureEndpointRefresh(DuckDB &db, Connection &con, MockS3Server &stale_server,
                                             MockS3Server &fresh_server, const string &client_implementation) {
+	ConfigureEndpointRefresh(db, con, stale_server.Endpoint(), fresh_server.Endpoint(), client_implementation, false);
+}
+
+string S3TestHelper::ConfigureEndpointRefresh(DuckDB &db, Connection &con, const string &initial_endpoint,
+                                              const string &refreshed_endpoint, const string &client_implementation,
+                                              bool refresh_credentials, const string &http_proxy) {
 	auto test_id = NextTestId();
 
 	LoadExtension(db);
@@ -233,6 +239,12 @@ void S3TestHelper::ConfigureEndpointRefresh(DuckDB &db, Connection &con, MockS3S
 	RequireQueryOk(con, "SET s3_region='us-east-1'");
 	RequireQueryOk(con, "SET s3_use_ssl=false");
 	RequireQueryOk(con, "SET s3_url_style='path'");
+	if (!http_proxy.empty()) {
+		RequireQueryOk(con, StringUtil::Format("SET http_proxy='%s'", http_proxy));
+	}
+
+	auto refreshed_key_id = refresh_credentials ? FRESH_KEY_ID : STALE_KEY_ID;
+	auto refreshed_secret = refresh_credentials ? FRESH_SECRET : STALE_SECRET;
 
 	RequireQueryOk(con, StringUtil::Format(R"(
 CREATE SECRET refresh_s3 (
@@ -251,9 +263,9 @@ CREATE SECRET refresh_s3 (
 	}
 ))",
 	                                       S3TestHelper::TEST_PROVIDER, S3TestHelper::STALE_KEY_ID,
-	                                       S3TestHelper::STALE_SECRET, stale_server.Endpoint(), test_id,
-	                                       S3TestHelper::STALE_KEY_ID, S3TestHelper::STALE_SECRET,
-	                                       fresh_server.Endpoint(), test_id));
+	                                       S3TestHelper::STALE_SECRET, initial_endpoint, test_id, refreshed_key_id,
+	                                       refreshed_secret, refreshed_endpoint, test_id));
+	return test_id;
 }
 
 void S3TestHelper::AssertSingleRefresh(const string &test_id) {
@@ -311,6 +323,15 @@ void S3TestHelper::RequireCompletionIdentity(const vector<MockS3RequestObservati
 		REQUIRE(completion.body_digest == completions.front().body_digest);
 		REQUIRE(completion.upload_id == completions.front().upload_id);
 	}
+}
+
+vector<string> S3TestHelper::CreateBulkDeletePaths(const string &scheme, idx_t count) {
+	vector<string> result;
+	result.reserve(count);
+	for (idx_t i = 0; i < count; i++) {
+		result.push_back(StringUtil::Format("%s://%s/object-%llu.bin", scheme, BUCKET, i));
+	}
+	return result;
 }
 
 void S3TestHelper::WriteMultipartPayload(Connection &con) {

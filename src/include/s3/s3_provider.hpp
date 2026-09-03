@@ -70,6 +70,7 @@ struct S3Provider {
 	static S3URLStyle ParseURLStyle(const string &url_style);
 	static S3AuthType GetAuthType(const S3AuthParams &auth_params);
 	static S3MultipartUploadPolicy GetMultipartUploadPolicy(const S3AuthParams &auth_params);
+	static idx_t GetBulkDeleteMaxBatchSize(const S3AuthParams &auth_params);
 	static string GetBadRequestError(const S3AuthParams &auth_params, const string &correct_region = "");
 	static string GetAuthError(const S3AuthParams &auth_params);
 };

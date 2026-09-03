@@ -455,19 +455,22 @@ void S3UploadSession::ThrowIfFailed() DUCKDB_EXCLUDES(state_lock) {
 	}
 }
 
-string S3UploadSession::Upload(const_data_ptr_t data, idx_t size, const S3RequestQuery &query) {
-	S3RequestContext request_context;
+unique_ptr<HTTPResponse> S3UploadSession::RunUploadRequest(const_data_ptr_t data, idx_t size,
+                                                           const S3RequestQuery &query,
+                                                           S3RequestContext &request_context) {
 	auto response = s3fs.get().PutRequest(*request_session, path, data, size, query, request_context);
 	if (response->HasRequestError()) {
 		throw IOException("S3 upload request for \"%s\" could not be completed", request_context.display_url);
 	}
-	if (response->status != HTTPStatusCode::OK_200) {
+	return response;
+}
+
+void S3UploadSession::UploadObject(const_data_ptr_t data, idx_t size) {
+	S3RequestContext request_context;
+	auto response = RunUploadRequest(data, size, S3RequestQuery(), request_context);
+	if (response->status != HTTPStatusCode::OK_200 && response->status != HTTPStatusCode::Created_201) {
 		throw GetStatusError(*response, request_context, "uploading to");
 	}
-	if (!response->headers.HasHeader("ETag")) {
-		throw IOException("Unexpected response when uploading to S3");
-	}
-	return response->headers.GetHeaderValue("ETag");
 }
 
 void S3UploadSession::UploadPart(PreparedPart &part) {
@@ -475,7 +478,18 @@ void S3UploadSession::UploadPart(PreparedPart &part) {
 	ThrowIfFailed();
 	D_ASSERT(upload_id);
 	S3RequestQuery query {{"partNumber", to_string(part.part_number)}, {"uploadId", *upload_id}};
-	auto etag = Upload(part.data, part.size, query);
+	S3RequestContext request_context;
+	auto response = RunUploadRequest(part.data, part.size, query, request_context);
+	if (response->status != HTTPStatusCode::OK_200) {
+		throw GetStatusError(*response, request_context, "uploading to");
+	}
+	if (!response->headers.HasHeader("ETag")) {
+		throw IOException("Unexpected response when uploading to S3");
+	}
+	auto etag = response->headers.GetHeaderValue("ETag");
+	if (etag.empty()) {
+		throw IOException("Unexpected response when uploading to S3");
+	}
 	StorePartETag(part.part_number, std::move(etag));
 }
 
@@ -495,15 +509,6 @@ void S3UploadSession::StorePartETag(idx_t part_number, string etag) DUCKDB_EXCLU
 	if (failure.primary_error) {
 		ThrowFailure(failure);
 	}
-}
-
-void S3UploadSession::UploadSingle(BufferedPart &buffered_part_p) {
-	Upload(buffered_part_p.Ptr(), buffered_part_p.size, S3RequestQuery());
-}
-
-void S3UploadSession::UploadEmpty() {
-	const_data_ptr_t empty = nullptr;
-	Upload(empty, 0, S3RequestQuery());
 }
 
 S3UploadSession::MultipartSnapshot S3UploadSession::GetMultipartSnapshot() DUCKDB_EXCLUDES(state_lock) {
@@ -603,9 +608,9 @@ void S3UploadSession::Finalize() {
 		}
 		if (!multipart_upload) {
 			if (!local_buffered_part) {
-				UploadEmpty();
+				UploadObject(nullptr, 0);
 			} else {
-				UploadSingle(*local_buffered_part);
+				UploadObject(local_buffered_part->Ptr(), local_buffered_part->size);
 			}
 		} else {
 			if (local_buffered_part) {

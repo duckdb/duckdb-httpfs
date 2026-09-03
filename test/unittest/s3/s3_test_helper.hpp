@@ -30,6 +30,9 @@ public:
 	                               bool refresh_enabled = true);
 	static void ConfigureEndpointRefresh(DuckDB &db, Connection &con, MockS3Server &stale_server,
 	                                     MockS3Server &fresh_server, const string &client_implementation);
+	static string ConfigureEndpointRefresh(DuckDB &db, Connection &con, const string &initial_endpoint,
+	                                       const string &refreshed_endpoint, const string &client_implementation,
+	                                       bool refresh_credentials, const string &http_proxy = "");
 	static void AssertSingleRefresh(const string &test_id);
 	static void AssertNoRefresh(const string &test_id);
 	static bool HasRequestWithKey(const vector<MockS3RequestObservation> &observations, const string &key_id);
@@ -39,6 +42,7 @@ public:
 	CompletionObservations(const vector<MockS3RequestObservation> &observations);
 	static void RequireCompletionIdentity(const vector<MockS3RequestObservation> &observations,
 	                                      idx_t expected_attempts);
+	static vector<string> CreateBulkDeletePaths(const string &scheme, idx_t count);
 	static void WriteMultipartPayload(Connection &con);
 	static void WriteSinglePutPayload(Connection &con);
 

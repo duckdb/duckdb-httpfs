@@ -30,6 +30,22 @@ TEST_CASE("S3 XML responses follow text and namespace semantics", "[httpfs][s3][
 		REQUIRE(response.type == S3XMLResponseType::MULTIPART_INITIALIZATION);
 		CHECK(response.upload_id == "opaque-id");
 	}
+	SECTION("unknown default namespaces are accepted") {
+		const string input = "<InitiateMultipartUploadResult xmlns=\"urn:example:storage\">"
+		                     "<UploadId>native-id</UploadId></InitiateMultipartUploadResult>";
+		S3XMLResponse response;
+		REQUIRE(S3XMLResponseParser::TryParse(input, response));
+		REQUIRE(response.type == S3XMLResponseType::MULTIPART_INITIALIZATION);
+		CHECK(response.upload_id == "native-id");
+	}
+	SECTION("unknown prefixed namespaces are accepted") {
+		const string input = "<native:CompleteMultipartUploadResult xmlns:native=\"urn:example:storage\">"
+		                     "<native:ETag>native-etag</native:ETag></native:CompleteMultipartUploadResult>";
+		S3XMLResponse response;
+		REQUIRE(S3XMLResponseParser::TryParse(input, response));
+		REQUIRE(response.type == S3XMLResponseType::MULTIPART_COMPLETION);
+		CHECK(response.etag == "native-etag");
+	}
 	SECTION("default namespaces are inherited") {
 		const string input = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 		                     "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
@@ -78,7 +94,11 @@ TEST_CASE("S3 XML responses reject malformed XML", "[httpfs][s3][xml]") {
 	      "<CompleteMultipartUploadResult><ETag>&#x110000;</ETag></CompleteMultipartUploadResult>",
 	      "<CompleteMultipartUploadResult duplicate=\"a\" duplicate=\"b\"><ETag>etag</ETag>"
 	      "</CompleteMultipartUploadResult>",
+	      "<CompleteMultipartUploadResult xmlns:a=\"urn:attribute\" xmlns:b=\"urn:attribute\" a:value=\"one\" "
+	      "b:value=\"two\"><ETag>etag</ETag></CompleteMultipartUploadResult>",
 	      "<s3:CompleteMultipartUploadResult><s3:ETag>etag</s3:ETag></s3:CompleteMultipartUploadResult>",
+	      "<s3:CompleteMultipartUploadResult xmlns:s3=\"\"><s3:ETag>etag</s3:ETag>"
+	      "</s3:CompleteMultipartUploadResult>",
 	      "<CompleteMultipartUploadResult><ETag>etag</CompleteMultipartUploadResult></ETag>",
 	      "<CompleteMultipartUploadResult/><OtherRoot/>",
 	      "<!DOCTYPE CompleteMultipartUploadResult><CompleteMultipartUploadResult/>",
@@ -119,9 +139,7 @@ TEST_CASE("S3 XML responses reject malformed XML", "[httpfs][s3][xml]") {
 
 TEST_CASE("S3 XML success responses require the expected contract", "[httpfs][s3][xml]") {
 	for (const auto &input :
-	     {"<s3:InitiateMultipartUploadResult xmlns:s3=\"urn:not-s3\"><s3:UploadId>id</s3:UploadId>"
-	      "</s3:InitiateMultipartUploadResult>",
-	      "<InitiateMultipartUploadResult><Wrapper><UploadId>nested</UploadId></Wrapper>"
+	     {"<InitiateMultipartUploadResult><Wrapper><UploadId>nested</UploadId></Wrapper>"
 	      "</InitiateMultipartUploadResult>",
 	      "<InitiateMultipartUploadResult><UploadId>first</UploadId><UploadId>second</UploadId>"
 	      "</InitiateMultipartUploadResult>",
@@ -131,6 +149,21 @@ TEST_CASE("S3 XML success responses require the expected contract", "[httpfs][s3
 		S3XMLResponse response;
 		REQUIRE(S3XMLResponseParser::TryParse(input, response));
 		CHECK(response.type == S3XMLResponseType::UNKNOWN);
+	}
+
+	SECTION("required fields must use the root namespace") {
+		for (const auto &input :
+		     {"<native:InitiateMultipartUploadResult xmlns:native=\"urn:native\" xmlns:foreign=\"urn:foreign\">"
+		      "<foreign:UploadId>foreign-id</foreign:UploadId></native:InitiateMultipartUploadResult>",
+		      "<native:CompleteMultipartUploadResult xmlns:native=\"urn:native\" xmlns:foreign=\"urn:foreign\">"
+		      "<foreign:ETag>foreign-etag</foreign:ETag></native:CompleteMultipartUploadResult>",
+		      "<native:InitiateMultipartUploadResult xmlns:native=\"urn:native\">"
+		      "<native:UploadId xmlns:native=\"urn:foreign\">rebound</native:UploadId>"
+		      "</native:InitiateMultipartUploadResult>"}) {
+			S3XMLResponse response;
+			REQUIRE(S3XMLResponseParser::TryParse(input, response));
+			CHECK(response.type == S3XMLResponseType::UNKNOWN);
+		}
 	}
 }
 
@@ -150,6 +183,29 @@ TEST_CASE("S3 XML errors are extracted without guessing malformed bodies", "[htt
 		REQUIRE(S3XMLResponseParser::TryParseError("<Error><Code>RequestTimeout</Code></Error>", error));
 		CHECK(error.code == "RequestTimeout");
 		CHECK(error.message.empty());
+	}
+	SECTION("unknown namespaces retain optional and duplicate field handling") {
+		S3XMLError missing_code;
+		REQUIRE(S3XMLResponseParser::TryParseError(
+		    "<Error xmlns=\"urn:example:storage\"><Message>missing code</Message></Error>", missing_code));
+		CHECK(missing_code.code.empty());
+		CHECK(missing_code.message == "missing code");
+
+		S3XMLError duplicate_code;
+		REQUIRE(S3XMLResponseParser::TryParseError(
+		    "<native:Error xmlns:native=\"urn:example:storage\"><native:Code>first</native:Code>"
+		    "<native:Code>second</native:Code><native:Message>kept</native:Message></native:Error>",
+		    duplicate_code));
+		CHECK(duplicate_code.code.empty());
+		CHECK(duplicate_code.message == "kept");
+
+		S3XMLError foreign_code;
+		REQUIRE(S3XMLResponseParser::TryParseError(
+		    "<native:Error xmlns:native=\"urn:example:storage\" xmlns:foreign=\"urn:foreign\">"
+		    "<foreign:Code>ignored</foreign:Code><native:Message>native</native:Message></native:Error>",
+		    foreign_code));
+		CHECK(foreign_code.code.empty());
+		CHECK(foreign_code.message == "native");
 	}
 	SECTION("malformed and unrelated XML are not errors") {
 		S3XMLError error;
@@ -196,11 +252,10 @@ TEST_CASE("S3 ListObjectsV2 XML is parsed into one typed result", "[httpfs][s3][
 	}
 
 	SECTION("only children in the root namespace are interpreted") {
-		const string input =
-		    "<s3:ListBucketResult xmlns:s3=\"http://s3.amazonaws.com/doc/2006-03-01/\" xmlns:x=\"urn:x\">"
-		    "<x:Contents><x:Key>ignored</x:Key></x:Contents>"
-		    "<s3:Contents><x:Key>also-ignored</x:Key><s3:Key>kept</s3:Key></s3:Contents>"
-		    "<s3:Unknown><s3:Key>not-a-record</s3:Key></s3:Unknown></s3:ListBucketResult>";
+		const string input = "<s3:ListBucketResult xmlns:s3=\"urn:example:storage\" xmlns:x=\"urn:x\">"
+		                     "<x:Contents><x:Key>ignored</x:Key></x:Contents>"
+		                     "<s3:Contents><x:Key>also-ignored</x:Key><s3:Key>kept</s3:Key></s3:Contents>"
+		                     "<s3:Unknown><s3:Key>not-a-record</s3:Key></s3:Unknown></s3:ListBucketResult>";
 		S3ListObjectsV2Result result;
 		REQUIRE(S3XMLResponseParser::TryParseListObjectsV2(input, result));
 		REQUIRE(result.objects.size() == 1);
@@ -214,6 +269,9 @@ TEST_CASE("S3 ListObjectsV2 XML is parsed into one typed result", "[httpfs][s3][
 		      "<ListBucketResult><Contents><Key>one</Key><Key>two</Key></Contents></ListBucketResult>",
 		      "<ListBucketResult><Contents><Key><Nested/></Key></Contents></ListBucketResult>",
 		      "<ListBucketResult><Contents><Key>one</Key><Size>1</Size><Size>2</Size></Contents></ListBucketResult>",
+		      "<native:ListBucketResult xmlns:native=\"urn:native\" xmlns:foreign=\"urn:foreign\">"
+		      "<native:Contents><foreign:Key>foreign</foreign:Key></native:Contents>"
+		      "</native:ListBucketResult>",
 		      "<ListBucketResult><NextContinuationToken>one</NextContinuationToken>"
 		      "<NextContinuationToken>two</NextContinuationToken></ListBucketResult>",
 		      "<ListBucketResult><Contents><Key>truncated</Key></Contents>"}) {
@@ -241,6 +299,8 @@ TEST_CASE("S3 DeleteObjects XML preserves all object errors", "[httpfs][s3][xml]
 		REQUIRE(S3XMLResponseParser::TryParseDeleteObjects(
 		    "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>", result));
 		CHECK(result.errors.empty());
+		REQUIRE(S3XMLResponseParser::TryParseDeleteObjects("<DeleteResult xmlns=\"urn:example:storage\"/>", result));
+		CHECK(result.errors.empty());
 
 		const string input = "<g:DeleteResult xmlns:g=\"http://doc.s3.amazonaws.com/2006-03-01\">"
 		                     "<g:Error><g:Key>first&amp;key</g:Key><g:Code>AccessDenied</g:Code>"
@@ -255,6 +315,14 @@ TEST_CASE("S3 DeleteObjects XML preserves all object errors", "[httpfs][s3][xml]
 		CHECK(result.errors[1].key == "second");
 		CHECK(result.errors[1].code == "InternalError");
 		CHECK(result.errors[1].message.empty());
+
+		const string native_input =
+		    "<native:DeleteResult xmlns:native=\"urn:example:storage\">"
+		    "<native:Error><native:Key>native-key</native:Key><native:Code>AccessDenied</native:Code>"
+		    "</native:Error></native:DeleteResult>";
+		REQUIRE(S3XMLResponseParser::TryParseDeleteObjects(native_input, result));
+		REQUIRE(result.errors.size() == 1);
+		CHECK(result.errors[0].key == "native-key");
 	}
 
 	SECTION("required fields and malformed documents are rejected") {
@@ -264,6 +332,9 @@ TEST_CASE("S3 DeleteObjects XML preserves all object errors", "[httpfs][s3][xml]
 		                          "<DeleteResult><Error><Key>key</Key><Code/></Error></DeleteResult>",
 		                          "<DeleteResult><Error><Key>key</Key><Key>other</Key><Code>Denied</Code></Error>"
 		                          "</DeleteResult>",
+		                          "<native:DeleteResult xmlns:native=\"urn:native\" xmlns:foreign=\"urn:foreign\">"
+		                          "<native:Error><foreign:Key>key</foreign:Key><native:Code>Denied</native:Code>"
+		                          "</native:Error></native:DeleteResult>",
 		                          "<DeleteResult><Error><Key>key</Key><Code>Denied</Code>"}) {
 			S3DeleteObjectsResult result;
 			CHECK_FALSE(S3XMLResponseParser::TryParseDeleteObjects(input, result));
