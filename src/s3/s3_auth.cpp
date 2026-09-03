@@ -75,7 +75,7 @@ bool S3AuthParams::operator==(const S3AuthParams &other) const {
 	       session_token == other.session_token && endpoint == other.endpoint && endpoint_mode == other.endpoint_mode &&
 	       kms_key_id == other.kms_key_id && url_style == other.url_style && use_ssl == other.use_ssl &&
 	       s3_url_compatibility_mode == other.s3_url_compatibility_mode && requester_pays == other.requester_pays &&
-	       oauth2_bearer_token == other.oauth2_bearer_token;
+	       user_project == other.user_project && oauth2_bearer_token == other.oauth2_bearer_token;
 }
 
 S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,

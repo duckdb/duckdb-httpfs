@@ -66,21 +66,28 @@ public:
 	bool operator==(const S3AuthParams &other) const;
 
 public:
+	//! Provider and URL routing
 	S3ProviderType provider_type = S3ProviderType::S3;
-	//! Whether the url was routed here by 's3_url_scheme_aliases' rather than a built-in scheme
 	bool scheme_is_alias = false;
+
+	//! Authentication
 	string region;
 	string access_key_id;
 	string secret_access_key;
 	string session_token;
+	string oauth2_bearer_token;
+
+	//! Endpoint and URL behavior
 	string endpoint;
 	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
-	string kms_key_id;
 	string url_style;
 	bool use_ssl = true;
 	bool s3_url_compatibility_mode = false;
+
+	//! Request headers
+	string kms_key_id;
 	bool requester_pays = false;
-	string oauth2_bearer_token;
+	string user_project;
 };
 
 struct AWSEnvironmentCredentialsProvider {

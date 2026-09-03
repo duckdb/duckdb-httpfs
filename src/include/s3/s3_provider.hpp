@@ -39,8 +39,13 @@ struct S3ProviderMatch {
 };
 
 struct S3Provider {
+	static constexpr const char *S3_SECRET_TYPE = "s3";
+	static constexpr const char *R2_SECRET_TYPE = "r2";
+	static constexpr const char *GCS_SECRET_TYPE = "gcs";
+	static constexpr const char *AWS_SECRET_TYPE = "aws";
+
 	static const array<const char *, 4> &SecretTypes();
-	static const array<const char *, 12> &CredentialMaterialKeys();
+	static const array<const char *, 13> &CredentialMaterialKeys();
 
 	static optional<S3ProviderMatch> TryMatchUrl(const string &url);
 	static optional<S3ProviderMatch> TryMatchUrl(const string &url, const vector<string> &scheme_alias_prefixes);

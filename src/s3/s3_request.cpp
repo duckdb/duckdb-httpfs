@@ -92,14 +92,18 @@ bool S3RequestQuery::HasParameter(const string &name) const {
 
 struct HTTPFSOwnedS3Headers {
 public:
-	static bool Contains(const string &name) {
-		return Headers().find(name) != Headers().end();
+	static bool Contains(const string &name, S3ProviderType provider_type) {
+		return Headers().find(name) != Headers().end() ||
+		       (provider_type == S3ProviderType::GCS && StringUtil::CIEquals(name, "x-goog-user-project"));
 	}
 
-	static const string &CanonicalName(const string &name) {
+	static string CanonicalName(const string &name, S3ProviderType provider_type) {
 		auto entry = Headers().find(name);
-		D_ASSERT(entry != Headers().end());
-		return entry->second;
+		if (entry != Headers().end()) {
+			return entry->second;
+		}
+		D_ASSERT(provider_type == S3ProviderType::GCS && StringUtil::CIEquals(name, "x-goog-user-project"));
+		return "x-goog-user-project";
 	}
 
 private:
@@ -180,7 +184,7 @@ private:
 			headers["x-amz-server-side-encryption"] = "aws:kms";
 			headers["x-amz-server-side-encryption-aws-kms-key-id"] = auth_params.kms_key_id;
 		}
-		if (auth_params.requester_pays) {
+		if (auth_params.requester_pays && auth_params.provider_type != S3ProviderType::GCS) {
 			headers["x-amz-request-payer"] = "requester";
 		}
 		if (!content_md5.empty()) {
@@ -221,7 +225,7 @@ private:
 				continue;
 			}
 			auto value = header.second;
-			if (!HTTPFSOwnedS3Headers::Contains(header.first)) {
+			if (!HTTPFSOwnedS3Headers::Contains(header.first, auth_params.provider_type)) {
 				value = NormalizeHeaderValue(value);
 			}
 			result.push_back({StringUtil::Lower(header.first), std::move(value)});
@@ -287,7 +291,7 @@ private:
 };
 
 static HTTPHeaders CreateConfiguredS3Headers(const unordered_map<string, string> &extra_headers,
-                                             const string &user_agent) {
+                                             const string &user_agent, S3ProviderType provider_type) {
 	vector<pair<string, string>> sorted_headers;
 	sorted_headers.reserve(extra_headers.size());
 	for (const auto &header : extra_headers) {
@@ -308,9 +312,9 @@ static HTTPHeaders CreateConfiguredS3Headers(const unordered_map<string, string>
 			throw InvalidInputException("Configured S3 headers \"%s\" and \"%s\" differ only by case",
 			                            sorted_headers[header_idx - 1].first, header.first);
 		}
-		if (HTTPFSOwnedS3Headers::Contains(header.first)) {
+		if (HTTPFSOwnedS3Headers::Contains(header.first, provider_type)) {
 			throw InvalidInputException("Configured S3 header \"%s\" conflicts with HTTPFS-owned header \"%s\"",
-			                            header.first, HTTPFSOwnedS3Headers::CanonicalName(header.first));
+			                            header.first, HTTPFSOwnedS3Headers::CanonicalName(header.first, provider_type));
 		}
 	}
 
@@ -329,7 +333,10 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
                                          const S3AuthParams &auth_params, string date_now, string datetime_now,
                                          string payload_hash, string content_type, string content_md5,
                                          const unordered_map<string, string> &extra_headers, const string &user_agent) {
-	auto headers = CreateConfiguredS3Headers(extra_headers, user_agent);
+	auto headers = CreateConfiguredS3Headers(extra_headers, user_agent, auth_params.provider_type);
+	if (auth_params.provider_type == S3ProviderType::GCS && !auth_params.user_project.empty()) {
+		headers["x-goog-user-project"] = auth_params.user_project;
+	}
 	switch (S3Provider::GetAuthType(auth_params)) {
 	case S3AuthType::ANONYMOUS: {
 		headers["Host"] = parsed_url.host;

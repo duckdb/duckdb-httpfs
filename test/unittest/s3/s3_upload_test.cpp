@@ -72,6 +72,147 @@ CREATE SECRET fixed_upload (
 		}
 	}
 
+	static void ConfigureGCS(Connection &con, MockS3Server &server, const string &client_implementation) {
+		S3TestHelper::RequireQueryOk(
+		    con, StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
+		S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
+		S3TestHelper::RequireQueryOk(con, "SET httpfs_enable_credential_refresh=false");
+		S3TestHelper::RequireQueryOk(con, "SET http_retries=0");
+		S3TestHelper::RequireQueryOk(con, "SET s3_uploader_max_filesize='50GB'");
+		S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET gcs_upload (
+	TYPE GCS,
+	SCOPE 'gcs://refresh-bucket/',
+	KEY_ID 'GCS_KEY',
+	SECRET 'GCS_SECRET',
+	USER_PROJECT 'billing-project',
+	ENDPOINT '%s',
+	USE_SSL false,
+	URL_STYLE 'path'
+))",
+		                                                     server.Endpoint()));
+	}
+
+	static void RunGCSRequesterPaysUpload(const string &client_implementation, bool multipart) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.stale_key_id = "NEVER_STALE";
+		config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		S3TestHelper::LoadExtension(db);
+		ConfigureGCS(con, server, client_implementation);
+
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con, "gcs://refresh-bucket/object.bin");
+		auto payload = multipart ? CreateMultipartPayload() : string("single GCS PUT");
+		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		handle->Close();
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(server.UploadedObject() == payload);
+		if (multipart) {
+			REQUIRE(Count(observations, "POST", "uploads") == 1);
+			REQUIRE(Count(observations, "PUT", "partNumber") >= 1);
+			REQUIRE(Count(observations, "POST", "uploadId") == 1);
+		} else {
+			REQUIRE(Count(observations, "PUT") == 1);
+			REQUIRE(Count(observations, "POST") == 0);
+		}
+		for (const auto &observation : observations) {
+			REQUIRE(MockS3HeaderValues(observation, "x-goog-user-project") == vector<string> {"billing-project"});
+			REQUIRE(MockS3HeaderValues(observation, "x-amz-request-payer").empty());
+			REQUIRE(StringUtil::Contains(observation.authorization, "x-goog-user-project"));
+		}
+	}
+
+	static void RunGCSRequesterPaysRefresh(const string &client_implementation) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+		config.auth.refresh_target = MockS3RefreshTarget::MULTIPART_INITIATE_POST;
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		S3TestHelper::LoadExtension(db);
+		S3TestHelper::RegisterRefreshProvider(db);
+		auto test_id = S3TestHelper::NextTestId();
+		S3TestHelper::RequireQueryOk(
+		    con, StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
+		S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
+		S3TestHelper::RequireQueryOk(con, "SET httpfs_enable_credential_refresh=true");
+		S3TestHelper::RequireQueryOk(con, "SET http_retries=0");
+		S3TestHelper::RequireQueryOk(con, "SET s3_use_ssl=false");
+		S3TestHelper::RequireQueryOk(con, "SET s3_uploader_max_filesize='50GB'");
+		S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET gcs_refresh_upload (
+	TYPE GCS,
+	PROVIDER %s,
+	SCOPE 'gcs://refresh-bucket/',
+	KEY_ID '%s',
+	SECRET '%s',
+	USER_PROJECT 'stale-project',
+	ENDPOINT '%s',
+	TEST_ID '%s',
+	REFRESH_INFO MAP {
+		'KEY_ID': '%s',
+		'SECRET': '%s',
+		'USER_PROJECT': 'fresh-project',
+		'ENDPOINT': '%s',
+		'TEST_ID': '%s'
+	}
+))",
+		                                                     S3TestHelper::TEST_PROVIDER, S3TestHelper::STALE_KEY_ID,
+		                                                     S3TestHelper::STALE_SECRET, server.Endpoint(), test_id,
+		                                                     S3TestHelper::FRESH_KEY_ID, S3TestHelper::FRESH_SECRET,
+		                                                     server.Endpoint(), test_id));
+
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con, "gcs://refresh-bucket/object.bin");
+		auto payload = CreateMultipartPayload();
+		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		handle->Close();
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		idx_t stale_requests = 0;
+		idx_t fresh_initializations = 0;
+		idx_t fresh_parts = 0;
+		idx_t fresh_completions = 0;
+		for (const auto &observation : observations) {
+			if (observation.key_id == S3TestHelper::STALE_KEY_ID) {
+				stale_requests++;
+				REQUIRE(observation.method == "POST");
+				REQUIRE(observation.status == 403);
+				REQUIRE(StringUtil::Contains(observation.target, "uploads"));
+				REQUIRE(MockS3HeaderValues(observation, "x-goog-user-project") == vector<string> {"stale-project"});
+				continue;
+			}
+			REQUIRE(observation.key_id == S3TestHelper::FRESH_KEY_ID);
+			REQUIRE(MockS3HeaderValues(observation, "x-goog-user-project") == vector<string> {"fresh-project"});
+			fresh_initializations +=
+			    observation.method == "POST" && StringUtil::Contains(observation.target, "uploads");
+			fresh_parts += observation.method == "PUT" && observation.part_number.IsValid();
+			fresh_completions += observation.method == "POST" && StringUtil::Contains(observation.target, "uploadId");
+		}
+		REQUIRE(stale_requests == 1);
+		REQUIRE(fresh_initializations == 1);
+		REQUIRE(fresh_parts >= 1);
+		REQUIRE(fresh_completions == 1);
+		REQUIRE(server.UploadedObject() == payload);
+		S3TestHelper::AssertSingleRefresh(test_id);
+	}
+
 	static void RunUploadPolicyRefreshRejected(const string &client_implementation, bool initial_fixed) {
 		MockS3ServerConfig config;
 		config.object.bucket = S3TestHelper::BUCKET;
@@ -1259,6 +1400,27 @@ TEST_CASE("S3 upload policy is stable across credential refresh", "[httpfs][s3][
 		}
 		DYNAMIC_SECTION(client_implementation << " rejects fixed-to-adaptive refresh") {
 			S3UploadTest::RunUploadPolicyRefreshRejected(client_implementation, true);
+		}
+	}
+}
+
+TEST_CASE("GCS billing projects are sent on single and multipart uploads",
+          "[httpfs][s3][gcs][upload][requester-pays]") {
+	for (const string client_implementation : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client_implementation << " single PUT") {
+			S3UploadTest::RunGCSRequesterPaysUpload(client_implementation, false);
+		}
+		DYNAMIC_SECTION(client_implementation << " multipart upload") {
+			S3UploadTest::RunGCSRequesterPaysUpload(client_implementation, true);
+		}
+	}
+}
+
+TEST_CASE("GCS multipart uploads publish refreshed billing projects",
+          "[httpfs][s3][gcs][upload][refresh][requester-pays]") {
+	for (const string client_implementation : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client_implementation) {
+			S3UploadTest::RunGCSRequesterPaysRefresh(client_implementation);
 		}
 	}
 }

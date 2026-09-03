@@ -141,12 +141,14 @@ void S3TestHelper::RegisterRefreshProvider(DuckDB &db) {
 	ExtensionActiveLoad load_info(*db.instance, extension_info, "httpfs_refresh_test", "");
 	ExtensionLoader loader(load_info);
 
-	CreateSecretFunction function;
-	function.secret_type = "s3";
-	function.provider = S3TestHelper::TEST_PROVIDER;
-	function.function = TestS3SecretFunctions::CreateTestSecret;
-	TestS3SecretFunctions::SetTestNamedParams(function, "s3");
-	loader.RegisterFunction(function);
+	for (const auto secret_type : {"s3", "gcs"}) {
+		CreateSecretFunction function;
+		function.secret_type = secret_type;
+		function.provider = S3TestHelper::TEST_PROVIDER;
+		function.function = TestS3SecretFunctions::CreateTestSecret;
+		TestS3SecretFunctions::SetTestNamedParams(function, secret_type);
+		loader.RegisterFunction(function);
+	}
 }
 
 void S3TestHelper::RequireQueryOk(Connection &con, const string &query) {

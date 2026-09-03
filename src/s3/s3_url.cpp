@@ -88,10 +88,17 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthParams &params)
 		}
 		query_params.erase(found_requester_pays_param);
 	}
+	if (params.provider_type == S3ProviderType::GCS) {
+		GetQueryParam("gcs_user_project", params.user_project, query_params);
+	}
 	if (!query_params.empty()) {
-		throw IOException("Invalid query parameters found. Supported parameters are:\n's3_region', 's3_access_key_id', "
-		                  "'s3_secret_access_key', 's3_session_token',\n's3_endpoint', 's3_url_style', 's3_use_ssl', "
-		                  "'s3_requester_pays'");
+		auto supported_parameters =
+		    string("'s3_region', 's3_access_key_id', 's3_secret_access_key', 's3_session_token',\n's3_endpoint', "
+		           "'s3_url_style', 's3_use_ssl', 's3_requester_pays'");
+		if (params.provider_type == S3ProviderType::GCS) {
+			supported_parameters += ", 'gcs_user_project'";
+		}
+		throw IOException("Invalid query parameters found. Supported parameters are:\n%s", supported_parameters);
 	}
 }
 

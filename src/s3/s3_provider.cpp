@@ -111,14 +111,16 @@ vector<string> S3Provider::GetSchemeAliasPrefixes(const DBConfig &config) {
 }
 
 const array<const char *, 4> &S3Provider::SecretTypes() {
-	static constexpr array<const char *, 4> SECRET_TYPES = {"s3", "r2", "gcs", "aws"};
+	static constexpr array<const char *, 4> SECRET_TYPES = {S3_SECRET_TYPE, R2_SECRET_TYPE, GCS_SECRET_TYPE,
+	                                                        AWS_SECRET_TYPE};
 	return SECRET_TYPES;
 }
 
-const array<const char *, 12> &S3Provider::CredentialMaterialKeys() {
-	static constexpr array<const char *, 12> CREDENTIAL_MATERIAL_KEYS = {
+const array<const char *, 13> &S3Provider::CredentialMaterialKeys() {
+	static constexpr array<const char *, 13> CREDENTIAL_MATERIAL_KEYS = {
 	    "key_id",    "secret",  "session_token",          "region",         "endpoint",     "kms_key_id",
-	    "url_style", "use_ssl", "url_compatibility_mode", "requester_pays", "bearer_token", "account_id"};
+	    "url_style", "use_ssl", "url_compatibility_mode", "requester_pays", "bearer_token", "user_project",
+	    "account_id"};
 	return CREDENTIAL_MATERIAL_KEYS;
 }
 
@@ -161,31 +163,32 @@ S3ProviderMatch S3Provider::MatchUrl(const string &url) {
 }
 
 vector<string> S3Provider::DefaultSecretScope(const string &secret_type) {
-	if (secret_type == "s3") {
+	if (secret_type == S3_SECRET_TYPE) {
 		return {"s3://", "s3n://", "s3a://"};
 	}
-	if (secret_type == "r2") {
+	if (secret_type == R2_SECRET_TYPE) {
 		return {"r2://"};
 	}
-	if (secret_type == "gcs") {
+	if (secret_type == GCS_SECRET_TYPE) {
 		return {"gcs://", "gs://"};
 	}
-	if (secret_type == "aws") {
+	if (secret_type == AWS_SECRET_TYPE) {
 		return {""};
 	}
 	throw InternalException("Unknown secret type found in httpfs extension: '%s'", secret_type);
 }
 
 void S3Provider::SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function) {
-	if (secret_type == "r2") {
+	if (secret_type == R2_SECRET_TYPE) {
 		function.named_parameters["account_id"] = LogicalType::VARCHAR;
-	} else if (secret_type == "gcs") {
+	} else if (secret_type == GCS_SECRET_TYPE) {
 		function.named_parameters["bearer_token"] = LogicalType::VARCHAR;
+		function.named_parameters["user_project"] = LogicalType::VARCHAR;
 	}
 }
 
 void S3Provider::ApplySecretDefaults(const CreateSecretInput &input, KeyValueSecret &secret) {
-	if (input.type != "r2") {
+	if (input.type != R2_SECRET_TYPE) {
 		return;
 	}
 	auto account_id = input.options.find("account_id");
@@ -198,12 +201,16 @@ void S3Provider::ApplySecretDefaults(const CreateSecretInput &input, KeyValueSec
 
 bool S3Provider::TryApplySecretOption(const CreateSecretInput &input, const string &name, const Value &value,
                                       KeyValueSecret &secret) {
-	if (name == "account_id" && input.type == "r2") {
+	if (name == "account_id" && input.type == R2_SECRET_TYPE) {
 		return true;
 	}
-	if (name == "bearer_token" && input.type == "gcs") {
+	if (name == "bearer_token" && input.type == GCS_SECRET_TYPE) {
 		secret.secret_map["bearer_token"] = value.ToString();
 		secret.redact_keys.insert("bearer_token");
+		return true;
+	}
+	if (name == "user_project" && input.type == GCS_SECRET_TYPE) {
+		secret.secret_map["user_project"] = value.ToString();
 		return true;
 	}
 	return false;
@@ -234,6 +241,7 @@ void S3Provider::ReadAuthParams(S3KeyValueReader &secret_reader, const string &f
 		if (result.url_style.empty() || !url_style_result || url_style_result.GetScope() != SettingScope::SECRET) {
 			result.url_style = "path";
 		}
+		secret_reader.TryGetSecretKeyOrSetting("user_project", "gcs_user_project", result.user_project);
 		secret_reader.TryGetSecretKey("bearer_token", result.oauth2_bearer_token);
 	} else {
 		result.SetEndpoint(std::move(endpoint));
@@ -311,6 +319,12 @@ void S3Provider::InitializeAuthParams(S3AuthParams &auth_params) {
 void S3Provider::FinalizeAuthParams(S3AuthParams &auth_params) {
 	ApplyProviderDefaults(auth_params);
 	ParseURLStyle(auth_params.url_style);
+	if (auth_params.provider_type == S3ProviderType::GCS && auth_params.requester_pays &&
+	    auth_params.user_project.empty()) {
+		throw InvalidInputException(
+		    "GCS Requester Pays requires a billing project; set USER_PROJECT in the GCS secret, "
+		    "set gcs_user_project, or pass gcs_user_project in the URL.");
+	}
 	if (RequiresExplicitEndpoint(auth_params) && EndpointIsUnresolved(auth_params)) {
 		if (auth_params.provider_type == S3ProviderType::R2) {
 			throw IOException("R2 requires an endpoint; provide account_id in the secret or s3_endpoint in the URL");

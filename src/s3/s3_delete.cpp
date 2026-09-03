@@ -91,6 +91,7 @@ static void AddDeleteBatchAuthKeyParts(S3DeleteBatchKeyBuilder &key_builder, con
 	key_builder.AddBool(auth_params.use_ssl);
 	key_builder.AddBool(auth_params.s3_url_compatibility_mode);
 	key_builder.AddBool(auth_params.requester_pays);
+	key_builder.AddString(auth_params.user_project);
 	key_builder.AddString(auth_params.oauth2_bearer_token);
 }
 

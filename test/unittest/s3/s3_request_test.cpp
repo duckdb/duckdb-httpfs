@@ -10,6 +10,7 @@
 #include "s3/s3_request.hpp"
 #include "s3/s3_settings.hpp"
 #include "s3/s3_url.hpp"
+#include "s3/s3_xml_response.hpp"
 #include "s3/s3fs.hpp"
 
 #include "duckdb.hpp"
@@ -341,8 +342,10 @@ static void ConfigureGCSClient(Connection &con, const string &client_implementat
 	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
 }
 
-static void ConfigureGCSBearer(Connection &con, MockS3Server &server, const string &client_implementation) {
+static void ConfigureGCSBearer(Connection &con, MockS3Server &server, const string &client_implementation,
+                               const string &user_project = string()) {
 	ConfigureGCSClient(con, client_implementation);
+	auto project_option = user_project.empty() ? string() : StringUtil::Format(",\n\tUSER_PROJECT '%s'", user_project);
 	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
 CREATE SECRET gcs_bearer (
 	TYPE GCS,
@@ -350,9 +353,9 @@ CREATE SECRET gcs_bearer (
 	BEARER_TOKEN 'gcs-test-token',
 	ENDPOINT '%s',
 	USE_SSL false,
-	URL_STYLE 'path'
+	URL_STYLE 'path'%s
 ))",
-	                                                     server.Endpoint()));
+	                                                     server.Endpoint(), project_option));
 }
 
 static void RunGCSHMACDefaultRegionScenario(const string &client_implementation) {
@@ -450,13 +453,17 @@ static void RunGCSBearerRequestScenario(const string &client_implementation) {
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
-	ConfigureGCSBearer(con, server, client_implementation);
+	ConfigureGCSBearer(con, server, client_implementation, "billing-project");
 
 	const string gcs_path = "gcs://refresh-bucket/object.bin";
 	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	auto handle = fs.OpenFile(gcs_path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
 	REQUIRE(handle);
+	char result;
+	handle->Read(QueryContext(*con.context), &result, 1, 0);
+	REQUIRE(result == server.ObjectData()[0]);
+	handle.reset();
 
 	auto list_result = con.Query("SELECT file FROM glob('gcs://refresh-bucket/*.bin')");
 	REQUIRE(list_result);
@@ -464,19 +471,25 @@ static void RunGCSBearerRequestScenario(const string &client_implementation) {
 	REQUIRE_FALSE(list_result->HasError());
 	REQUIRE(list_result->RowCount() == 1);
 
-	fs.RemoveFiles({gcs_path});
+	fs.RemoveFile(gcs_path);
+	fs.RemoveFiles({gcs_path, "gcs://refresh-bucket/another.bin"});
 	S3TestHelper::RequireQueryOk(con, "COMMIT");
 
 	auto observations = server.Observations();
 	INFO(MockS3DescribeObservations(observations));
 	bool saw_object = false;
+	bool saw_read = false;
 	bool saw_list = false;
+	bool saw_single_delete = false;
 	bool saw_bulk_delete = false;
 	for (const auto &observation : observations) {
+		REQUIRE(MockS3HeaderValues(observation, "x-goog-user-project") == vector<string> {"billing-project"});
+		REQUIRE(MockS3HeaderValues(observation, "x-amz-request-payer").empty());
 		if (observation.authorization != "Bearer gcs-test-token") {
 			continue;
 		}
 		saw_object |= observation.method == "HEAD" && observation.target.find("object.bin") != string::npos;
+		saw_read |= observation.method == "GET" && !observation.range.empty();
 		if (observation.method == "GET" && observation.target.find("list-type=2") != string::npos) {
 			saw_list = true;
 			REQUIRE(observation.target.find("?encoding-type=url&list-type=2&prefix=") != string::npos);
@@ -485,9 +498,12 @@ static void RunGCSBearerRequestScenario(const string &client_implementation) {
 			saw_bulk_delete = true;
 			REQUIRE(StringUtil::EndsWith(observation.target, "?delete="));
 		}
+		saw_single_delete |= observation.method == "DELETE";
 	}
 	REQUIRE(saw_object);
+	REQUIRE(saw_read);
 	REQUIRE(saw_list);
+	REQUIRE(saw_single_delete);
 	REQUIRE(saw_bulk_delete);
 }
 
@@ -544,6 +560,64 @@ CREATE SECRET %s (
 		}
 	}
 	REQUIRE(bulk_delete_requests == 2);
+}
+
+static void RunGCSBulkDeleteProjectIdentityScenario(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.auth.stale_key_id = "NEVER_STALE";
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	ConfigureGCSClient(con, client_implementation);
+	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET gcs_delete_project (
+	TYPE GCS,
+	SCOPE 'gcs://refresh-bucket/',
+	KEY_ID 'GCS_KEY',
+	SECRET 'GCS_SECRET',
+	ENDPOINT '%s',
+	USE_SSL false,
+	URL_STYLE 'path'
+))",
+	                                                     server.Endpoint()));
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	fs.RemoveFiles({"gcs://refresh-bucket/a.bin?gcs_user_project=project-a",
+	                "gcs://refresh-bucket/b.bin?gcs_user_project=project-b"});
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	::AESStateSSLFactory encryption_util;
+	auto get_delete_body_hash = [&](const string &key) {
+		auto body = S3XMLWriter::WriteDeleteObjectsRequest({key}, 0, 1);
+		return S3RequestUtil::GetPayloadHash(encryption_util, const_data_ptr_cast(body.data()), body.size());
+	};
+	const unordered_map<string, string> expected_payload_hashes {{"project-a", get_delete_body_hash("a.bin")},
+	                                                             {"project-b", get_delete_body_hash("b.bin")}};
+	idx_t bulk_delete_requests = 0;
+	idx_t project_a_requests = 0;
+	idx_t project_b_requests = 0;
+	for (const auto &observation : observations) {
+		if (observation.method != "POST" || !StringUtil::EndsWith(observation.target, "?delete=")) {
+			continue;
+		}
+		bulk_delete_requests++;
+		auto project_headers = MockS3HeaderValues(observation, "x-goog-user-project");
+		REQUIRE(project_headers.size() == 1);
+		REQUIRE(MockS3HeaderValues(observation, "x-amz-content-sha256") ==
+		        vector<string> {expected_payload_hashes.at(project_headers[0])});
+		project_a_requests += project_headers[0] == "project-a";
+		project_b_requests += project_headers[0] == "project-b";
+		REQUIRE(StringUtil::Contains(observation.authorization, "x-goog-user-project"));
+	}
+	REQUIRE(bulk_delete_requests == 2);
+	REQUIRE(project_a_requests == 1);
+	REQUIRE(project_b_requests == 1);
 }
 
 static void RunBulkDeleteEndpointModeIdentityScenario(const string &client_implementation) {
@@ -762,6 +836,82 @@ TEST_CASE("S3 provider endpoint precedence is preserved", "[httpfs][s3][provider
 	}
 }
 
+TEST_CASE("GCS billing projects follow provider configuration precedence",
+          "[httpfs][s3][gcs][provider][requester-pays]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, "SET gcs_user_project='setting-project'");
+
+	KeyValueSecret secret({"gcs://"}, Identifier("gcs"), Identifier("config"), Identifier("gcs_billing"));
+	auto auth_params = ReadSecretAuthParams(con, secret, "gcs://bucket/key");
+	REQUIRE(auth_params.user_project == "setting-project");
+
+	secret.secret_map["user_project"] = "secret-project";
+	auth_params = ReadSecretAuthParams(con, secret, "gcs://bucket/key");
+	REQUIRE(auth_params.user_project == "secret-project");
+
+	S3Url::Resolve("gcs://bucket/key?gcs_user_project=url%2Dproject", auth_params);
+	REQUIRE(auth_params.user_project == "url-project");
+
+	auth_params = ReadSecretAuthParams(con, secret, "gcs://bucket/key");
+	S3Url::Resolve("gcs://bucket/key?gcs_user_project=", auth_params);
+	REQUIRE(auth_params.user_project.empty());
+
+	auto distinct_project = auth_params;
+	distinct_project.user_project = "different-project";
+	REQUIRE_FALSE(auth_params == distinct_project);
+
+	SECTION("the setting does not enter S3 or R2 authentication state") {
+		KeyValueSecret s3_secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("s3_billing"));
+		REQUIRE(ReadSecretAuthParams(con, s3_secret).user_project.empty());
+
+		KeyValueSecret r2_secret({"r2://"}, Identifier("r2"), Identifier("config"), Identifier("r2_billing"));
+		r2_secret.secret_map["endpoint"] = "account.r2.cloudflarestorage.com";
+		REQUIRE(ReadSecretAuthParams(con, r2_secret, "r2://bucket/key").user_project.empty());
+	}
+
+	SECTION("the URL parameter is GCS-only") {
+		S3AuthParams s3_auth;
+		S3Provider::InitializeAuthParams(s3_auth);
+		REQUIRE_THROWS(S3Url::Resolve("s3://bucket/key?gcs_user_project=project", s3_auth));
+
+		S3AuthParams r2_auth;
+		r2_auth.provider_type = S3ProviderType::R2;
+		r2_auth.SetEndpoint("account.r2.cloudflarestorage.com");
+		S3Provider::InitializeAuthParams(r2_auth);
+		REQUIRE_THROWS(S3Url::Resolve("r2://bucket/key?gcs_user_project=project", r2_auth));
+	}
+
+	SECTION("legacy requester-pays requires a project after URL overrides") {
+		auto require_missing_project_error = [](const string &url, S3AuthParams &params) {
+			string error;
+			try {
+				S3Url::Resolve(url, params);
+			} catch (std::exception &ex) {
+				error = ex.what();
+			}
+			REQUIRE(StringUtil::Contains(error, "GCS Requester Pays requires a billing project"));
+			REQUIRE(StringUtil::Contains(error, "USER_PROJECT in the GCS secret"));
+			REQUIRE(StringUtil::Contains(error, "set gcs_user_project"));
+			REQUIRE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
+		};
+
+		S3AuthParams requester_pays;
+		requester_pays.provider_type = S3ProviderType::GCS;
+		requester_pays.requester_pays = true;
+		S3Provider::InitializeAuthParams(requester_pays);
+		require_missing_project_error("gcs://bucket/key", requester_pays);
+
+		requester_pays.user_project = "secret-project";
+		require_missing_project_error("gcs://bucket/key?gcs_user_project=", requester_pays);
+
+		requester_pays.user_project = "secret-project";
+		S3Url::Resolve("gcs://bucket/key", requester_pays);
+		REQUIRE(requester_pays.user_project == "secret-project");
+	}
+}
+
 TEST_CASE("S3 URL styles share one validation policy", "[httpfs][s3][provider][url-style]") {
 	for (const auto &url_style : {"", "vhost", "virtual"}) {
 		INFO(url_style);
@@ -846,6 +996,43 @@ TEST_CASE("S3 URL style validation happens before request dispatch", "[httpfs][s
 	                                   FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO));
 	REQUIRE(server.Observations().empty());
 	S3TestHelper::RequireQueryOk(invalid_con, "ROLLBACK");
+}
+
+TEST_CASE("GCS Requester Pays validates the billing project before dispatch",
+          "[httpfs][s3][gcs][requester-pays][request]") {
+	MockS3ServerConfig config;
+	config.auth.stale_key_id = "NEVER_STALE";
+	MockS3Server server(std::move(config));
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET invalid_gcs_requester_pays (
+	TYPE GCS,
+	SCOPE 'gcs://refresh-bucket/',
+	KEY_ID 'GCS_KEY',
+	SECRET 'GCS_SECRET',
+	REQUESTER_PAYS true,
+	ENDPOINT '%s',
+	USE_SSL false,
+	URL_STYLE 'path'
+))",
+	                                                     server.Endpoint()));
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	string error;
+	try {
+		auto &fs = FileSystem::GetFileSystem(*con.context);
+		fs.OpenFile("gcs://refresh-bucket/object.bin", FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	} catch (std::exception &ex) {
+		error = ex.what();
+	}
+	REQUIRE(StringUtil::Contains(error, "GCS Requester Pays requires a billing project"));
+	REQUIRE(StringUtil::Contains(error, "USER_PROJECT in the GCS secret"));
+	REQUIRE(StringUtil::Contains(error, "set gcs_user_project"));
+	REQUIRE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
+	REQUIRE(server.Observations().empty());
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
 }
 
 TEST_CASE("S3 URL query settings are resolved independently of the HTTP client", "[httpfs][s3][url]") {
@@ -1372,6 +1559,91 @@ TEST_CASE("S3 request signing includes optional headers", "[httpfs][s3][signing]
 	        "Signature=303dcf01c2ad19bf52fe539998ff6fa5d6a5d3ee54c6eb8cf6275ed5128e89b0");
 }
 
+TEST_CASE("GCS billing projects are applied across authentication modes", "[httpfs][s3][gcs][requester-pays]") {
+	::AESStateSSLFactory encryption_util;
+	ParsedS3Url parsed_url;
+	parsed_url.path = "/bucket/key";
+	parsed_url.host = "storage.googleapis.com";
+	const array<RequestType, 5> request_types {RequestType::GET_REQUEST, RequestType::HEAD_REQUEST,
+	                                           RequestType::PUT_REQUEST, RequestType::POST_REQUEST,
+	                                           RequestType::DELETE_REQUEST};
+
+	SECTION("HMAC signs the billing project for every request verb") {
+		S3AuthParams auth_params;
+		auth_params.provider_type = S3ProviderType::GCS;
+		auth_params.region = "auto";
+		auth_params.access_key_id = "key";
+		auth_params.secret_access_key = "secret";
+		auth_params.requester_pays = true;
+		auth_params.user_project = "billing-project";
+		for (const auto request_type : request_types) {
+			auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), request_type,
+			                                            auth_params, "20260902", "20260902T120000Z");
+			REQUIRE(headers.GetHeaderValue("x-goog-user-project") == "billing-project");
+			REQUIRE_FALSE(headers.HasHeader("x-amz-request-payer"));
+			REQUIRE(StringUtil::Contains(headers.GetHeaderValue("Authorization"), "x-goog-user-project"));
+		}
+	}
+
+	SECTION("bearer and anonymous requests retain their authentication behavior") {
+		S3AuthParams bearer;
+		bearer.provider_type = S3ProviderType::GCS;
+		bearer.oauth2_bearer_token = "gcs-token";
+		bearer.user_project = "billing-project";
+		for (const auto request_type : request_types) {
+			auto headers =
+			    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), request_type, bearer);
+			REQUIRE(headers.GetHeaderValue("x-goog-user-project") == "billing-project");
+			REQUIRE(headers.GetHeaderValue("Authorization") == "Bearer gcs-token");
+			REQUIRE_FALSE(headers.HasHeader("x-amz-request-payer"));
+		}
+
+		S3AuthParams anonymous;
+		anonymous.provider_type = S3ProviderType::GCS;
+		anonymous.user_project = "billing-project";
+		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
+		                                            RequestType::GET_REQUEST, anonymous);
+		REQUIRE(headers.GetHeaderValue("x-goog-user-project") == "billing-project");
+		REQUIRE_FALSE(headers.HasHeader("Authorization"));
+	}
+
+	SECTION("unconfigured GCS requests remain unchanged") {
+		S3AuthParams auth_params;
+		auth_params.provider_type = S3ProviderType::GCS;
+		auth_params.oauth2_bearer_token = "gcs-token";
+		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
+		                                            RequestType::GET_REQUEST, auth_params);
+		REQUIRE_FALSE(headers.HasHeader("x-goog-user-project"));
+	}
+
+	SECTION("the billing header is owned only for GCS") {
+		unordered_map<string, string> extra_headers {{"X-GoOg-UsEr-PrOjEcT", "configured-project"}};
+		S3AuthParams gcs;
+		gcs.provider_type = S3ProviderType::GCS;
+		REQUIRE_THROWS(S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
+		                                            RequestType::GET_REQUEST, gcs, "", "", "", "", "", extra_headers));
+
+		S3AuthParams s3;
+		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
+		                                            RequestType::GET_REQUEST, s3, "", "", "", "", "", extra_headers);
+		REQUIRE(headers.GetHeaderValue("X-GoOg-UsEr-PrOjEcT") == "configured-project");
+	}
+
+	SECTION("R2 retains the AWS requester-pays header") {
+		S3AuthParams auth_params;
+		auth_params.provider_type = S3ProviderType::R2;
+		auth_params.region = "auto";
+		auth_params.access_key_id = "key";
+		auth_params.secret_access_key = "secret";
+		auth_params.requester_pays = true;
+		auto headers =
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
+		                                 auth_params, "20260902", "20260902T120000Z");
+		REQUIRE(headers.GetHeaderValue("x-amz-request-payer") == "requester");
+		REQUIRE_FALSE(headers.HasHeader("x-goog-user-project"));
+	}
+}
+
 TEST_CASE("S3 request signing canonicalizes configured extension headers", "[httpfs][s3][signing][headers]") {
 	::AESStateSSLFactory encryption_util;
 	S3AuthParams auth_params;
@@ -1603,6 +1875,15 @@ TEST_CASE("S3 bulk delete preserves selected secret identity", "[httpfs][s3][del
 	}
 	SECTION("curl") {
 		RunBulkDeleteSecretIdentityScenario("curl");
+	}
+}
+
+TEST_CASE("GCS bulk delete separates billing projects", "[httpfs][s3][gcs][delete][requester-pays]") {
+	SECTION("httplib") {
+		RunGCSBulkDeleteProjectIdentityScenario("httplib");
+	}
+	SECTION("curl") {
+		RunGCSBulkDeleteProjectIdentityScenario("curl");
 	}
 }
 

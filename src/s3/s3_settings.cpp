@@ -194,6 +194,7 @@ void S3Settings::Register(DBConfig &config) {
 	config.AddExtensionOption("s3_url_compatibility_mode", "Disable Globs and Query Parameters on S3 URLs",
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("gcs_user_project", "GCS billing project for Requester Pays", LogicalType::VARCHAR);
 	config.AddExtensionOption(
 	    "s3_url_scheme_aliases",
 	    "Additional URL schemes routed to the S3-compatible filesystem (e.g. ['oss', 'cos']). "
