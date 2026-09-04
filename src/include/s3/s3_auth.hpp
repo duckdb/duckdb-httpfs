@@ -1,5 +1,6 @@
 #pragma once
 
+#include "s3/s3_endpoint.hpp"
 #include "s3/s3_provider.hpp"
 
 #include "duckdb/common/file_opener.hpp"
@@ -59,9 +60,15 @@ private:
 
 struct S3AuthParams {
 public:
+	//! Construction and secret lookup
 	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
 	static S3AuthParams ReadFrom(S3KeyValueReader &secret_reader, const string &file_path);
+
+	//! Endpoint resolution
 	void SetEndpoint(string endpoint_p);
+	const NormalizedS3Endpoint &GetEndpoint() const;
+
+	//! Refresh and session identity
 	void SetRegion(string region_p);
 	bool operator==(const S3AuthParams &other) const;
 
@@ -78,7 +85,6 @@ public:
 	string oauth2_bearer_token;
 
 	//! Endpoint and URL behavior
-	string endpoint;
 	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
 	string url_style;
 	bool use_ssl = true;
@@ -88,6 +94,13 @@ public:
 	string kms_key_id;
 	bool requester_pays = false;
 	string user_project;
+
+private:
+	friend struct S3Provider;
+
+	//! Selected endpoint text before finalization and its normalized value afterwards
+	string endpoint_source;
+	NormalizedS3Endpoint endpoint;
 };
 
 struct AWSEnvironmentCredentialsProvider {

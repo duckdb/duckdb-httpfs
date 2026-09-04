@@ -171,6 +171,8 @@ struct MockS3UploadConfig {
 };
 
 struct MockS3ServerConfig {
+	//! Path prefix configured as part of the endpoint, without a trailing slash
+	string endpoint_base_path;
 	MockS3ObjectConfig object;
 	MockS3AuthConfig auth;
 	MockS3MetadataConfig metadata;

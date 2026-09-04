@@ -292,7 +292,8 @@ public:
 	}
 
 	string HTTPPath() const {
-		return StringUtil::Format("http://%s/%s/%s", Endpoint(), config.object.bucket, config.object.key);
+		return StringUtil::Format("http://%s%s/%s/%s", Endpoint(), config.endpoint_base_path, config.object.bucket,
+		                          config.object.key);
 	}
 
 	vector<MockS3RequestObservation> Observations() const DUCKDB_EXCLUDES(observation_lock) {
@@ -868,9 +869,12 @@ public:
 	}
 
 	void RegisterRoutes() {
-		const string path = StringUtil::Format("/%s/%s", config.object.bucket, config.object.key);
+		D_ASSERT(config.endpoint_base_path.empty() ||
+		         (config.endpoint_base_path[0] == '/' && config.endpoint_base_path.back() != '/'));
+		const string path =
+		    config.endpoint_base_path + StringUtil::Format("/%s/%s", config.object.bucket, config.object.key);
 		const string proxy_path = "https?://[^/]+" + path;
-		const string bucket_path = StringUtil::Format("/%s", config.object.bucket);
+		const string bucket_path = config.endpoint_base_path + StringUtil::Format("/%s", config.object.bucket);
 		const string bucket_path_with_slash = bucket_path + "/";
 		const string proxy_bucket_path = "https?://[^/]+" + bucket_path;
 		const string proxy_bucket_path_with_slash = proxy_bucket_path + "/";

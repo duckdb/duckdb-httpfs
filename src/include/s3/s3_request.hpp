@@ -90,7 +90,7 @@ struct S3RequestData {
 
 struct S3RequestUtil {
 	static HTTPHeaders CreateHeaders(EncryptionUtil &encryption_util, const ParsedS3Url &parsed_url,
-	                                 const S3RequestQuery &query, RequestType request_type,
+	                                 S3RequestTarget target, const S3RequestQuery &query, RequestType request_type,
 	                                 const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
 	                                 string payload_hash = "", string content_type = "", string content_md5 = "",
 	                                 const unordered_map<string, string> &extra_headers = {},

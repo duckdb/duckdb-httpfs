@@ -75,7 +75,7 @@ private:
 	mutable bool finished = false;
 	shared_ptr<HTTPRequestSession> request_session;
 	string shared_path;
-	ParsedS3Url parsed_s3_url;
+	optional<ParsedS3Url> parsed_s3_url;
 	mutable string main_continuation_token;
 	mutable string current_common_prefix;
 	mutable string common_prefix_continuation_token;
@@ -102,7 +102,7 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 	}
 
 	parsed_s3_url = S3Url::Resolve(glob_pattern, s3_auth_params);
-	auto parsed_glob_url = parsed_s3_url.trimmed_s3_url;
+	auto parsed_glob_url = S3Url::GetDisplayUrl(glob_pattern, s3_auth_params);
 
 	// AWS matches on prefix, not glob pattern, so we take a substring until the first wildcard char for the aws calls
 	auto first_wildcard_pos = parsed_glob_url.find_first_of("*[\\");
@@ -137,10 +137,10 @@ bool S3GlobResult::ExpandNextPath() const {
 }
 
 void S3GlobResult::ScanCurrentCommonPrefix(vector<OpenFileInfo> &s3_keys) const {
-	auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
+	auto prefix_path = parsed_s3_url->GetPrefix() + parsed_s3_url->GetBucket() + '/' + current_common_prefix;
 	current_common_prefix = S3Url::Decode(current_common_prefix);
 	auto key_splits = StringUtil::Split(current_common_prefix, "/");
-	auto pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
+	auto pattern_splits = StringUtil::Split(parsed_s3_url->GetKey(), "/");
 	if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
 	          S3GlobMatchMode::PREFIX)) {
 		prefix_path = S3Url::Decode(prefix_path);
@@ -173,7 +173,7 @@ void S3GlobResult::ScanTopLevel(vector<OpenFileInfo> &s3_keys) const {
 }
 
 bool S3GlobResult::ShouldInvestigateRecursiveGlob() const {
-	if (glob_type != GlobType::UNKNOWN || StringUtil::Contains(parsed_s3_url.key, "**")) {
+	if (glob_type != GlobType::UNKNOWN || StringUtil::Contains(parsed_s3_url->GetKey(), "**")) {
 		return false;
 	}
 	Value value;
@@ -220,14 +220,14 @@ void S3GlobResult::SelectNextCommonPrefix() const {
 }
 
 void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
-	auto pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
+	auto pattern_splits = StringUtil::Split(parsed_s3_url->GetKey(), "/");
 	for (auto &s3_key : s3_keys) {
 		auto key_splits = StringUtil::Split(s3_key.path, "/");
 		if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
 		          S3GlobMatchMode::COMPLETE)) {
-			auto result_full_url = parsed_s3_url.prefix + parsed_s3_url.bucket + "/" + s3_key.path;
-			if (!parsed_s3_url.query_param.empty()) {
-				result_full_url += '?' + parsed_s3_url.query_param;
+			auto result_full_url = parsed_s3_url->GetPrefix() + parsed_s3_url->GetBucket() + "/" + s3_key.path;
+			if (!parsed_s3_url->GetQueryString().empty()) {
+				result_full_url += '?' + parsed_s3_url->GetQueryString();
 			}
 			s3_key.path = std::move(result_full_url);
 			auto captured = request_session->Capture();
@@ -303,7 +303,7 @@ struct S3ListRequest {
 		if (max_keys.IsValid()) {
 			request_params.emplace_back("max-keys", to_string(max_keys.GetIndex()));
 		}
-		request_params.emplace_back("prefix", parsed_url.key);
+		request_params.emplace_back("prefix", parsed_url.GetKey());
 		return S3RequestQuery(std::move(request_params));
 	}
 };

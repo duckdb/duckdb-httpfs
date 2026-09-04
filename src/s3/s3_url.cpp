@@ -59,13 +59,6 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthParams &params)
 	GetQueryParam("s3_access_key_id", params.access_key_id, query_params);
 	GetQueryParam("s3_secret_access_key", params.secret_access_key, query_params);
 	GetQueryParam("s3_session_token", params.session_token, query_params);
-	string endpoint;
-	if (GetQueryParam("s3_endpoint", endpoint, query_params)) {
-		params.SetEndpoint(std::move(endpoint));
-	}
-	if (GetQueryParam("s3_url_style", params.url_style, query_params)) {
-		S3Provider::ParseURLStyle(params.url_style);
-	}
 	auto found_param = query_params.find("s3_use_ssl");
 	if (found_param != query_params.end()) {
 		if (found_param->second == "true") {
@@ -76,6 +69,13 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthParams &params)
 			throw IOException("Incorrect setting found for s3_use_ssl, allowed values are: 'true' or 'false'");
 		}
 		query_params.erase(found_param);
+	}
+	string endpoint;
+	if (GetQueryParam("s3_endpoint", endpoint, query_params)) {
+		params.SetEndpoint(std::move(endpoint));
+	}
+	if (GetQueryParam("s3_url_style", params.url_style, query_params)) {
+		S3Provider::ParseURLStyle(params.url_style);
 	}
 	auto found_requester_pays_param = query_params.find("s3_requester_pays");
 	if (found_requester_pays_param != query_params.end()) {
@@ -103,9 +103,16 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthParams &params)
 }
 
 ParsedS3Url S3Url::Resolve(const string &url, S3AuthParams &params) {
-	auto parsed_url = Parse(url, params);
+	S3Provider::ParseURLStyle(params.url_style);
 	// The last source of an endpoint, so validation happens after it
-	ReadQueryParams(parsed_url.query_param, params);
+	string query_param;
+	if (!params.s3_url_compatibility_mode) {
+		auto question_pos = url.find_first_of('?');
+		if (question_pos != string::npos) {
+			query_param = url.substr(question_pos + 1);
+		}
+	}
+	ReadQueryParams(query_param, params);
 	S3Provider::FinalizeAuthParams(params);
 	return Parse(url, params);
 }
@@ -119,7 +126,7 @@ string S3Url::GetDisplayUrl(const string &url, const S3AuthParams &params) {
 }
 
 ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
-	string http_proto, prefix, host, bucket, key, path, query_param, trimmed_s3_url;
+	string prefix, host, bucket, key, encoded_path, encoded_bucket_path, query_string;
 
 	auto provider_match = S3Provider::TryMatchUrl(url);
 	if (provider_match) {
@@ -146,19 +153,15 @@ ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 
 	if (params.s3_url_compatibility_mode) {
 		// In url compatibility mode, we will ignore any special chars, so query param strings are disabled
-		trimmed_s3_url = url;
 		key += url.substr(slash_pos);
 	} else {
 		// Parse query parameters
 		auto question_pos = url.find_first_of('?');
 		if (question_pos != string::npos) {
-			query_param = url.substr(question_pos + 1);
-			trimmed_s3_url = url.substr(0, question_pos);
-		} else {
-			trimmed_s3_url = url;
+			query_string = url.substr(question_pos + 1);
 		}
 
-		if (!query_param.empty()) {
+		if (!query_string.empty()) {
 			key += url.substr(slash_pos, question_pos - slash_pos);
 		} else {
 			key += url.substr(slash_pos);
@@ -169,52 +172,97 @@ ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 		throw IOException("URL needs to contain key");
 	}
 
-	// Derived host and path based on the endpoint
-	auto sub_path_pos = params.endpoint.find_first_of('/');
-	if (sub_path_pos != string::npos) {
-		// Host header should conform to <host>:<port> so not include the path
-		host = params.endpoint.substr(0, sub_path_pos);
-		path = params.endpoint.substr(sub_path_pos);
-	} else {
-		host = params.endpoint;
-		path = "";
+	// Derived host and path based on the normalized endpoint
+	host = params.GetEndpoint().GetAuthority();
+	auto &base_path = params.GetEndpoint().GetBasePath();
+	for (idx_t i = 0; i < base_path.size(); i++) {
+		if (base_path[i] == '%' && i + 2 < base_path.size()) {
+			encoded_path += base_path.substr(i, 3);
+			i += 2;
+		} else {
+			encoded_path += Encode(base_path.substr(i, 1), S3URLEncodeMode::PATH);
+		}
 	}
 
 	// Update host and path according to the url style
 	// See https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html
 	auto url_style = S3Provider::ParseURLStyle(params.url_style);
 	bool use_vhost = url_style == S3URLStyle::VIRTUAL_HOSTED;
+	if (use_vhost && params.GetEndpoint().IsIPv6()) {
+		throw InvalidInputException("IPv6 S3 endpoints require path-style URLs");
+	}
 	// A bucket name containing periods (.) is not addressable vhost-style over TLS. Fallback to path style url
-	bool use_path = url_style == S3URLStyle::PATH || (use_vhost && params.use_ssl && bucket.find('.') != string::npos);
+	bool use_path = url_style == S3URLStyle::PATH ||
+	                (use_vhost && params.GetEndpoint().UsesSSL() && bucket.find('.') != string::npos);
 	if (use_path) {
-		path += "/" + bucket;
+		encoded_path += "/" + Encode(bucket, S3URLEncodeMode::PATH);
 	} else if (use_vhost) {
 		host = bucket + "." + host;
 	}
+	encoded_bucket_path = encoded_path.empty() ? "/" : encoded_path + "/";
 
 	// Append key (including leading slash) to the path
-	path += key;
+	encoded_path += Encode(key, S3URLEncodeMode::PATH);
 
 	// Remove leading slash from key
 	key = key.substr(1);
 
-	http_proto = params.use_ssl ? "https://" : "http://";
+	ParsedS3Url result;
+	result.prefix = std::move(prefix);
+	result.bucket = std::move(bucket);
+	result.key = std::move(key);
+	result.query_string = std::move(query_string);
+	result.host = std::move(host);
+	result.encoded_path = std::move(encoded_path);
+	result.encoded_bucket_path = std::move(encoded_bucket_path);
+	result.use_ssl = params.GetEndpoint().UsesSSL();
+	return result;
+}
 
-	return {http_proto, prefix, host, bucket, key, path, query_param, trimmed_s3_url};
+const string &ParsedS3Url::GetPrefix() const {
+	return prefix;
+}
+
+const string &ParsedS3Url::GetBucket() const {
+	return bucket;
+}
+
+const string &ParsedS3Url::GetKey() const {
+	return key;
+}
+
+const string &ParsedS3Url::GetQueryString() const {
+	return query_string;
 }
 
 string ParsedS3Url::GetHTTPUrl(const string &http_query_string) const {
-	string full_url = http_proto + host + S3Url::Encode(path, S3URLEncodeMode::PATH);
+	return BuildHTTPUrl(encoded_path, http_query_string);
+}
+
+string ParsedS3Url::GetBucketHTTPUrl(const string &http_query_string) const {
+	return BuildHTTPUrl(encoded_bucket_path, http_query_string);
+}
+
+const string &ParsedS3Url::GetHost() const {
+	return host;
+}
+
+const string &ParsedS3Url::GetEncodedPath() const {
+	return encoded_path;
+}
+
+const string &ParsedS3Url::GetEncodedBucketPath() const {
+	return encoded_bucket_path;
+}
+
+string ParsedS3Url::BuildHTTPUrl(const string &request_path, const string &http_query_string) const {
+	string full_url = use_ssl ? "https://" : "http://";
+	full_url += host + request_path;
 
 	if (!http_query_string.empty()) {
 		full_url += "?" + http_query_string;
 	}
 	return full_url;
-}
-
-string ParsedS3Url::GetBucketPath() const {
-	auto bucket_path = path.substr(0, path.length() - key.length());
-	return bucket_path.empty() ? "/" : bucket_path;
 }
 
 } // namespace duckdb

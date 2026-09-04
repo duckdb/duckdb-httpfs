@@ -79,7 +79,7 @@ TEST_CASE("a required endpoint may arrive from any source, but must arrive", "[h
 			auto params = make_params(test_case);
 			// Reading secrets and settings leaves it unresolved rather than deriving an AWS endpoint
 			S3Provider::InitializeAuthParams(params);
-			REQUIRE(params.endpoint.empty());
+			REQUIRE(params.GetEndpoint().IsEmpty());
 			REQUIRE_THROWS(S3Url::Resolve(test_case.url, params));
 		}
 	}
@@ -89,9 +89,9 @@ TEST_CASE("a required endpoint may arrive from any source, but must arrive", "[h
 			auto params = make_params(test_case);
 			S3Provider::InitializeAuthParams(params);
 			auto parsed = S3Url::Resolve(string(test_case.url) + "?s3_endpoint=storage.example.com", params);
-			REQUIRE(params.endpoint == "storage.example.com");
+			REQUIRE(params.GetEndpoint().GetHost() == "storage.example.com");
 			REQUIRE(params.endpoint_mode == S3EndpointMode::EXPLICIT);
-			REQUIRE(parsed.host == "bucket.storage.example.com");
+			REQUIRE(parsed.GetHost() == "bucket.storage.example.com");
 		}
 	}
 
@@ -110,7 +110,7 @@ TEST_CASE("a required endpoint may arrive from any source, but must arrive", "[h
 		S3AuthParams params;
 		S3Provider::InitializeAuthParams(params);
 		S3Provider::FinalizeAuthParams(params);
-		REQUIRE(params.endpoint == "s3.amazonaws.com");
+		REQUIRE(params.GetEndpoint().GetHost() == "s3.amazonaws.com");
 	}
 }
 

@@ -97,6 +97,7 @@ CURLHandle::CURLHandle(const string &token, const string &cert_path) {
 		curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
 	}
 	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_AUTO_CLIENT_CERT | CURLSSLOPT_NATIVE_CA);
+	curl_easy_setopt(curl, CURLOPT_PATH_AS_IS, 1L);
 }
 
 CURLHandle::~CURLHandle() {
@@ -361,8 +362,10 @@ private:
 
 public:
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) : HTTPClient(proto_host_port) {
-		string normalized_path = NormalizePathToBeAdded(proto_host_port);
-		curl_url_set(curl_base_url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+		auto result = curl_url_set(curl_base_url.Get(), CURLUPART_URL, proto_host_port.c_str(), 0);
+		if (result != CURLUE_OK) {
+			throw IOException("Failed to initialize curl URL: %s", curl_url_strerror(result));
+		}
 		stored_bearer_token = "";
 		stored_cert_file_path = "";
 		Initialize(http_params);
@@ -372,19 +375,6 @@ public:
 	}
 
 public:
-	static string NormalizePathToBeAdded(string added_path) {
-		while (added_path.size() > 2) {
-			if (StringUtil::StartsWith(added_path, "//")) {
-				added_path = added_path.substr(1);
-			} else if (StringUtil::StartsWith(added_path, "./")) {
-				added_path = added_path.substr(1);
-			} else {
-				break;
-			}
-		}
-
-		return added_path;
-	}
 	void Initialize(HTTPParams &http_p) override {
 		auto &http_params = http_p.Cast<HTTPFSParams>();
 		ClientConfigurator::Configure(*this, http_params);
@@ -410,9 +400,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
 			CURLURLHandle url(curl_base_url);
-
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+			SetRequestURL(url, info.url, info.path);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
@@ -440,9 +428,7 @@ public:
 		CURLcode res;
 		{
 			CURLURLHandle url(curl_base_url);
-
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+			SetRequestURL(url, info.url, info.path);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
@@ -485,9 +471,7 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
 
 			CURLURLHandle url(curl_base_url);
-
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+			SetRequestURL(url, info.url, info.path);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
@@ -518,9 +502,7 @@ public:
 		CURLcode res;
 		{
 			CURLURLHandle url(curl_base_url);
-
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+			SetRequestURL(url, info.url, info.path);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
@@ -549,9 +531,7 @@ public:
 		CURLcode res;
 		{
 			CURLURLHandle url(curl_base_url);
-
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+			SetRequestURL(url, info.url, info.path);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
@@ -587,9 +567,7 @@ public:
 		CURLcode res;
 		{
 			CURLURLHandle url(curl_base_url);
-
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+			SetRequestURL(url, info.url, info.path);
 
 			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
@@ -631,6 +609,15 @@ public:
 	}
 
 private:
+	static void SetRequestURL(CURLURLHandle &url, const string &request_url, const string &request_path) {
+		// A leading '//' is a network-path reference to the URL API, so set the complete URL in that case.
+		const auto &url_part = StringUtil::StartsWith(request_path, "//") ? request_url : request_path;
+		auto result = curl_url_set(url.Get(), CURLUPART_URL, url_part.c_str(), CURLU_PATH_AS_IS);
+		if (result != CURLUE_OK) {
+			throw IOException("Failed to construct curl request URL: %s", curl_url_strerror(result));
+		}
+	}
+
 	static CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
 		auto &httpfs_params = params.Cast<HTTPFSParams>();
 

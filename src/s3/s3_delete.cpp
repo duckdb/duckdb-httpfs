@@ -38,9 +38,7 @@ void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opene
 
 struct S3DeleteBatchUrlInfo {
 	string prefix;
-	string http_proto;
-	string host;
-	string path;
+	string bucket_http_url;
 	S3AuthParams auth_params;
 };
 
@@ -73,9 +71,7 @@ private:
 
 static void AddDeleteBatchUrlKeyParts(S3DeleteBatchKeyBuilder &key_builder, const S3DeleteBatchUrlInfo &url_info) {
 	key_builder.AddString(url_info.prefix);
-	key_builder.AddString(url_info.http_proto);
-	key_builder.AddString(url_info.host);
-	key_builder.AddString(url_info.path);
+	key_builder.AddString(url_info.bucket_http_url);
 }
 
 static void AddDeleteBatchAuthKeyParts(S3DeleteBatchKeyBuilder &key_builder, const S3AuthParams &auth_params) {
@@ -84,11 +80,10 @@ static void AddDeleteBatchAuthKeyParts(S3DeleteBatchKeyBuilder &key_builder, con
 	key_builder.AddString(auth_params.access_key_id);
 	key_builder.AddString(auth_params.secret_access_key);
 	key_builder.AddString(auth_params.session_token);
-	key_builder.AddString(auth_params.endpoint);
+	key_builder.AddString(auth_params.GetEndpoint().GetCanonicalValue());
 	key_builder.AddIndex(static_cast<idx_t>(auth_params.endpoint_mode));
 	key_builder.AddString(auth_params.kms_key_id);
 	key_builder.AddString(auth_params.url_style);
-	key_builder.AddBool(auth_params.use_ssl);
 	key_builder.AddBool(auth_params.s3_url_compatibility_mode);
 	key_builder.AddBool(auth_params.requester_pays);
 	key_builder.AddString(auth_params.user_project);
@@ -170,12 +165,14 @@ static bool HasRefreshableS3Secret(optional_ptr<FileOpener> opener, const string
 }
 
 static void AddDeleteBatchRefreshKeyParts(S3DeleteBatchKeyBuilder &key_builder, optional_ptr<FileOpener> opener,
-                                          const string &path) {
-	if (S3RequestExecutor::CredentialRefreshEnabled(opener) && HasRefreshableS3Secret(opener, path)) {
+                                          const string &path, const S3AuthParams &auth_params) {
+	auto refreshable = S3RequestExecutor::CredentialRefreshEnabled(opener) && HasRefreshableS3Secret(opener, path);
+	if (refreshable) {
 		key_builder.AddString(GetDeleteBatchLookupDirectory(path));
 	} else {
 		key_builder.AddString("");
 	}
+	key_builder.AddBool(refreshable && auth_params.use_ssl);
 }
 
 static string CreateDeleteBatchKey(const S3DeleteBatchUrlInfo &url_info,
@@ -186,7 +183,7 @@ static string CreateDeleteBatchKey(const S3DeleteBatchUrlInfo &url_info,
 	AddDeleteBatchAuthKeyParts(key_builder, url_info.auth_params);
 	AddDeleteBatchHTTPKeyParts(key_builder, refreshable_http_params);
 	AddDeleteBatchSelectedSecretKeyParts(key_builder, opener, path);
-	AddDeleteBatchRefreshKeyParts(key_builder, opener, path);
+	AddDeleteBatchRefreshKeyParts(key_builder, opener, path, url_info.auth_params);
 	return key_builder.Build();
 }
 
@@ -243,9 +240,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 		S3AuthParams auth_params = S3AuthParams::ReadFrom(opener, info);
 		auto parsed_url = S3Url::Resolve(path, auth_params);
 
-		auto bucket_path = parsed_url.GetBucketPath();
-		S3DeleteBatchUrlInfo url_info = {parsed_url.prefix, parsed_url.http_proto, parsed_url.host, bucket_path,
-		                                 auth_params};
+		S3DeleteBatchUrlInfo url_info = {parsed_url.GetPrefix(), parsed_url.GetBucketHTTPUrl(), auth_params};
 		auto refreshable_http_params = S3RequestExecutor::ReadRefreshableHTTPParams(opener, path);
 		auto batch_key = CreateDeleteBatchKey(url_info, refreshable_http_params, opener, path);
 		auto entry = delete_batches.find(batch_key);
@@ -256,7 +251,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 		}
 		auto &batch = entry->second;
 
-		batch.keys.push_back(parsed_url.key);
+		batch.keys.push_back(parsed_url.GetKey());
 		batch.secret_lookup_paths.push_back(path);
 	}
 

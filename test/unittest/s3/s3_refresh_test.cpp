@@ -548,6 +548,7 @@ CREATE SECRET refresh_s3_endpoint_mode (
 	ClientContextFileOpener opener(*con.context);
 	FileOpenerInfo info = {S3TestHelper::S3_PATH};
 	auto auth_params = S3AuthParams::ReadFrom(opener, info);
+	S3Url::Resolve(S3TestHelper::S3_PATH, auth_params);
 	REQUIRE(auth_params.endpoint_mode == initial_mode);
 	auto session = S3RequestExecutor::CreateSession(opener, S3TestHelper::S3_PATH, auth_params);
 	if (!published_region.empty()) {
@@ -564,7 +565,7 @@ CREATE SECRET refresh_s3_endpoint_mode (
 	    [](const ParsedS3Url &) { return S3RequestQuery(); }, "", "", "",
 	    [&](S3RequestData &request_data) {
 		    observed_modes.push_back(request_data.auth_params.endpoint_mode);
-		    observed_endpoints.push_back(request_data.auth_params.endpoint);
+		    observed_endpoints.push_back(request_data.auth_params.GetEndpoint().GetHost());
 		    observed_regions.push_back(request_data.auth_params.region);
 		    if (observed_modes.size() == 1) {
 			    auto result = make_uniq<HTTPResponse>(HTTPStatusCode::Forbidden_403);
@@ -581,7 +582,7 @@ CREATE SECRET refresh_s3_endpoint_mode (
 	REQUIRE(observed_regions == vector<string> {expected_region, expected_region});
 	auto &snapshot = session->Capture().snapshot->Cast<S3RequestSnapshot>();
 	REQUIRE(snapshot.auth_params.endpoint_mode == refreshed_mode);
-	REQUIRE(snapshot.auth_params.endpoint == refreshed_resolved_endpoint);
+	REQUIRE(snapshot.auth_params.GetEndpoint().GetHost() == refreshed_resolved_endpoint);
 	S3TestHelper::RequireQueryOk(con, "COMMIT");
 	S3TestHelper::AssertSingleRefresh(test_id);
 }

@@ -29,6 +29,14 @@ namespace duckdb {
 
 namespace {
 
+static ParsedS3Url ParseTestS3Url(const string &url, const string &endpoint, const string &url_style) {
+	S3AuthParams auth_params;
+	auth_params.SetEndpoint(endpoint);
+	auth_params.url_style = url_style;
+	S3Provider::FinalizeAuthParams(auth_params);
+	return S3Url::Parse(url, auth_params);
+}
+
 static void RunFullGetErrorBodyScenario(const string &client_implementation) {
 	MockS3ServerConfig config;
 	config.object.bucket = S3TestHelper::BUCKET;
@@ -157,6 +165,79 @@ CREATE SECRET s3_headers (
 		REQUIRE(found_amz_spelling);
 		REQUIRE(found_goog_spelling);
 	}
+}
+
+static void RunNormalizedEndpointWireScenario(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.endpoint_base_path = "//gateway/base";
+	config.auth.stale_key_id = "NEVER_STALE";
+	config.list.paginate = true;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con,
+	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
+	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
+	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET normalized_endpoint (
+	TYPE S3,
+	SCOPE 's3://refresh-bucket/',
+	KEY_ID 'FRESH_KEY',
+	SECRET 'FRESH_SECRET',
+	REGION 'us-east-1',
+	ENDPOINT 'HTTP://%s//gateway/base///',
+	USE_SSL true,
+	URL_STYLE 'path'
+))",
+	                                                     server.Endpoint()));
+
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	{
+		auto handle = fs.OpenFile(S3TestHelper::S3_PATH, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+		char result;
+		handle->Read(QueryContext(*con.context), &result, 1, 0);
+		REQUIRE(result == server.ObjectData()[0]);
+	}
+	auto glob_result = fs.Glob("s3://refresh-bucket/*.bin", FileGlobOptions::ALLOW_EMPTY, nullptr);
+	REQUIRE(glob_result->GetAllFiles().size() == 2);
+	S3TestHelper::WriteSinglePutPayload(con);
+	auto legacy_endpoint = server.Endpoint() + "//gateway/base/";
+	auto uri_endpoint = "http://" + server.Endpoint() + "//gateway/base";
+	fs.RemoveFiles(
+	    {string(S3TestHelper::S3_PATH) + "?s3_endpoint=" +
+	         S3Url::Encode(legacy_endpoint, S3URLEncodeMode::QUERY_COMPONENT) + "&s3_use_ssl=false&s3_url_style=path",
+	     "s3://refresh-bucket/another.bin?s3_endpoint=" +
+	         S3Url::Encode(uri_endpoint, S3URLEncodeMode::QUERY_COMPONENT) + "&s3_use_ssl=true&s3_url_style=path"});
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	bool saw_read = false;
+	bool saw_list = false;
+	bool saw_put = false;
+	idx_t bulk_delete_count = 0;
+	for (const auto &observation : observations) {
+		REQUIRE(StringUtil::StartsWith(observation.path, "//gateway/base/"));
+		REQUIRE(MockS3HeaderValues(observation, "Host") == vector<string> {server.Endpoint()});
+		REQUIRE(StringUtil::Contains(observation.authorization, "SignedHeaders="));
+		REQUIRE(StringUtil::Contains(observation.authorization, "host"));
+		saw_read |= observation.method == "HEAD" || observation.method == "GET";
+		saw_list |= observation.method == "GET" && StringUtil::Contains(observation.target, "list-type=2");
+		saw_put |= observation.method == "PUT";
+		if (observation.method == "POST" && StringUtil::Contains(observation.target, "delete=")) {
+			bulk_delete_count++;
+			REQUIRE(observation.delete_key_count == 2);
+		}
+	}
+	REQUIRE(saw_read);
+	REQUIRE(saw_list);
+	REQUIRE(saw_put);
+	REQUIRE(bulk_delete_count == 1);
+	REQUIRE(server.UploadedObject() == "single-shot payload");
 }
 
 static void RunS3RejectedHeaderScenario(const string &client_implementation) {
@@ -742,7 +823,9 @@ static S3AuthParams ReadSecretAuthParams(Connection &con, KeyValueSecret &secret
                                          const string &path = "s3://bucket/key") {
 	ClientContextFileOpener opener(*con.context);
 	S3KeyValueReader secret_reader {KeyValueSecretReader(secret, opener)};
-	return S3AuthParams::ReadFrom(secret_reader, path);
+	auto result = S3AuthParams::ReadFrom(secret_reader, path);
+	S3Url::Resolve(path, result);
+	return result;
 }
 
 } // namespace
@@ -786,7 +869,8 @@ TEST_CASE("S3 provider selects multipart upload policy", "[httpfs][s3][provider]
 		S3AuthParams auth_params;
 		auth_params.provider_type = provider_type;
 		auth_params.scheme_is_alias = scheme_is_alias;
-		auth_params.endpoint = endpoint;
+		auth_params.SetEndpoint(endpoint);
+		S3Provider::FinalizeAuthParams(auth_params);
 		INFO(endpoint);
 		auto policy = S3Provider::GetMultipartUploadPolicy(auth_params);
 		REQUIRE(policy.part_size_strategy == expected.part_size_strategy);
@@ -800,6 +884,7 @@ TEST_CASE("S3 provider selects multipart upload policy", "[httpfs][s3][provider]
 	require_policy(S3ProviderType::S3, "account.r2.cloudflarestorage.com", fixed_policy);
 	require_policy(S3ProviderType::S3, "account.eu.r2.cloudflarestorage.com", fixed_policy);
 	require_policy(S3ProviderType::S3, "ACCOUNT.FEDRAMP.R2.CLOUDFLARESTORAGE.COM:443/path", fixed_policy);
+	require_policy(S3ProviderType::S3, "https://ACCOUNT.EU.R2.CLOUDFLARESTORAGE.COM:443/path", fixed_policy);
 	require_policy(S3ProviderType::S3, "account.us.r2.cloudflarestorage.com", fixed_policy, true);
 
 	require_policy(S3ProviderType::S3, "s3.amazonaws.com", adaptive_policy);
@@ -815,7 +900,8 @@ TEST_CASE("S3 provider selects bulk delete limits", "[httpfs][s3][provider][dele
 	auto require_limit = [](S3ProviderType provider_type, const string &endpoint, idx_t expected) {
 		S3AuthParams auth_params;
 		auth_params.provider_type = provider_type;
-		auth_params.endpoint = endpoint;
+		auth_params.SetEndpoint(endpoint);
+		S3Provider::FinalizeAuthParams(auth_params);
 		INFO(endpoint);
 		REQUIRE(S3Provider::GetBulkDeleteMaxBatchSize(auth_params) == expected);
 	};
@@ -824,6 +910,7 @@ TEST_CASE("S3 provider selects bulk delete limits", "[httpfs][s3][provider][dele
 	require_limit(S3ProviderType::S3, "account.r2.cloudflarestorage.com", 700);
 	require_limit(S3ProviderType::S3, "account.eu.r2.cloudflarestorage.com", 700);
 	require_limit(S3ProviderType::S3, "ACCOUNT.FEDRAMP.R2.CLOUDFLARESTORAGE.COM:443/path", 700);
+	require_limit(S3ProviderType::S3, "https://ACCOUNT.EU.R2.CLOUDFLARESTORAGE.COM:443/path", 700);
 
 	require_limit(S3ProviderType::S3, "s3.amazonaws.com", 1000);
 	require_limit(S3ProviderType::GCS, "account.r2.cloudflarestorage.com", 1000);
@@ -837,18 +924,18 @@ TEST_CASE("S3 endpoint provenance controls AWS endpoint derivation", "[httpfs][s
 	SECTION("automatic endpoints retain the existing region defaults") {
 		S3AuthParams anonymous;
 		anonymous.SetEndpoint("  ");
-		S3Provider::InitializeAuthParams(anonymous);
+		S3Provider::FinalizeAuthParams(anonymous);
 		REQUIRE(anonymous.endpoint_mode == S3EndpointMode::AUTOMATIC);
 		REQUIRE(anonymous.region.empty());
-		REQUIRE(anonymous.endpoint == "s3.amazonaws.com");
+		REQUIRE(anonymous.GetEndpoint().GetHost() == "s3.amazonaws.com");
 
 		S3AuthParams credentialed;
 		credentialed.SetEndpoint("s3.amazonaws.com");
 		credentialed.access_key_id = "key";
-		S3Provider::InitializeAuthParams(credentialed);
+		S3Provider::FinalizeAuthParams(credentialed);
 		REQUIRE(credentialed.endpoint_mode == S3EndpointMode::AUTOMATIC);
 		REQUIRE(credentialed.region == "us-east-1");
-		REQUIRE(credentialed.endpoint == "s3.us-east-1.amazonaws.com");
+		REQUIRE(credentialed.GetEndpoint().GetHost() == "s3.us-east-1.amazonaws.com");
 	}
 
 	SECTION("explicit endpoints keep their host") {
@@ -856,13 +943,13 @@ TEST_CASE("S3 endpoint provenance controls AWS endpoint derivation", "[httpfs][s
 		                             "s3.eu-west-1.amazonaws.com", "storage.example.com"}) {
 			S3AuthParams auth_params;
 			auth_params.SetEndpoint(endpoint);
-			S3Provider::InitializeAuthParams(auth_params);
+			S3Provider::FinalizeAuthParams(auth_params);
 			INFO(endpoint);
 			REQUIRE(auth_params.endpoint_mode == S3EndpointMode::EXPLICIT);
-			REQUIRE(auth_params.endpoint == endpoint);
+			REQUIRE(auth_params.GetEndpoint().GetHost() == endpoint);
 			REQUIRE(auth_params.region.empty());
 			auth_params.SetRegion("ap-southeast-2");
-			REQUIRE(auth_params.endpoint == endpoint);
+			REQUIRE(auth_params.GetEndpoint().GetHost() == endpoint);
 		}
 	}
 
@@ -870,28 +957,161 @@ TEST_CASE("S3 endpoint provenance controls AWS endpoint derivation", "[httpfs][s
 		S3AuthParams dualstack;
 		dualstack.SetEndpoint("s3.dualstack.us-east-1.amazonaws.com");
 		dualstack.access_key_id = "key";
-		S3Provider::InitializeAuthParams(dualstack);
+		S3Provider::FinalizeAuthParams(dualstack);
 		REQUIRE(dualstack.region == "us-east-1");
-		REQUIRE(dualstack.endpoint == "s3.dualstack.us-east-1.amazonaws.com");
+		REQUIRE(dualstack.GetEndpoint().GetHost() == "s3.dualstack.us-east-1.amazonaws.com");
 
 		S3AuthParams fips;
 		fips.SetEndpoint("s3-fips.us-east-1.amazonaws.com");
 		fips.access_key_id = "key";
-		S3Provider::InitializeAuthParams(fips);
+		S3Provider::FinalizeAuthParams(fips);
 		REQUIRE(fips.region.empty());
-		REQUIRE(fips.endpoint == "s3-fips.us-east-1.amazonaws.com");
+		REQUIRE(fips.GetEndpoint().GetHost() == "s3-fips.us-east-1.amazonaws.com");
 	}
 
 	SECTION("endpoint mode participates in authentication identity") {
 		S3AuthParams automatic;
 		automatic.region = "us-east-1";
-		S3Provider::InitializeAuthParams(automatic);
+		S3Provider::FinalizeAuthParams(automatic);
 		S3AuthParams explicit_endpoint;
 		explicit_endpoint.region = "us-east-1";
 		explicit_endpoint.SetEndpoint("s3.us-east-1.amazonaws.com");
-		S3Provider::InitializeAuthParams(explicit_endpoint);
-		REQUIRE(automatic.endpoint == explicit_endpoint.endpoint);
+		S3Provider::FinalizeAuthParams(explicit_endpoint);
+		REQUIRE(automatic.GetEndpoint().GetHost() == explicit_endpoint.GetEndpoint().GetHost());
 		REQUIRE_FALSE(automatic == explicit_endpoint);
+	}
+}
+
+TEST_CASE("S3 endpoints are normalized once for routing and signing", "[httpfs][s3][provider][endpoint]") {
+	SECTION("full URI schemes override the legacy SSL flag") {
+		S3AuthParams auth_params;
+		auth_params.use_ssl = false;
+		auth_params.url_style = "path";
+		auth_params.SetEndpoint("HTTPS://Storage.EXAMPLE.com:443/gateway/%2f//base///");
+		S3Provider::FinalizeAuthParams(auth_params);
+
+		REQUIRE(auth_params.GetEndpoint().UsesSSL());
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "storage.example.com");
+		REQUIRE(auth_params.GetEndpoint().GetAuthority() == "storage.example.com");
+		REQUIRE(auth_params.GetEndpoint().GetBasePath() == "/gateway/%2f//base");
+
+		auto parsed_url = S3Url::Parse("s3://bucket/key with space", auth_params);
+		REQUIRE(parsed_url.GetEncodedBucketPath() == "/gateway/%2f//base/bucket/");
+		REQUIRE(parsed_url.GetEncodedPath() == "/gateway/%2f//base/bucket/key%20with%20space");
+		REQUIRE(parsed_url.GetHTTPUrl() == "https://storage.example.com/gateway/%2f//base/bucket/key%20with%20space");
+	}
+
+	SECTION("schemeless endpoints retain the SSL fallback and non-default ports") {
+		S3AuthParams auth_params;
+		auth_params.use_ssl = false;
+		auth_params.url_style = "path";
+		auth_params.SetEndpoint("Storage.EXAMPLE.com:8443/base/");
+		S3Provider::FinalizeAuthParams(auth_params);
+		auto parsed_url = S3Url::Parse("s3://bucket/key", auth_params);
+		REQUIRE(parsed_url.GetHost() == "storage.example.com:8443");
+		REQUIRE(parsed_url.GetHTTPUrl() == "http://storage.example.com:8443/base/bucket/key");
+	}
+
+	SECTION("legacy base paths remain opaque when they contain URI-like text") {
+		S3AuthParams auth_params;
+		auth_params.use_ssl = false;
+		auth_params.url_style = "path";
+		auth_params.SetEndpoint("storage.example.com/gateway/http://mirror");
+		S3Provider::FinalizeAuthParams(auth_params);
+		auto parsed_url = S3Url::Parse("s3://bucket/key", auth_params);
+		REQUIRE(auth_params.GetEndpoint().GetBasePath() == "/gateway/http://mirror");
+		REQUIRE(parsed_url.GetHTTPUrl() == "http://storage.example.com/gateway/http%3A//mirror/bucket/key");
+	}
+
+	SECTION("valid port boundaries are preserved") {
+		for (const auto &endpoint : {"storage.example.com:1", "storage.example.com:65535"}) {
+			S3AuthParams auth_params;
+			auth_params.SetEndpoint(endpoint);
+			S3Provider::FinalizeAuthParams(auth_params);
+			REQUIRE(auth_params.GetEndpoint().GetAuthority() == endpoint);
+		}
+	}
+
+	SECTION("virtual-hosted endpoints keep their base path separate from the bucket") {
+		S3AuthParams auth_params;
+		auth_params.use_ssl = true;
+		auth_params.url_style = "virtual";
+		auth_params.SetEndpoint("http://storage.example.com:80/gateway/base/");
+		S3Provider::FinalizeAuthParams(auth_params);
+		auto parsed_url = S3Url::Parse("s3://bucket/key", auth_params);
+		REQUIRE(parsed_url.GetHost() == "bucket.storage.example.com");
+		REQUIRE(parsed_url.GetEncodedPath() == "/gateway/base/key");
+		REQUIRE(parsed_url.GetEncodedBucketPath() == "/gateway/base/");
+		REQUIRE(parsed_url.GetHTTPUrl() == "http://bucket.storage.example.com/gateway/base/key");
+	}
+
+	SECTION("full default AWS endpoints retain automatic region derivation") {
+		S3AuthParams auth_params;
+		auth_params.use_ssl = false;
+		auth_params.access_key_id = "key";
+		auth_params.SetEndpoint("HTTPS://S3.AMAZONAWS.COM:443/");
+		S3Provider::FinalizeAuthParams(auth_params);
+		REQUIRE(auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC);
+		REQUIRE(auth_params.region == "us-east-1");
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "s3.us-east-1.amazonaws.com");
+		REQUIRE(auth_params.GetEndpoint().GetProtocol() == "https://");
+		REQUIRE(auth_params.GetEndpoint().GetAuthority() == "s3.us-east-1.amazonaws.com");
+	}
+
+	SECTION("canonical endpoint forms share authentication identity") {
+		S3AuthParams legacy;
+		legacy.url_style = "path";
+		legacy.SetEndpoint("STORAGE.EXAMPLE.COM:443/base/");
+		S3Provider::FinalizeAuthParams(legacy);
+
+		S3AuthParams uri;
+		uri.use_ssl = false;
+		uri.url_style = "path";
+		uri.SetEndpoint("https://storage.example.com/base");
+		S3Provider::FinalizeAuthParams(uri);
+		legacy.use_ssl = false;
+		REQUIRE(legacy == uri);
+	}
+
+	SECTION("a URL override replaces an invalid lower-precedence endpoint") {
+		S3AuthParams auth_params;
+		auth_params.SetEndpoint("ftp://invalid.example.com");
+		S3Provider::InitializeAuthParams(auth_params);
+		auto parsed_url =
+		    S3Url::Resolve("s3://bucket/key?s3_endpoint=http%3A%2F%2Fstorage.example.com%3A80%2Fbase&s3_use_ssl=true&"
+		                   "s3_url_style=path",
+		                   auth_params);
+		REQUIRE(parsed_url.GetHost() == "storage.example.com");
+		REQUIRE(parsed_url.GetEncodedPath() == "/base/bucket/key");
+		REQUIRE(parsed_url.GetHTTPUrl() == "http://storage.example.com/base/bucket/key");
+	}
+
+	SECTION("bracketed IPv6 is supported only with path-style addressing") {
+		S3AuthParams path_style;
+		path_style.url_style = "path";
+		path_style.SetEndpoint("http://[2001:DB8::1]:80/base");
+		S3Provider::FinalizeAuthParams(path_style);
+		auto parsed_url = S3Url::Parse("s3://bucket/key", path_style);
+		REQUIRE(parsed_url.GetHost() == "[2001:db8::1]");
+		REQUIRE(parsed_url.GetHTTPUrl() == "http://[2001:db8::1]/base/bucket/key");
+
+		S3AuthParams vhost_style;
+		vhost_style.SetEndpoint("http://[::1]");
+		REQUIRE_THROWS(S3Url::Resolve("s3://bucket/key", vhost_style));
+	}
+}
+
+TEST_CASE("Invalid S3 endpoints fail before request construction", "[httpfs][s3][provider][endpoint]") {
+	for (const auto &endpoint :
+	     {"ftp://storage.example.com", "http://", "http://user@storage.example.com",
+	      "http://storage.example.com?query=value", "http://storage.example.com#fragment", "storage.example.com:0",
+	      "storage.example.com:65536", "storage.example.com:", "storage.example.com:port", "storage.example.com\\base",
+	      "storage.example.com/base/%", "storage.example.com/base/./key", "storage.example.com/base/../key",
+	      "2001:db8::1", "http://[fe80::1%25lo0]", "http://[2001:db8::1"}) {
+		S3AuthParams auth_params;
+		auth_params.SetEndpoint(endpoint);
+		INFO(endpoint);
+		REQUIRE_THROWS(S3Provider::FinalizeAuthParams(auth_params));
 	}
 }
 
@@ -904,7 +1124,7 @@ TEST_CASE("S3 provider endpoint precedence is preserved", "[httpfs][s3][provider
 	SECTION("GCS ignores the endpoint setting") {
 		KeyValueSecret secret({"gcs://"}, Identifier("gcs"), Identifier("config"), Identifier("gcs_default"));
 		auto auth_params = ReadSecretAuthParams(con, secret, "gcs://bucket/key");
-		REQUIRE(auth_params.endpoint == "storage.googleapis.com");
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "storage.googleapis.com");
 		REQUIRE(auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC);
 	}
 
@@ -912,7 +1132,7 @@ TEST_CASE("S3 provider endpoint precedence is preserved", "[httpfs][s3][provider
 		KeyValueSecret secret({"gcs://"}, Identifier("gcs"), Identifier("config"), Identifier("gcs_explicit"));
 		secret.secret_map["endpoint"] = "gcs.example.com";
 		auto auth_params = ReadSecretAuthParams(con, secret, "gcs://bucket/key");
-		REQUIRE(auth_params.endpoint == "gcs.example.com");
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "gcs.example.com");
 		REQUIRE(auth_params.endpoint_mode == S3EndpointMode::EXPLICIT);
 	}
 }
@@ -1023,17 +1243,17 @@ TEST_CASE("S3 URL styles share one validation policy", "[httpfs][s3][provider][u
 		auth_params.s3_url_compatibility_mode = true;
 		S3Provider::InitializeAuthParams(auth_params);
 		auto parsed = S3Url::Resolve("s3://bucket/key?s3_url_style=handwritten", auth_params);
-		REQUIRE(parsed.query_param.empty());
-		REQUIRE(parsed.key == "key?s3_url_style=handwritten");
+		REQUIRE(parsed.GetQueryString().empty());
+		REQUIRE(parsed.GetKey() == "key?s3_url_style=handwritten");
 	}
 
 	SECTION("dotted buckets use path style over TLS") {
 		S3AuthParams auth_params;
 		auth_params.url_style = "virtual";
-		S3Provider::InitializeAuthParams(auth_params);
+		S3Provider::FinalizeAuthParams(auth_params);
 		auto parsed = S3Url::Parse("s3://bucket.with.dots/key", auth_params);
-		REQUIRE(parsed.host == "s3.amazonaws.com");
-		REQUIRE(parsed.path == "/bucket.with.dots/key");
+		REQUIRE(parsed.GetHost() == "s3.amazonaws.com");
+		REQUIRE(parsed.GetEncodedPath() == "/bucket.with.dots/key");
 	}
 }
 
@@ -1125,8 +1345,8 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		REQUIRE(auth_params.access_key_id == "hello world");
 		REQUIRE(auth_params.secret_access_key == "secret+value");
 		REQUIRE(auth_params.region == "us-east-1");
-		REQUIRE(auth_params.endpoint == "s3.us-east-1.amazonaws.com");
-		REQUIRE(parsed_url.host == "bucket.s3.us-east-1.amazonaws.com");
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "s3.us-east-1.amazonaws.com");
+		REQUIRE(parsed_url.GetHost() == "bucket.s3.us-east-1.amazonaws.com");
 	}
 
 	SECTION("routing overrides are reflected in the parsed URL") {
@@ -1137,11 +1357,11 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		                                 "s3_use_ssl=false&s3_url_style=path",
 		                                 auth_params);
 		REQUIRE(auth_params.region == "eu-west-1");
-		REQUIRE(auth_params.endpoint == "s3.eu-west-1.amazonaws.com");
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "s3.eu-west-1.amazonaws.com");
 		REQUIRE(auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC);
-		REQUIRE(parsed_url.http_proto == "http://");
-		REQUIRE(parsed_url.host == "s3.eu-west-1.amazonaws.com");
-		REQUIRE(parsed_url.path == "/bucket/key");
+		REQUIRE(parsed_url.GetHost() == "s3.eu-west-1.amazonaws.com");
+		REQUIRE(parsed_url.GetEncodedPath() == "/bucket/key");
+		REQUIRE(parsed_url.GetHTTPUrl() == "http://s3.eu-west-1.amazonaws.com/bucket/key");
 	}
 
 	SECTION("an endpoint override can switch from automatic to explicit") {
@@ -1152,8 +1372,8 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		auto parsed_url =
 		    S3Url::Resolve("s3://bucket/key?s3_endpoint=s3.dualstack.us-east-1.amazonaws.com", auth_params);
 		REQUIRE(auth_params.endpoint_mode == S3EndpointMode::EXPLICIT);
-		REQUIRE(auth_params.endpoint == "s3.dualstack.us-east-1.amazonaws.com");
-		REQUIRE(parsed_url.host == "bucket.s3.dualstack.us-east-1.amazonaws.com");
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "s3.dualstack.us-east-1.amazonaws.com");
+		REQUIRE(parsed_url.GetHost() == "bucket.s3.dualstack.us-east-1.amazonaws.com");
 	}
 
 	SECTION("empty GCS routing overrides restore provider defaults") {
@@ -1162,10 +1382,10 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		auth_params.SetEndpoint("storage.googleapis.com");
 		auth_params.url_style = "path";
 		auto parsed_url = S3Url::Resolve("gcs://bucket/key?s3_endpoint=&s3_url_style=", auth_params);
-		REQUIRE(auth_params.endpoint == "storage.googleapis.com");
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "storage.googleapis.com");
 		REQUIRE(auth_params.url_style == "path");
-		REQUIRE(parsed_url.host == "storage.googleapis.com");
-		REQUIRE(parsed_url.path == "/bucket/key");
+		REQUIRE(parsed_url.GetHost() == "storage.googleapis.com");
+		REQUIRE(parsed_url.GetEncodedPath() == "/bucket/key");
 	}
 
 	SECTION("empty R2 endpoints fail instead of routing to AWS") {
@@ -1247,9 +1467,9 @@ TEST_CASE("GCS HMAC signing region follows provider defaults", "[httpfs][s3][gcs
 		auth_params.provider_type = S3ProviderType::GCS;
 		auth_params.access_key_id = "key";
 		auth_params.secret_access_key = "secret";
-		S3Provider::InitializeAuthParams(auth_params);
+		S3Provider::FinalizeAuthParams(auth_params);
 		REQUIRE(auth_params.region == "auto");
-		REQUIRE(auth_params.endpoint == "storage.googleapis.com");
+		REQUIRE(auth_params.GetEndpoint().GetHost() == "storage.googleapis.com");
 		REQUIRE(auth_params.url_style == "path");
 	}
 
@@ -1338,15 +1558,13 @@ TEST_CASE("GCS HMAC signing region follows provider defaults", "[httpfs][s3][gcs
 
 TEST_CASE("S3 provider policy selects request authentication", "[httpfs][s3][provider][signing]") {
 	::AESStateSSLFactory encryption_util;
-	ParsedS3Url parsed_url;
-	parsed_url.path = "/bucket/key";
-	parsed_url.host = "storage.example.com";
+	auto parsed_url = ParseTestS3Url("s3://bucket/key", "storage.example.com", "path");
 
 	SECTION("anonymous") {
 		S3AuthParams auth_params;
-		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
-		                                            RequestType::GET_REQUEST, auth_params);
-		REQUIRE(headers.GetHeaderValue("Host") == parsed_url.host);
+		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+		                                            S3RequestQuery(), RequestType::GET_REQUEST, auth_params);
+		REQUIRE(headers.GetHeaderValue("Host") == parsed_url.GetHost());
 		REQUIRE_FALSE(headers.HasHeader("Authorization"));
 	}
 
@@ -1357,8 +1575,8 @@ TEST_CASE("S3 provider policy selects request authentication", "[httpfs][s3][pro
 		auth_params.access_key_id = "key";
 		auth_params.secret_access_key = "secret";
 		auto headers =
-		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-		                                 auth_params, "20260806", "20260806T120000Z");
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+		                                 RequestType::GET_REQUEST, auth_params, "20260806", "20260806T120000Z");
 		REQUIRE(StringUtil::StartsWith(headers.GetHeaderValue("Authorization"), "AWS4-HMAC-SHA256"));
 	}
 
@@ -1368,9 +1586,9 @@ TEST_CASE("S3 provider policy selects request authentication", "[httpfs][s3][pro
 		auth_params.access_key_id = "key";
 		auth_params.secret_access_key = "secret";
 		auth_params.oauth2_bearer_token = "token";
-		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery({{"delete", ""}}),
-		                                            RequestType::POST_REQUEST, auth_params, "", "", "payload",
-		                                            "application/xml", "content-md5");
+		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+		                                            S3RequestQuery({{"delete", ""}}), RequestType::POST_REQUEST,
+		                                            auth_params, "", "", "payload", "application/xml", "content-md5");
 		REQUIRE(headers.GetHeaderValue("Authorization") == "Bearer token");
 		REQUIRE(headers.GetHeaderValue("Content-Type") == "application/xml");
 		REQUIRE(headers.GetHeaderValue("Content-MD5") == "content-md5");
@@ -1380,9 +1598,7 @@ TEST_CASE("S3 provider policy selects request authentication", "[httpfs][s3][pro
 
 TEST_CASE("S3 configured headers are validated before request authentication", "[httpfs][s3][headers]") {
 	::AESStateSSLFactory encryption_util;
-	ParsedS3Url parsed_url;
-	parsed_url.path = "/bucket/key";
-	parsed_url.host = "storage.example.com";
+	auto parsed_url = ParseTestS3Url("s3://bucket/key", "storage.example.com", "path");
 
 	vector<S3AuthParams> auth_params(3);
 	auth_params[1].region = "us-east-1";
@@ -1393,8 +1609,9 @@ TEST_CASE("S3 configured headers are validated before request authentication", "
 
 	auto create_headers = [&](const S3AuthParams &auth, const unordered_map<string, string> &extra_headers,
 	                          const string &user_agent = "httpfs-agent") {
-		return S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-		                                    auth, "", "", "", "", "", extra_headers, user_agent);
+		return S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+		                                    RequestType::GET_REQUEST, auth, "", "", "", "", "", extra_headers,
+		                                    user_agent);
 	};
 	auto capture_error = [&](const S3AuthParams &auth, const unordered_map<string, string> &extra_headers) {
 		try {
@@ -1596,12 +1813,10 @@ TEST_CASE("S3 request signing remains deterministic", "[httpfs][s3][signing]") {
 	auth_params.region = "us-east-1";
 	auth_params.access_key_id = "AKIAIOSFODNN7EXAMPLE";
 	auth_params.secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
-	ParsedS3Url parsed_url;
-	parsed_url.path = "/test.txt";
-	parsed_url.host = "examplebucket.s3.amazonaws.com";
+	auto parsed_url = ParseTestS3Url("s3://examplebucket/test.txt", "s3.amazonaws.com", "virtual");
 
-	auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-	                                            auth_params, "20130524", "20130524T000000Z");
+	auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+	                                            RequestType::GET_REQUEST, auth_params, "20130524", "20130524T000000Z");
 
 	REQUIRE(headers.GetHeaderValue("Host") == "examplebucket.s3.amazonaws.com");
 	REQUIRE(headers.GetHeaderValue("x-amz-content-sha256") ==
@@ -1621,13 +1836,11 @@ TEST_CASE("S3 request signing includes optional headers", "[httpfs][s3][signing]
 	auth_params.session_token = "token";
 	auth_params.kms_key_id = "kms-key";
 	auth_params.requester_pays = true;
-	ParsedS3Url parsed_url;
-	parsed_url.path = "/bucket/key";
-	parsed_url.host = "bucket.example.com";
+	auto parsed_url = ParseTestS3Url("s3://bucket/key", "bucket.example.com", "path");
 
-	auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::PUT_REQUEST,
-	                                            auth_params, "20260730", "20260730T120000Z", "",
-	                                            "application/octet-stream", "content-md5");
+	auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+	                                            RequestType::PUT_REQUEST, auth_params, "20260730", "20260730T120000Z",
+	                                            "", "application/octet-stream", "content-md5");
 
 	REQUIRE(headers.GetHeaderValue("x-amz-security-token") == "token");
 	REQUIRE(headers.GetHeaderValue("x-amz-request-payer") == "requester");
@@ -1642,9 +1855,7 @@ TEST_CASE("S3 request signing includes optional headers", "[httpfs][s3][signing]
 
 TEST_CASE("GCS billing projects are applied across authentication modes", "[httpfs][s3][gcs][requester-pays]") {
 	::AESStateSSLFactory encryption_util;
-	ParsedS3Url parsed_url;
-	parsed_url.path = "/bucket/key";
-	parsed_url.host = "storage.googleapis.com";
+	auto parsed_url = ParseTestS3Url("s3://bucket/key", "storage.googleapis.com", "path");
 	const array<RequestType, 5> request_types {RequestType::GET_REQUEST, RequestType::HEAD_REQUEST,
 	                                           RequestType::PUT_REQUEST, RequestType::POST_REQUEST,
 	                                           RequestType::DELETE_REQUEST};
@@ -1658,8 +1869,9 @@ TEST_CASE("GCS billing projects are applied across authentication modes", "[http
 		auth_params.requester_pays = true;
 		auth_params.user_project = "billing-project";
 		for (const auto request_type : request_types) {
-			auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), request_type,
-			                                            auth_params, "20260902", "20260902T120000Z");
+			auto headers =
+			    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+			                                 request_type, auth_params, "20260902", "20260902T120000Z");
 			REQUIRE(headers.GetHeaderValue("x-goog-user-project") == "billing-project");
 			REQUIRE_FALSE(headers.HasHeader("x-amz-request-payer"));
 			REQUIRE(StringUtil::Contains(headers.GetHeaderValue("Authorization"), "x-goog-user-project"));
@@ -1672,8 +1884,8 @@ TEST_CASE("GCS billing projects are applied across authentication modes", "[http
 		bearer.oauth2_bearer_token = "gcs-token";
 		bearer.user_project = "billing-project";
 		for (const auto request_type : request_types) {
-			auto headers =
-			    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), request_type, bearer);
+			auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+			                                            S3RequestQuery(), request_type, bearer);
 			REQUIRE(headers.GetHeaderValue("x-goog-user-project") == "billing-project");
 			REQUIRE(headers.GetHeaderValue("Authorization") == "Bearer gcs-token");
 			REQUIRE_FALSE(headers.HasHeader("x-amz-request-payer"));
@@ -1682,8 +1894,8 @@ TEST_CASE("GCS billing projects are applied across authentication modes", "[http
 		S3AuthParams anonymous;
 		anonymous.provider_type = S3ProviderType::GCS;
 		anonymous.user_project = "billing-project";
-		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
-		                                            RequestType::GET_REQUEST, anonymous);
+		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+		                                            S3RequestQuery(), RequestType::GET_REQUEST, anonymous);
 		REQUIRE(headers.GetHeaderValue("x-goog-user-project") == "billing-project");
 		REQUIRE_FALSE(headers.HasHeader("Authorization"));
 	}
@@ -1692,8 +1904,8 @@ TEST_CASE("GCS billing projects are applied across authentication modes", "[http
 		S3AuthParams auth_params;
 		auth_params.provider_type = S3ProviderType::GCS;
 		auth_params.oauth2_bearer_token = "gcs-token";
-		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
-		                                            RequestType::GET_REQUEST, auth_params);
+		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+		                                            S3RequestQuery(), RequestType::GET_REQUEST, auth_params);
 		REQUIRE_FALSE(headers.HasHeader("x-goog-user-project"));
 	}
 
@@ -1701,12 +1913,14 @@ TEST_CASE("GCS billing projects are applied across authentication modes", "[http
 		unordered_map<string, string> extra_headers {{"X-GoOg-UsEr-PrOjEcT", "configured-project"}};
 		S3AuthParams gcs;
 		gcs.provider_type = S3ProviderType::GCS;
-		REQUIRE_THROWS(S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
-		                                            RequestType::GET_REQUEST, gcs, "", "", "", "", "", extra_headers));
+		REQUIRE_THROWS(S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+		                                            S3RequestQuery(), RequestType::GET_REQUEST, gcs, "", "", "", "", "",
+		                                            extra_headers));
 
 		S3AuthParams s3;
-		auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
-		                                            RequestType::GET_REQUEST, s3, "", "", "", "", "", extra_headers);
+		auto headers =
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+		                                 RequestType::GET_REQUEST, s3, "", "", "", "", "", extra_headers);
 		REQUIRE(headers.GetHeaderValue("X-GoOg-UsEr-PrOjEcT") == "configured-project");
 	}
 
@@ -1718,8 +1932,8 @@ TEST_CASE("GCS billing projects are applied across authentication modes", "[http
 		auth_params.secret_access_key = "secret";
 		auth_params.requester_pays = true;
 		auto headers =
-		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-		                                 auth_params, "20260902", "20260902T120000Z");
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+		                                 RequestType::GET_REQUEST, auth_params, "20260902", "20260902T120000Z");
 		REQUIRE(headers.GetHeaderValue("x-amz-request-payer") == "requester");
 		REQUIRE_FALSE(headers.HasHeader("x-goog-user-project"));
 	}
@@ -1731,19 +1945,17 @@ TEST_CASE("S3 request signing canonicalizes configured extension headers", "[htt
 	auth_params.region = "us-east-1";
 	auth_params.access_key_id = "key";
 	auth_params.secret_access_key = "secret";
-	ParsedS3Url parsed_url;
-	parsed_url.path = "/bucket/key";
-	parsed_url.host = "bucket.example.com";
+	auto parsed_url = ParseTestS3Url("s3://bucket/key", "bucket.example.com", "path");
 	unordered_map<string, string> raw_headers {
 	    {"X-AmZ-Meta-Color", "\t blue  green \t"}, {"x-GoOg-Meta-Mode", "  fast\tmode  "}, {"X-Ordinary", "value"}};
 	unordered_map<string, string> normalized_headers {
 	    {"x-amz-meta-color", "blue green"}, {"X-GOOG-META-MODE", "fast mode"}, {"X-Ordinary", "value"}};
 
-	auto raw = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-	                                        auth_params, "20260831", "20260831T120000Z", "", "", "", raw_headers,
-	                                        "httpfs-agent");
-	auto normalized = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(),
-	                                               RequestType::GET_REQUEST, auth_params, "20260831",
+	auto raw = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+	                                        RequestType::GET_REQUEST, auth_params, "20260831", "20260831T120000Z", "",
+	                                        "", "", raw_headers, "httpfs-agent");
+	auto normalized = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+	                                               S3RequestQuery(), RequestType::GET_REQUEST, auth_params, "20260831",
 	                                               "20260831T120000Z", "", "", "", normalized_headers, "httpfs-agent");
 
 	const auto &authorization = raw.GetHeaderValue("Authorization");
@@ -1772,17 +1984,16 @@ TEST_CASE("S3 request signing preserves empty configured extension headers", "[h
 	auth_params.region = "us-east-1";
 	auth_params.access_key_id = "key";
 	auth_params.secret_access_key = "secret";
-	ParsedS3Url parsed_url;
-	parsed_url.path = "/bucket/key";
-	parsed_url.host = "bucket.example.com";
+	auto parsed_url = ParseTestS3Url("s3://bucket/key", "bucket.example.com", "path");
 	unordered_map<string, string> raw_headers {{"X-AmZ-Meta-Empty", ""}, {"x-GoOg-Meta-Whitespace", "\t  \t"}};
 	unordered_map<string, string> normalized_headers {{"x-amz-meta-empty", ""}, {"X-GOOG-META-WHITESPACE", ""}};
 
-	auto raw = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-	                                        auth_params, "20260831", "20260831T120000Z", "", "", "", raw_headers);
-	auto normalized =
-	    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-	                                 auth_params, "20260831", "20260831T120000Z", "", "", "", normalized_headers);
+	auto raw = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+	                                        RequestType::GET_REQUEST, auth_params, "20260831", "20260831T120000Z", "",
+	                                        "", "", raw_headers);
+	auto normalized = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+	                                               S3RequestQuery(), RequestType::GET_REQUEST, auth_params, "20260831",
+	                                               "20260831T120000Z", "", "", "", normalized_headers);
 
 	const auto &authorization = raw.GetHeaderValue("Authorization");
 	REQUIRE(authorization == normalized.GetHeaderValue("Authorization"));
@@ -1800,18 +2011,16 @@ TEST_CASE("S3 request signing changes configured headers after a region redirect
 	auth_params.region = "us-east-1";
 	auth_params.access_key_id = "key";
 	auth_params.secret_access_key = "secret";
-	ParsedS3Url parsed_url;
-	parsed_url.path = "/bucket/key";
-	parsed_url.host = "bucket.example.com";
+	auto parsed_url = ParseTestS3Url("s3://bucket/key", "bucket.example.com", "path");
 	unordered_map<string, string> extra_headers {{"X-AmZ-Meta-Region", "region-value"}};
 
-	auto us_east_1 =
-	    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-	                                 auth_params, "20260831", "20260831T120000Z", "", "", "", extra_headers);
+	auto us_east_1 = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+	                                              S3RequestQuery(), RequestType::GET_REQUEST, auth_params, "20260831",
+	                                              "20260831T120000Z", "", "", "", extra_headers);
 	auth_params.region = "eu-west-1";
-	auto eu_west_1 =
-	    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::GET_REQUEST,
-	                                 auth_params, "20260831", "20260831T120000Z", "", "", "", extra_headers);
+	auto eu_west_1 = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+	                                              S3RequestQuery(), RequestType::GET_REQUEST, auth_params, "20260831",
+	                                              "20260831T120000Z", "", "", "", extra_headers);
 
 	const auto &us_authorization = us_east_1.GetHeaderValue("Authorization");
 	const auto &eu_authorization = eu_west_1.GetHeaderValue("Authorization");
@@ -1853,23 +2062,23 @@ TEST_CASE("S3 request queries share canonical and wire encoding", "[httpfs][s3][
 		auth_params.region = "us-east-1";
 		auth_params.access_key_id = "key";
 		auth_params.secret_access_key = "secret";
-		ParsedS3Url parsed_url;
-		parsed_url.path = "/bucket/key";
-		parsed_url.host = "bucket.example.com";
-		auto first = S3RequestUtil::CreateHeaders(
-		    encryption_util, parsed_url, S3RequestQuery({{"uploadId", "opaque&id"}, {"partNumber", "12"}}),
-		    RequestType::PUT_REQUEST, auth_params, "20260806", "20260806T120000Z");
-		auto second = S3RequestUtil::CreateHeaders(
-		    encryption_util, parsed_url, S3RequestQuery({{"partNumber", "12"}, {"uploadId", "opaque&id"}}),
-		    RequestType::PUT_REQUEST, auth_params, "20260806", "20260806T120000Z");
+		auto parsed_url = ParseTestS3Url("s3://bucket/key", "bucket.example.com", "path");
+		auto first =
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+		                                 S3RequestQuery({{"uploadId", "opaque&id"}, {"partNumber", "12"}}),
+		                                 RequestType::PUT_REQUEST, auth_params, "20260806", "20260806T120000Z");
+		auto second =
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT,
+		                                 S3RequestQuery({{"partNumber", "12"}, {"uploadId", "opaque&id"}}),
+		                                 RequestType::PUT_REQUEST, auth_params, "20260806", "20260806T120000Z");
 		REQUIRE(first.GetHeaderValue("Authorization") == second.GetHeaderValue("Authorization"));
 		REQUIRE(first.GetHeaderValue("Authorization") ==
 		        "AWS4-HMAC-SHA256 Credential=key/20260806/us-east-1/s3/aws4_request, "
 		        "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
 		        "Signature=7d31006078e4c8754eb70f96358af8f4c84a60186bf8e8fe1605b9bb90fcffad");
 		auto empty_query =
-		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestQuery(), RequestType::PUT_REQUEST,
-		                                 auth_params, "20260806", "20260806T120000Z");
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, S3RequestTarget::OBJECT, S3RequestQuery(),
+		                                 RequestType::PUT_REQUEST, auth_params, "20260806", "20260806T120000Z");
 		REQUIRE(first.GetHeaderValue("Authorization") != empty_query.GetHeaderValue("Authorization"));
 	}
 }
@@ -2007,6 +2216,16 @@ TEST_CASE("S3 request sessions reject conflicting configured headers before HTTP
 	}
 	SECTION("curl") {
 		RunS3RejectedHeaderScenario("curl");
+	}
+}
+
+TEST_CASE("S3 full HTTP endpoints route every request through the normalized base path",
+          "[httpfs][s3][endpoint][request]") {
+	SECTION("httplib") {
+		RunNormalizedEndpointWireScenario("httplib");
+	}
+	SECTION("curl") {
+		RunNormalizedEndpointWireScenario("curl");
 	}
 }
 

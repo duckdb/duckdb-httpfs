@@ -4,20 +4,41 @@
 
 namespace duckdb {
 
-struct ParsedS3Url {
-public:
-	string GetHTTPUrl(const string &http_query_string = "") const;
-	string GetBucketPath() const;
+class ParsedS3Url {
+	friend struct S3Url;
+
+private:
+	ParsedS3Url() = default;
 
 public:
-	string http_proto;
+	//! Logical S3 URL
+	const string &GetPrefix() const;
+	const string &GetBucket() const;
+	const string &GetKey() const;
+	const string &GetQueryString() const;
+
+	//! HTTP request target
+	string GetHTTPUrl(const string &http_query_string = "") const;
+	string GetBucketHTTPUrl(const string &http_query_string = "") const;
+	const string &GetHost() const;
+	const string &GetEncodedPath() const;
+	const string &GetEncodedBucketPath() const;
+
+private:
+	string BuildHTTPUrl(const string &request_path, const string &http_query_string) const;
+
+private:
+	//! Logical S3 URL
 	string prefix;
-	string host;
 	string bucket;
 	string key;
-	string path;
-	string query_param;
-	string trimmed_s3_url;
+	string query_string;
+
+	//! HTTP request target
+	string host;
+	string encoded_path;
+	string encoded_bucket_path;
+	bool use_ssl = true;
 };
 
 enum class S3URLEncodeMode : uint8_t { PATH, QUERY_COMPONENT };

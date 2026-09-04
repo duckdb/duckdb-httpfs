@@ -249,11 +249,12 @@ void S3Provider::ReadAuthParams(S3KeyValueReader &secret_reader, const string &f
 	InitializeAuthParams(result);
 }
 
-static bool EndpointIsAWS(const string &endpoint) {
-	if (endpoint.empty()) {
+static bool EndpointIsAWS(const NormalizedS3Endpoint &endpoint) {
+	if (endpoint.IsEmpty()) {
 		return true;
 	}
-	return StringUtil::StartsWith(endpoint, "s3.") && StringUtil::EndsWith(endpoint, ".amazonaws.com");
+	return StringUtil::StartsWith(endpoint.GetHost(), "s3.") &&
+	       StringUtil::EndsWith(endpoint.GetHost(), ".amazonaws.com");
 }
 
 //! Not AWS, so deriving an AWS endpoint would sign a request to the wrong host
@@ -261,78 +262,66 @@ static bool RequiresExplicitEndpoint(const S3AuthParams &auth_params) {
 	return auth_params.scheme_is_alias || auth_params.provider_type == S3ProviderType::R2;
 }
 
-static bool EndpointIsUnresolved(const S3AuthParams &auth_params) {
-	auto endpoint = auth_params.endpoint;
+static bool EndpointIsUnresolved(const string &endpoint_source) {
+	auto endpoint = endpoint_source;
 	StringUtil::Trim(endpoint);
 	return endpoint.empty();
 }
 
-//! Re-applied in both phases: url query parameters can clear these between them
-static void ApplyProviderDefaults(S3AuthParams &auth_params) {
-	if (auth_params.provider_type != S3ProviderType::GCS) {
-		return;
-	}
-	if (EndpointIsUnresolved(auth_params)) {
-		auth_params.endpoint = "storage.googleapis.com";
-		auth_params.endpoint_mode = S3EndpointMode::AUTOMATIC;
-	}
-	if (auth_params.url_style.empty()) {
-		auth_params.url_style = "path";
-	}
-}
-
-static void ApplyDerivedDefaults(S3AuthParams &auth_params) {
+void S3Provider::InitializeAuthParams(S3AuthParams &auth_params) {
 	if (auth_params.provider_type == S3ProviderType::GCS) {
-		if (auth_params.region.empty() && S3Provider::GetAuthType(auth_params) == S3AuthType::SIGV4) {
+		if (EndpointIsUnresolved(auth_params.endpoint_source)) {
+			auth_params.endpoint_source = "storage.googleapis.com";
+			auth_params.endpoint = NormalizedS3Endpoint();
+			auth_params.endpoint_mode = S3EndpointMode::AUTOMATIC;
+		}
+		if (auth_params.url_style.empty()) {
+			auth_params.url_style = "path";
+		}
+		if (auth_params.region.empty() && GetAuthType(auth_params) == S3AuthType::SIGV4) {
 			auth_params.region = "auto";
 		}
-		return;
 	}
-	if (auth_params.provider_type != S3ProviderType::S3 ||
-	    (auth_params.endpoint_mode == S3EndpointMode::EXPLICIT && !EndpointIsAWS(auth_params.endpoint))) {
-		return;
-	}
-	if (auth_params.region.empty()) {
-		if (auth_params.access_key_id.empty()) {
-			if (auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC) {
-				auth_params.endpoint = "s3.amazonaws.com";
-			}
-			return;
-		}
-		auth_params.region = "us-east-1";
-	}
-	if (auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC) {
-		auth_params.endpoint = StringUtil::Format("s3.%s.amazonaws.com", auth_params.region);
-	}
-}
-
-void S3Provider::InitializeAuthParams(S3AuthParams &auth_params) {
-	ApplyProviderDefaults(auth_params);
 	ParseURLStyle(auth_params.url_style);
-	if (RequiresExplicitEndpoint(auth_params) && EndpointIsUnresolved(auth_params)) {
-		// Url query parameters still get to supply one; FinalizeAuthParams rejects it if none did
-		return;
-	}
-	ApplyDerivedDefaults(auth_params);
 }
 
 void S3Provider::FinalizeAuthParams(S3AuthParams &auth_params) {
-	ApplyProviderDefaults(auth_params);
-	ParseURLStyle(auth_params.url_style);
+	InitializeAuthParams(auth_params);
 	if (auth_params.provider_type == S3ProviderType::GCS && auth_params.requester_pays &&
 	    auth_params.user_project.empty()) {
 		throw InvalidInputException(
 		    "GCS Requester Pays requires a billing project; set USER_PROJECT in the GCS secret, "
 		    "set gcs_user_project, or pass gcs_user_project in the URL.");
 	}
-	if (RequiresExplicitEndpoint(auth_params) && EndpointIsUnresolved(auth_params)) {
+	if (RequiresExplicitEndpoint(auth_params) && EndpointIsUnresolved(auth_params.endpoint_source)) {
 		if (auth_params.provider_type == S3ProviderType::R2) {
 			throw IOException("R2 requires an endpoint; provide account_id in the secret or s3_endpoint in the URL");
 		}
 		throw IOException("An aliased URL scheme requires an endpoint; provide ENDPOINT in the secret, set "
 		                  "s3_endpoint, or pass s3_endpoint in the URL");
 	}
-	ApplyDerivedDefaults(auth_params);
+
+	auto endpoint = NormalizedS3Endpoint::Parse(auth_params.endpoint_source, auth_params.use_ssl);
+	if (auth_params.provider_type == S3ProviderType::S3 && !auth_params.scheme_is_alias &&
+	    endpoint.GetHost() == "s3.amazonaws.com" && endpoint.GetBasePath().empty() && endpoint.IsDefaultPort()) {
+		auth_params.endpoint_mode = S3EndpointMode::AUTOMATIC;
+	}
+	if (auth_params.provider_type == S3ProviderType::S3 &&
+	    (auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC || EndpointIsAWS(endpoint))) {
+		if (auth_params.region.empty()) {
+			if (auth_params.access_key_id.empty()) {
+				if (auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC) {
+					endpoint.SetHost("s3.amazonaws.com");
+				}
+			} else {
+				auth_params.region = "us-east-1";
+			}
+		}
+		if (auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC && !auth_params.region.empty()) {
+			endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", auth_params.region));
+		}
+	}
+	auth_params.endpoint = std::move(endpoint);
 }
 
 S3URLStyle S3Provider::ParseURLStyle(const string &url_style) {
@@ -356,11 +345,9 @@ S3AuthType S3Provider::GetAuthType(const S3AuthParams &auth_params) {
 	return S3AuthType::SIGV4;
 }
 
-static bool EndpointIsR2(const string &endpoint) {
+static bool EndpointIsR2(const NormalizedS3Endpoint &endpoint) {
 	static const string R2_ENDPOINT_SUFFIX = ".r2.cloudflarestorage.com";
-	auto host = endpoint.substr(0, endpoint.find('/'));
-	host = host.substr(0, host.find(':'));
-	host = StringUtil::Lower(host);
+	auto &host = endpoint.GetHost();
 	if (!StringUtil::EndsWith(host, R2_ENDPOINT_SUFFIX)) {
 		return false;
 	}
@@ -378,7 +365,7 @@ static bool EndpointIsR2(const string &endpoint) {
 
 static bool UsesR2CompatibilityProfile(const S3AuthParams &auth_params) {
 	return auth_params.provider_type == S3ProviderType::R2 ||
-	       (auth_params.provider_type == S3ProviderType::S3 && EndpointIsR2(auth_params.endpoint));
+	       (auth_params.provider_type == S3ProviderType::S3 && EndpointIsR2(auth_params.GetEndpoint()));
 }
 
 static S3MultipartUploadPolicy DefaultMultipartUploadPolicy() {

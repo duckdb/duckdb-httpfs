@@ -134,11 +134,11 @@ struct S3HeaderBuilder {
 	};
 
 public:
-	S3HeaderBuilder(EncryptionUtil &encryption_util_p, string url_p, const S3RequestQuery &query_p, string host_p,
-	                string service_p, RequestType request_type_p, const S3AuthParams &auth_params_p, string date_now_p,
-	                string datetime_now_p, string payload_hash_p, string content_type_p, string content_md5_p,
-	                HTTPHeaders &headers_p)
-	    : encryption_util(encryption_util_p), url(std::move(url_p)), query(query_p.CanonicalQuery()),
+	S3HeaderBuilder(EncryptionUtil &encryption_util_p, string encoded_url_p, const S3RequestQuery &query_p,
+	                string host_p, string service_p, RequestType request_type_p, const S3AuthParams &auth_params_p,
+	                string date_now_p, string datetime_now_p, string payload_hash_p, string content_type_p,
+	                string content_md5_p, HTTPHeaders &headers_p)
+	    : encryption_util(encryption_util_p), encoded_url(std::move(encoded_url_p)), query(query_p.CanonicalQuery()),
 	      host(std::move(host_p)), service(std::move(service_p)), method(HTTPFSUtil::GetRequestMethod(request_type_p)),
 	      auth_params(auth_params_p), date_now(std::move(date_now_p)), datetime_now(std::move(datetime_now_p)),
 	      payload_hash(std::move(payload_hash_p)), content_type(std::move(content_type_p)),
@@ -250,7 +250,7 @@ private:
 	}
 
 	string BuildCanonicalRequest(const vector<CanonicalHeader> &canonical_headers, const string &signed_headers) const {
-		auto result = method + "\n" + S3Url::Encode(url, S3URLEncodeMode::PATH) + "\n" + query;
+		auto result = method + "\n" + encoded_url + "\n" + query;
 		for (const auto &header : canonical_headers) {
 			result += "\n" + header.name + ":" + header.value;
 		}
@@ -275,7 +275,7 @@ private:
 
 private:
 	EncryptionUtil &encryption_util;
-	const string url;
+	const string encoded_url;
 	const string query;
 	const string host;
 	const string service;
@@ -329,21 +329,24 @@ static HTTPHeaders CreateConfiguredS3Headers(const unordered_map<string, string>
 }
 
 HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const ParsedS3Url &parsed_url,
-                                         const S3RequestQuery &query, RequestType request_type,
+                                         S3RequestTarget target, const S3RequestQuery &query, RequestType request_type,
                                          const S3AuthParams &auth_params, string date_now, string datetime_now,
                                          string payload_hash, string content_type, string content_md5,
                                          const unordered_map<string, string> &extra_headers, const string &user_agent) {
+	const auto &host = parsed_url.GetHost();
+	const auto &encoded_path =
+	    target == S3RequestTarget::BUCKET ? parsed_url.GetEncodedBucketPath() : parsed_url.GetEncodedPath();
 	auto headers = CreateConfiguredS3Headers(extra_headers, user_agent, auth_params.provider_type);
 	if (auth_params.provider_type == S3ProviderType::GCS && !auth_params.user_project.empty()) {
 		headers["x-goog-user-project"] = auth_params.user_project;
 	}
 	switch (S3Provider::GetAuthType(auth_params)) {
 	case S3AuthType::ANONYMOUS: {
-		headers["Host"] = parsed_url.host;
+		headers["Host"] = host;
 		return headers;
 	}
 	case S3AuthType::SIGV4: {
-		S3HeaderBuilder(encryption_util, parsed_url.path, query, parsed_url.host, "s3", request_type, auth_params,
+		S3HeaderBuilder(encryption_util, encoded_path, query, host, "s3", request_type, auth_params,
 		                std::move(date_now), std::move(datetime_now), std::move(payload_hash), std::move(content_type),
 		                std::move(content_md5), headers)
 		    .Create();
@@ -351,7 +354,7 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	}
 	case S3AuthType::BEARER: {
 		headers["Authorization"] = "Bearer " + auth_params.oauth2_bearer_token;
-		headers["Host"] = parsed_url.host;
+		headers["Host"] = host;
 		if (!content_type.empty()) {
 			headers["Content-Type"] = content_type;
 		}
@@ -509,13 +512,10 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	auto parsed_s3_url = S3Url::Parse(s3_url, result.auth_params);
 	result.display_url = S3Url::GetDisplayUrl(s3_url, result.auth_params);
 	auto query = create_query(parsed_s3_url);
-	if (target == S3RequestTarget::BUCKET) {
-		parsed_s3_url.path = parsed_s3_url.GetBucketPath();
-	}
-
-	result.http_url = parsed_s3_url.GetHTTPUrl(query.WireQuery());
+	result.http_url = target == S3RequestTarget::BUCKET ? parsed_s3_url.GetBucketHTTPUrl(query.WireQuery())
+	                                                    : parsed_s3_url.GetHTTPUrl(query.WireQuery());
 	auto &http_params = result.http_params->Cast<HTTPFSParams>();
-	result.headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_s3_url, query, request_type,
+	result.headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_s3_url, target, query, request_type,
 	                                              result.auth_params, "", "", payload_hash, content_type, content_md5,
 	                                              http_params.extra_headers, http_params.user_agent);
 	return result;
