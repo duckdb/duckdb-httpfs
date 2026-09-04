@@ -841,6 +841,90 @@ static void RunGCSListAuthErrorScenario(const string &client_implementation) {
 	REQUIRE(result->GetError().find("Authentication Failure - GCS authentication failed") != string::npos);
 }
 
+static void ConfigureDirectDelete(Connection &con, MockS3Server &server, const string &client_implementation) {
+	S3TestHelper::RequireQueryOk(con,
+	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
+	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
+	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET direct_delete (
+	TYPE S3,
+	SCOPE 's3://refresh-bucket/',
+	KEY_ID 'DELETE_ONLY_KEY',
+	SECRET 'DELETE_ONLY_SECRET',
+	REGION 'us-east-1',
+	ENDPOINT '%s',
+	USE_SSL false,
+	URL_STYLE 'path'
+))",
+	                                                     server.Endpoint()));
+}
+
+static void RunDirectDeleteSuccessScenario(const string &client_implementation, int status) {
+	MockS3ServerConfig config;
+	config.auth.stale_key_id = "DELETE_ONLY_KEY";
+	// A preliminary HEAD would fail, while the DELETE itself is authorized.
+	config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+	config.http_response.object_delete_status = status;
+	if (status == 200) {
+		config.http_response.object_delete_body = "deleted";
+	}
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	ConfigureDirectDelete(con, server, client_implementation);
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	fs.RemoveFile(S3TestHelper::S3_PATH);
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(observations.size() == 1);
+	REQUIRE(observations[0].method == "DELETE");
+	REQUIRE(observations[0].status == status);
+}
+
+static void RunDirectDeleteErrorScenario(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.auth.stale_key_id = "DELETE_ONLY_KEY";
+	config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+	config.http_response.object_delete_status = 404;
+	config.http_response.object_delete_body =
+	    "<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>";
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	ConfigureDirectDelete(con, server, client_implementation);
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	ErrorData error;
+	bool threw = false;
+	try {
+		auto &fs = FileSystem::GetFileSystem(*con.context);
+		fs.RemoveFile(S3TestHelper::S3_PATH);
+	} catch (std::exception &ex) {
+		error = ErrorData(ex);
+		threw = true;
+	}
+	REQUIRE(threw);
+	REQUIRE(error.Type() == ExceptionType::HTTP);
+	REQUIRE(error.ExtraInfo().at("status_code") == "404");
+	REQUIRE(StringUtil::Contains(error.ExtraInfo().at("response_body"), "NoSuchKey"));
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(observations.size() == 1);
+	REQUIRE(observations[0].method == "DELETE");
+	REQUIRE(observations[0].status == 404);
+}
+
 static S3AuthParams ReadSecretAuthParams(Connection &con, KeyValueSecret &secret,
                                          const string &path = "s3://bucket/key") {
 	ClientContextFileOpener opener(*con.context);
@@ -2229,6 +2313,20 @@ TEST_CASE("GCS bearer authentication is shared by object, list and bulk-delete r
 	}
 	SECTION("curl") {
 		RunGCSBearerRequestScenario("curl");
+	}
+}
+
+TEST_CASE("S3 single-object delete does not probe object metadata", "[httpfs][s3][delete]") {
+	for (const string client_implementation : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client_implementation << " accepts an existing-object 200 response") {
+			RunDirectDeleteSuccessScenario(client_implementation, 200);
+		}
+		DYNAMIC_SECTION(client_implementation << " accepts an idempotent missing-object 204 response") {
+			RunDirectDeleteSuccessScenario(client_implementation, 204);
+		}
+		DYNAMIC_SECTION(client_implementation << " preserves an actual DELETE 404") {
+			RunDirectDeleteErrorScenario(client_implementation);
+		}
 	}
 }
 

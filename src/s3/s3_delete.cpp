@@ -78,24 +78,17 @@ static void AddDeleteHTTPHash(hash_t &result, const S3RefreshableHTTPParams &htt
 }
 
 void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener) {
-	auto handle = OpenFile(path, FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS, opener);
-	if (!handle) {
-		FileOpenerInfo info = {path};
-		auto auth_params = S3AuthResolver::Resolve(opener, info);
-		throw IOException({{"errno", "404"}}, "Could not remove file \"%s\": %s",
-		                  S3Url::GetDisplayUrl(path, auth_params), string("No such file or directory"));
-	}
-
-	auto &s3fh = handle->Cast<S3FileHandle>();
-	auto res = DeleteRequest(*handle, s3fh.path, {});
+	FileOpenerInfo info = {path};
+	auto auth_params = S3AuthResolver::Resolve(opener, info);
+	auto session = S3RequestExecutor::CreateSession(opener, path, auth_params);
+	auto request_result = DeleteRequest(*session, S3RequestOperation::DELETE_OBJECT, path, {});
+	auto &res = request_result.response;
 	if (res->HasRequestError()) {
-		auto captured = s3fh.request_session->Capture();
-		auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-		throw IOException("S3 delete request for \"%s\" could not be completed: %s",
-		                  S3Url::GetDisplayUrl(path, snapshot.auth_params), res->GetRequestError());
+		throw IOException("S3 delete request for \"%s\" could not be completed: %s", request_result.context.display_url,
+		                  res->GetRequestError());
 	}
 	if (res->status != HTTPStatusCode::OK_200 && res->status != HTTPStatusCode::NoContent_204) {
-		throw GetHTTPError(*handle, *res, RequestType::DELETE_REQUEST, path);
+		throw S3RequestUtil::GetRequestError(request_result.context, *res);
 	}
 }
 

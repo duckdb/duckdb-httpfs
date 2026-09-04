@@ -273,6 +273,7 @@ public:
 		remaining_head_failures = config.failures.transient_head_failures;
 		remaining_head_not_found = config.failures.head_not_found_requests;
 		remaining_delete_failures = config.failures.transient_delete_failures;
+		remaining_delete_disconnects = config.failures.transient_delete_disconnects;
 		remaining_post_failures = config.failures.transient_post_failures;
 		remaining_completion_faults = config.failures.completion_fault.count;
 		if (config.range.behavior == MockS3RangeBehavior::SHORT_SUCCESS && config.range.behavior_requests > 0) {
@@ -887,7 +888,17 @@ public:
 			SendS3Error400(request, response, config.failures.failure_is_request_timeout);
 			return;
 		}
-		if (config.http_response.object_delete_body.empty()) {
+		if (remaining_delete_disconnects.load() > 0) {
+			remaining_delete_disconnects--;
+			SendDisconnectedResponse(request, response);
+			return;
+		}
+		if (config.http_response.object_delete_status != 0) {
+			response.status = config.http_response.object_delete_status;
+			if (!config.http_response.object_delete_body.empty()) {
+				response.set_content(config.http_response.object_delete_body, "application/xml");
+			}
+		} else if (config.http_response.object_delete_body.empty()) {
 			response.status = 204;
 		} else {
 			response.status = 200;
@@ -1217,6 +1228,7 @@ public:
 	mutable atomic<idx_t> remaining_head_failures {0};
 	mutable atomic<idx_t> remaining_head_not_found {0};
 	mutable atomic<idx_t> remaining_delete_failures {0};
+	mutable atomic<idx_t> remaining_delete_disconnects {0};
 	mutable atomic<idx_t> remaining_post_failures {0};
 	mutable atomic<idx_t> remaining_completion_faults {0};
 
