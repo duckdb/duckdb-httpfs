@@ -5,10 +5,12 @@
 
 namespace duckdb {
 
-struct S3Provider;
+class S3AuthParams;
+struct S3AuthResolver;
 
 class NormalizedS3Endpoint {
-	friend struct S3Provider;
+	friend class S3AuthParams;
+	friend struct S3AuthResolver;
 
 public:
 	NormalizedS3Endpoint() = default;

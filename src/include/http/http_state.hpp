@@ -16,6 +16,7 @@ namespace duckdb {
 
 class CachedFileHandle;
 class CachedFileDownload;
+enum class RequestType : uint8_t;
 
 enum class RangeRequestSupport : uint8_t { UNKNOWN, SUPPORTED, NOT_SUPPORTED };
 
@@ -216,22 +217,40 @@ private:
 	RangeRequestState range_request_state;
 };
 
+struct HTTPStateCounters {
+	//! Request counts
+	idx_t head_count = 0;
+	idx_t get_count = 0;
+	idx_t put_count = 0;
+	idx_t post_count = 0;
+	idx_t delete_count = 0;
+	idx_t options_count = 0;
+
+	//! Transferred bytes
+	idx_t total_bytes_received = 0;
+	idx_t total_bytes_sent = 0;
+
+	bool IsEmpty() const;
+};
+
 class HTTPState : public ClientContextState {
 public:
 	//! Reset all counters and per-path state
 	void Reset();
-	//! Get per-path state, creating it if needed
+	//! Record request and transfer statistics
+	void RecordRequest(RequestType request_type);
+	void RecordBytesReceived(idx_t byte_count);
+	void RecordBytesSent(idx_t byte_count);
+	HTTPStateCounters GetCounters() const;
+	bool IsEmpty() const;
+
+	//! Per-path state shared by HTTP file handles
 	shared_ptr<HTTPFileState> GetFileState(const string &path);
-	//! Erase all state for a path
 	void EraseFileState(const string &path);
+
 	//! Helper functions to get the HTTP state
 	static shared_ptr<HTTPState> TryGetState(ClientContext &context);
 	static shared_ptr<HTTPState> TryGetState(optional_ptr<FileOpener> opener);
-
-	bool IsEmpty() {
-		return head_count == 0 && get_count == 0 && put_count == 0 && post_count == 0 && delete_count == 0 &&
-		       total_bytes_received == 0 && total_bytes_sent == 0;
-	}
 
 	//! Called by the ClientContext when the current query ends
 	void QueryEnd(ClientContext &context) override {
@@ -240,12 +259,14 @@ public:
 	void WriteProfilingInformation(std::ostream &ss) override;
 	bool RunCredentialRefresh(const std::function<bool()> &callback) DUCKDB_EXCLUDES(credential_refresh_mutex);
 
-public:
+private:
+	//! Request and transfer statistics
 	atomic<idx_t> head_count {0};
 	atomic<idx_t> get_count {0};
 	atomic<idx_t> put_count {0};
 	atomic<idx_t> post_count {0};
 	atomic<idx_t> delete_count {0};
+	atomic<idx_t> options_count {0};
 	atomic<idx_t> total_bytes_received {0};
 	atomic<idx_t> total_bytes_sent {0};
 

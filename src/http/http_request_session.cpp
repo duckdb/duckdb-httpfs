@@ -15,19 +15,19 @@ bool HTTPRequestSnapshot::CanReuseClientsWith(const HTTPRequestSnapshot &other) 
 	       params.client_reuse_mode == other.params.client_reuse_mode;
 }
 
-unique_ptr<HTTPFSParams> HTTPRequestSnapshot::CreateRequestParams() const {
-	auto result = make_uniq<HTTPFSParams>(params);
-	result->pre_merged_headers = true;
-	return result;
-}
-
-void HTTPRequestSnapshot::AddConfiguredHeaders(HTTPHeaders &headers) const {
-	if (!params.user_agent.empty()) {
-		headers.Insert("User-Agent", params.user_agent);
+HTTPSessionRequest HTTPRequestSnapshot::CreateRequest(HTTPHeaders headers) const {
+	auto request_params = make_uniq<HTTPFSParams>(params);
+	HTTPConfiguredHeaders configured_headers {std::move(request_params->user_agent),
+	                                          std::move(request_params->extra_headers)};
+	request_params->user_agent.clear();
+	request_params->extra_headers.clear();
+	if (!configured_headers.user_agent.empty()) {
+		headers.Insert("User-Agent", configured_headers.user_agent);
 	}
-	for (const auto &header : params.extra_headers) {
+	for (const auto &header : configured_headers.extra_headers) {
 		headers[header.first] = header.second;
 	}
+	return {std::move(headers), std::move(request_params), std::move(configured_headers)};
 }
 
 HTTPClientLease::HTTPClientLease(shared_ptr<HTTPRequestSession> session_p, reference<HTTPUtil> http_util_p,

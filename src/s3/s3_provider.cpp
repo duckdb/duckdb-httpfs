@@ -57,7 +57,7 @@ static bool SchemeSyntaxIsValid(const string &scheme) {
 	return true;
 }
 
-Value S3Provider::NormalizeSchemeAliases(const Value &aliases) {
+Value S3UrlScheme::NormalizeAliases(const Value &aliases) {
 	vector<Value> normalized;
 	vector<string> seen;
 	if (aliases.IsNull()) {
@@ -88,7 +88,7 @@ Value S3Provider::NormalizeSchemeAliases(const Value &aliases) {
 	return Value::LIST(LogicalType::VARCHAR, std::move(normalized));
 }
 
-vector<string> S3Provider::GetSchemeAliasPrefixes(const DBConfig &config) {
+vector<string> S3UrlScheme::GetAliasPrefixes(const DBConfig &config) {
 	Value value;
 	if (!config.TryGetCurrentSetting("s3_url_scheme_aliases", value) || value.IsNull() ||
 	    value.type().id() != LogicalTypeId::LIST) {
@@ -110,13 +110,13 @@ vector<string> S3Provider::GetSchemeAliasPrefixes(const DBConfig &config) {
 	return result;
 }
 
-const array<const char *, 4> &S3Provider::SecretTypes() {
+const array<const char *, 4> &S3SecretConfig::SecretTypes() {
 	static constexpr array<const char *, 4> SECRET_TYPES = {S3_SECRET_TYPE, R2_SECRET_TYPE, GCS_SECRET_TYPE,
 	                                                        AWS_SECRET_TYPE};
 	return SECRET_TYPES;
 }
 
-const array<const char *, 13> &S3Provider::CredentialMaterialKeys() {
+const array<const char *, 13> &S3SecretConfig::CredentialMaterialKeys() {
 	static constexpr array<const char *, 13> CREDENTIAL_MATERIAL_KEYS = {
 	    "key_id",    "secret",  "session_token",          "region",         "endpoint",     "kms_key_id",
 	    "url_style", "use_ssl", "url_compatibility_mode", "requester_pays", "bearer_token", "user_project",
@@ -124,7 +124,7 @@ const array<const char *, 13> &S3Provider::CredentialMaterialKeys() {
 	return CREDENTIAL_MATERIAL_KEYS;
 }
 
-optional<S3ProviderMatch> S3Provider::TryMatchUrl(const string &url) {
+optional<S3ProviderMatch> S3UrlScheme::TryMatch(const string &url) {
 	auto lower_url = StringUtil::Lower(url);
 	for (const auto &provider_match : ProviderMatches()) {
 		if (StringUtil::StartsWith(lower_url, provider_match.prefix)) {
@@ -134,8 +134,8 @@ optional<S3ProviderMatch> S3Provider::TryMatchUrl(const string &url) {
 	return {};
 }
 
-optional<S3ProviderMatch> S3Provider::TryMatchUrl(const string &url, const vector<string> &scheme_alias_prefixes) {
-	auto provider_match = TryMatchUrl(url);
+optional<S3ProviderMatch> S3UrlScheme::TryMatch(const string &url, const vector<string> &scheme_alias_prefixes) {
+	auto provider_match = TryMatch(url);
 	if (provider_match) {
 		return provider_match;
 	}
@@ -143,14 +143,14 @@ optional<S3ProviderMatch> S3Provider::TryMatchUrl(const string &url, const vecto
 	auto lower_url = StringUtil::Lower(url);
 	for (auto &prefix : scheme_alias_prefixes) {
 		if (StringUtil::StartsWith(lower_url, prefix)) {
-			return S3ProviderMatch {S3ProviderType::S3, prefix};
+			return S3ProviderMatch {S3ProviderType::S3, prefix, S3UrlSchemeOrigin::ALIAS};
 		}
 	}
 	return {};
 }
 
-S3ProviderMatch S3Provider::MatchUrl(const string &url) {
-	auto provider_match = TryMatchUrl(url);
+S3ProviderMatch S3UrlScheme::Match(const string &url) {
+	auto provider_match = TryMatch(url);
 	if (!provider_match) {
 		vector<string> prefixes;
 		for (const auto &entry : ProviderMatches()) {
@@ -162,7 +162,19 @@ S3ProviderMatch S3Provider::MatchUrl(const string &url) {
 	return *provider_match;
 }
 
-vector<string> S3Provider::DefaultSecretScope(const string &secret_type) {
+S3ProviderMatch S3UrlScheme::MatchRoutedUrl(const string &url) {
+	auto provider_match = TryMatch(url);
+	if (provider_match) {
+		return *provider_match;
+	}
+	auto scheme_end = url.find("://");
+	if (scheme_end == string::npos) {
+		return Match(url);
+	}
+	return {S3ProviderType::S3, StringUtil::Lower(url.substr(0, scheme_end + 3)), S3UrlSchemeOrigin::ALIAS};
+}
+
+vector<string> S3SecretConfig::DefaultSecretScope(const string &secret_type) {
 	if (secret_type == S3_SECRET_TYPE) {
 		return {"s3://", "s3n://", "s3a://"};
 	}
@@ -178,7 +190,7 @@ vector<string> S3Provider::DefaultSecretScope(const string &secret_type) {
 	throw InternalException("Unknown secret type found in httpfs extension: '%s'", secret_type);
 }
 
-void S3Provider::SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function) {
+void S3SecretConfig::SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function) {
 	if (secret_type == R2_SECRET_TYPE) {
 		function.named_parameters["account_id"] = LogicalType::VARCHAR;
 	} else if (secret_type == GCS_SECRET_TYPE) {
@@ -187,7 +199,7 @@ void S3Provider::SetSecretNamedParameters(const string &secret_type, CreateSecre
 	}
 }
 
-void S3Provider::ApplySecretDefaults(const CreateSecretInput &input, KeyValueSecret &secret) {
+void S3SecretConfig::ApplySecretDefaults(const CreateSecretInput &input, KeyValueSecret &secret) {
 	if (input.type != R2_SECRET_TYPE) {
 		return;
 	}
@@ -199,8 +211,8 @@ void S3Provider::ApplySecretDefaults(const CreateSecretInput &input, KeyValueSec
 	secret.secret_map["url_style"] = "path";
 }
 
-bool S3Provider::TryApplySecretOption(const CreateSecretInput &input, const string &name, const Value &value,
-                                      KeyValueSecret &secret) {
+bool S3SecretConfig::TryApplySecretOption(const CreateSecretInput &input, const string &name, const Value &value,
+                                          KeyValueSecret &secret) {
 	if (name == "account_id" && input.type == R2_SECRET_TYPE) {
 		return true;
 	}
@@ -216,130 +228,19 @@ bool S3Provider::TryApplySecretOption(const CreateSecretInput &input, const stri
 	return false;
 }
 
-void S3Provider::ReadAuthParams(S3KeyValueReader &secret_reader, const string &file_path, S3AuthParams &result) {
-	// Routing already accepted the path, so a non-built-in scheme is an alias served by plain S3
-	auto provider_match = TryMatchUrl(file_path);
-	result.provider_type = provider_match ? provider_match->type : S3ProviderType::S3;
-	result.scheme_is_alias = !provider_match;
-	secret_reader.TryGetSecretKeyOrSetting("region", "s3_region", result.region);
-	secret_reader.TryGetSecretKeyOrSetting("key_id", "s3_access_key_id", result.access_key_id);
-	secret_reader.TryGetSecretKeyOrSetting("secret", "s3_secret_access_key", result.secret_access_key);
-	secret_reader.TryGetSecretKeyOrSetting("session_token", "s3_session_token", result.session_token);
-	secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", result.use_ssl);
-	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", result.kms_key_id);
-	secret_reader.TryGetSecretKeysOrSetting("url_compatibility_mode", "s3_url_compatibility_mode",
-	                                        "s3_url_compatibility_mode", result.s3_url_compatibility_mode);
-	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays", result.requester_pays);
-
-	string endpoint;
-	auto endpoint_result = secret_reader.TryGetSecretKeyOrSetting("endpoint", "s3_endpoint", endpoint);
-	auto url_style_result = secret_reader.TryGetSecretKeyOrSetting("url_style", "s3_url_style", result.url_style);
-	if (result.provider_type == S3ProviderType::GCS) {
-		if (endpoint_result && endpoint_result.GetScope() == SettingScope::SECRET) {
-			result.SetEndpoint(std::move(endpoint));
-		}
-		if (result.url_style.empty() || !url_style_result || url_style_result.GetScope() != SettingScope::SECRET) {
-			result.url_style = "path";
-		}
-		secret_reader.TryGetSecretKeyOrSetting("user_project", "gcs_user_project", result.user_project);
-		secret_reader.TryGetSecretKey("bearer_token", result.oauth2_bearer_token);
-	} else {
-		result.SetEndpoint(std::move(endpoint));
-	}
-	InitializeAuthParams(result);
+S3Provider::S3Provider() : S3Provider(S3ProviderMatch {S3ProviderType::S3, "s3://"}, S3CompatibilityProfile::S3) {
 }
 
-static bool EndpointIsAWS(const NormalizedS3Endpoint &endpoint) {
-	if (endpoint.IsEmpty()) {
-		return true;
-	}
-	return StringUtil::StartsWith(endpoint.GetHost(), "s3.") &&
-	       StringUtil::EndsWith(endpoint.GetHost(), ".amazonaws.com");
+S3Provider::S3Provider(S3ProviderMatch route_p, S3CompatibilityProfile profile_p)
+    : route(std::move(route_p)), profile(profile_p) {
 }
 
-//! Not AWS, so deriving an AWS endpoint would sign a request to the wrong host
-static bool RequiresExplicitEndpoint(const S3AuthParams &auth_params) {
-	return auth_params.scheme_is_alias || auth_params.provider_type == S3ProviderType::R2;
-}
-
-static bool EndpointIsUnresolved(const string &endpoint_source) {
-	auto endpoint = endpoint_source;
-	StringUtil::Trim(endpoint);
-	return endpoint.empty();
-}
-
-void S3Provider::InitializeAuthParams(S3AuthParams &auth_params) {
-	if (auth_params.provider_type == S3ProviderType::GCS) {
-		if (EndpointIsUnresolved(auth_params.endpoint_source)) {
-			auth_params.endpoint_source = "storage.googleapis.com";
-			auth_params.endpoint = NormalizedS3Endpoint();
-			auth_params.endpoint_mode = S3EndpointMode::AUTOMATIC;
-		}
-		if (auth_params.url_style.empty()) {
-			auth_params.url_style = "path";
-		}
-		if (auth_params.region.empty() && GetAuthType(auth_params) == S3AuthType::SIGV4) {
-			auth_params.region = "auto";
-		}
-	}
-	ParseURLStyle(auth_params.url_style);
-}
-
-void S3Provider::FinalizeAuthParams(S3AuthParams &auth_params) {
-	InitializeAuthParams(auth_params);
-	if (auth_params.provider_type == S3ProviderType::GCS && auth_params.requester_pays &&
-	    auth_params.user_project.empty()) {
-		throw InvalidInputException(
-		    "GCS Requester Pays requires a billing project; set USER_PROJECT in the GCS secret, "
-		    "set gcs_user_project, or pass gcs_user_project in the URL.");
-	}
-	if (RequiresExplicitEndpoint(auth_params) && EndpointIsUnresolved(auth_params.endpoint_source)) {
-		if (auth_params.provider_type == S3ProviderType::R2) {
-			throw IOException("R2 requires an endpoint; provide account_id in the secret or s3_endpoint in the URL");
-		}
-		throw IOException("An aliased URL scheme requires an endpoint; provide ENDPOINT in the secret, set "
-		                  "s3_endpoint, or pass s3_endpoint in the URL");
-	}
-
-	auto endpoint = NormalizedS3Endpoint::Parse(auth_params.endpoint_source, auth_params.use_ssl);
-	if (auth_params.provider_type == S3ProviderType::S3 && !auth_params.scheme_is_alias &&
-	    endpoint.GetHost() == "s3.amazonaws.com" && endpoint.GetBasePath().empty() && endpoint.IsDefaultPort()) {
-		auth_params.endpoint_mode = S3EndpointMode::AUTOMATIC;
-	}
-	if (auth_params.provider_type == S3ProviderType::S3 &&
-	    (auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC || EndpointIsAWS(endpoint))) {
-		if (auth_params.region.empty()) {
-			if (auth_params.access_key_id.empty()) {
-				if (auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC) {
-					endpoint.SetHost("s3.amazonaws.com");
-				}
-			} else {
-				auth_params.region = "us-east-1";
-			}
-		}
-		if (auth_params.endpoint_mode == S3EndpointMode::AUTOMATIC && !auth_params.region.empty()) {
-			endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", auth_params.region));
-		}
-	}
-	auth_params.endpoint = std::move(endpoint);
-}
-
-S3URLStyle S3Provider::ParseURLStyle(const string &url_style) {
-	if (url_style.empty() || url_style == "vhost" || url_style == "virtual") {
-		return S3URLStyle::VIRTUAL_HOSTED;
-	}
-	if (url_style == "path") {
-		return S3URLStyle::PATH;
-	}
-	throw InvalidInputException("Invalid S3 URL style '%s': expected 'vhost', 'virtual', 'path', or an empty string",
-	                            url_style);
-}
-
-S3AuthType S3Provider::GetAuthType(const S3AuthParams &auth_params) {
-	if (auth_params.provider_type == S3ProviderType::GCS && !auth_params.oauth2_bearer_token.empty()) {
+S3AuthType S3Provider::GetAuthType(const S3AuthParams &auth_params) const {
+	auto &credentials = auth_params.GetCredentials();
+	if (GetType() == S3ProviderType::GCS && !credentials.oauth2_bearer_token.empty()) {
 		return S3AuthType::BEARER;
 	}
-	if (auth_params.secret_access_key.empty() && auth_params.access_key_id.empty()) {
+	if (credentials.secret_access_key.empty() && credentials.access_key_id.empty()) {
 		return S3AuthType::ANONYMOUS;
 	}
 	return S3AuthType::SIGV4;
@@ -363,9 +264,14 @@ static bool EndpointIsR2(const NormalizedS3Endpoint &endpoint) {
 	return jurisdiction == "eu" || jurisdiction == "us" || jurisdiction == "fedramp";
 }
 
-static bool UsesR2CompatibilityProfile(const S3AuthParams &auth_params) {
-	return auth_params.provider_type == S3ProviderType::R2 ||
-	       (auth_params.provider_type == S3ProviderType::S3 && EndpointIsR2(auth_params.GetEndpoint()));
+S3Provider S3Provider::Resolve(S3ProviderMatch route, const NormalizedS3Endpoint &endpoint) {
+	auto profile = S3CompatibilityProfile::S3;
+	if (route.type == S3ProviderType::GCS) {
+		profile = S3CompatibilityProfile::GCS;
+	} else if (route.type == S3ProviderType::R2 || EndpointIsR2(endpoint)) {
+		profile = S3CompatibilityProfile::R2;
+	}
+	return S3Provider(std::move(route), profile);
 }
 
 static S3MultipartUploadPolicy DefaultMultipartUploadPolicy() {
@@ -382,26 +288,27 @@ static S3MultipartUploadPolicy R2MultipartUploadPolicy() {
 	return {S3MultipartPartSizeStrategy::FIXED, 8ULL * MIB, MAXIMUM_PART_SIZE, 10000, MAXIMUM_OBJECT_SIZE};
 }
 
-S3MultipartUploadPolicy S3Provider::GetMultipartUploadPolicy(const S3AuthParams &auth_params) {
-	if (UsesR2CompatibilityProfile(auth_params)) {
+S3MultipartUploadPolicy S3Provider::GetMultipartUploadPolicy() const {
+	if (profile == S3CompatibilityProfile::R2) {
 		return R2MultipartUploadPolicy();
 	}
 	return DefaultMultipartUploadPolicy();
 }
 
-idx_t S3Provider::GetBulkDeleteMaxBatchSize(const S3AuthParams &auth_params) {
-	return UsesR2CompatibilityProfile(auth_params) ? 700 : 1000;
+idx_t S3Provider::GetBulkDeleteMaxBatchSize() const {
+	return profile == S3CompatibilityProfile::R2 ? 700 : 1000;
 }
 
-string S3Provider::GetBadRequestError(const S3AuthParams &auth_params, const string &correct_region) {
-	if (auth_params.provider_type != S3ProviderType::S3) {
+string S3Provider::GetBadRequestError(const S3AuthParams &auth_params, const string &correct_region) const {
+	if (GetType() != S3ProviderType::S3) {
 		return {};
 	}
+	auto &credentials = auth_params.GetCredentials();
 	string extra_text = "\n\nBad Request - this can be caused by the S3 region being set incorrectly.";
-	if (auth_params.region.empty()) {
+	if (credentials.region.empty()) {
 		extra_text += "\n* No region is provided.";
 	} else {
-		extra_text += "\n* Provided region is: \"" + auth_params.region + "\"";
+		extra_text += "\n* Provided region is: \"" + credentials.region + "\"";
 	}
 	if (!correct_region.empty()) {
 		extra_text += "\n* Correct region is: \"" + correct_region + "\"";
@@ -409,15 +316,16 @@ string S3Provider::GetBadRequestError(const S3AuthParams &auth_params, const str
 	return extra_text;
 }
 
-string S3Provider::GetAuthError(const S3AuthParams &auth_params) {
-	if (auth_params.provider_type == S3ProviderType::GCS) {
+string S3Provider::GetAuthError(const S3AuthParams &auth_params) const {
+	auto &credentials = auth_params.GetCredentials();
+	if (GetType() == S3ProviderType::GCS) {
 		string extra_text = "\n\nAuthentication Failure - GCS authentication failed.";
-		if (auth_params.oauth2_bearer_token.empty() && auth_params.secret_access_key.empty() &&
-		    auth_params.access_key_id.empty()) {
+		if (credentials.oauth2_bearer_token.empty() && credentials.secret_access_key.empty() &&
+		    credentials.access_key_id.empty()) {
 			extra_text += "\n* No credentials provided.";
 			extra_text += "\n* For OAuth2: CREATE SECRET (TYPE GCS, bearer_token 'your-token')";
 			extra_text += "\n* For HMAC: CREATE SECRET (TYPE GCS, key_id 'key', secret 'secret')";
-		} else if (!auth_params.oauth2_bearer_token.empty()) {
+		} else if (!credentials.oauth2_bearer_token.empty()) {
 			extra_text += "\n* Bearer token was provided but authentication failed.";
 			extra_text += "\n* Ensure your OAuth2 token is valid and not expired.";
 		} else {
@@ -426,9 +334,9 @@ string S3Provider::GetAuthError(const S3AuthParams &auth_params) {
 		}
 		return extra_text;
 	}
-	if (auth_params.provider_type == S3ProviderType::R2) {
+	if (GetType() == S3ProviderType::R2) {
 		string extra_text = "\n\nAuthentication Failure - R2 authentication failed.";
-		if (auth_params.secret_access_key.empty() && auth_params.access_key_id.empty()) {
+		if (credentials.secret_access_key.empty() && credentials.access_key_id.empty()) {
 			extra_text += "\n* No credentials are provided.";
 			extra_text += "\n* Create an R2 secret with account_id, key_id, and secret.";
 		} else {
@@ -438,13 +346,18 @@ string S3Provider::GetAuthError(const S3AuthParams &auth_params) {
 	}
 
 	string extra_text = "\n\nAuthentication Failure - this is usually caused by invalid or missing credentials.";
-	if (auth_params.secret_access_key.empty() && auth_params.access_key_id.empty()) {
+	if (credentials.secret_access_key.empty() && credentials.access_key_id.empty()) {
 		extra_text += "\n* No credentials are provided.";
 	} else {
 		extra_text += "\n* Credentials are provided, but they did not work.";
 	}
 	extra_text += "\n* See https://duckdb.org/docs/stable/extensions/httpfs/s3api.html";
 	return extra_text;
+}
+
+bool S3Provider::operator==(const S3Provider &other) const {
+	return route.type == other.route.type && route.prefix == other.route.prefix && route.origin == other.route.origin &&
+	       profile == other.profile;
 }
 
 } // namespace duckdb

@@ -70,6 +70,13 @@ struct MockS3MetadataConfig {
 	bool enforce_if_match = false;
 	//! Override the Content-Length reported by HEAD while keeping the GET body unchanged
 	optional_idx head_content_length;
+	//! Extra HEAD response headers, including repeated field lines
+	vector<std::pair<string, string>> response_headers;
+	//! Write empty response fields without optional whitespace after the colon
+	bool exact_empty_response_headers = false;
+	//! Emit one HTTP redirect before the successful HEAD response
+	bool redirect_head = false;
+	vector<std::pair<string, string>> redirect_response_headers;
 };
 
 struct MockS3CompletionFaultConfig {
@@ -147,6 +154,12 @@ struct MockS3PutResponseConfig {
 	MockS3ETagBehavior etag = MockS3ETagBehavior::VALUE;
 };
 
+struct MockS3HTTPResponseConfig {
+	string object_put_body;
+	string object_delete_body;
+	string options_body;
+};
+
 struct MockS3UploadConfig {
 	//! PUT response behavior
 	MockS3PutResponseConfig object_put;
@@ -182,6 +195,7 @@ struct MockS3ServerConfig {
 	MockS3RangeConfig range;
 	MockS3FullGetConfig full_get;
 	MockS3UploadConfig upload;
+	MockS3HTTPResponseConfig http_response;
 };
 
 struct MockS3RequestObservation {

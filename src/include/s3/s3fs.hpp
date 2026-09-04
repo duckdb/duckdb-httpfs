@@ -115,22 +115,21 @@ public:
 	unique_ptr<HTTPResponse> GetRangeRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
 	                                         const HTTPReadConfig &read_config, idx_t file_offset,
 	                                         data_ptr_t buffer_out, idx_t buffer_out_len) override;
-	unique_ptr<HTTPResponse> PostRequest(HTTPRequestSession &session, const string &s3_url, string &buffer_out,
-	                                     const_data_ptr_t buffer_in, idx_t buffer_in_len,
-	                                     const S3RequestQuery &query = S3RequestQuery(),
-	                                     S3PostRequestMode mode = S3PostRequestMode::DEFAULT,
-	                                     optional_ptr<S3RequestContext> request_context = nullptr);
-	unique_ptr<HTTPResponse> PutRequest(HTTPRequestSession &session, const string &s3_url, const_data_ptr_t buffer_in,
-	                                    idx_t buffer_in_len, const S3RequestQuery &query = S3RequestQuery(),
-	                                    optional_ptr<S3RequestContext> request_context = nullptr);
-	unique_ptr<HTTPResponse> DeleteRequest(HTTPRequestSession &session, const string &s3_url,
-	                                       const S3RequestQuery &query,
-	                                       optional_ptr<S3RequestContext> request_context = nullptr);
+	S3RequestResult PostRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
+	                            string &buffer_out, const_data_ptr_t buffer_in, idx_t buffer_in_len,
+	                            const S3RequestQuery &query = S3RequestQuery());
+	S3RequestResult PutRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
+	                           const_data_ptr_t buffer_in, idx_t buffer_in_len,
+	                           const S3RequestQuery &query = S3RequestQuery());
+	S3RequestResult DeleteRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
+	                              const S3RequestQuery &query);
 	unique_ptr<HTTPResponse> DeleteRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) override;
 	HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, RequestType request_type,
 	                           const string &url) override;
 
+	//! Database services used by S3 requests and uploads.
 	EncryptionUtil &GetEncryptionUtil();
+	BufferManager &GetBufferManager();
 
 protected:
 	//! FileSystem extension points for S3 open/list/glob.
@@ -144,11 +143,10 @@ protected:
 	                                        optional_ptr<FileOpener> opener) override;
 
 private:
-	unique_ptr<HTTPResponse> RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
-	                                                const string &body, idx_t key_count, string &result,
-	                                                optional_ptr<S3RequestContext> request_context = nullptr);
+	S3RequestResult RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
+	                                       const string &body, idx_t key_count, string &result);
 
-public:
+	//! Database-owned buffer manager.
 	BufferManager &buffer_manager;
 };
 } // namespace duckdb

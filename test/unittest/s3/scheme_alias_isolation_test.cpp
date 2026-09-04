@@ -64,33 +64,28 @@ TEST_CASE("a required endpoint may arrive from any source, but must arrive", "[h
 	// Resolve() runs the real ordering: parse, apply url query parameters, then finalize
 	static constexpr EndpointCase CASES[] = {{"oss://bucket/key", true}, {"r2://bucket/key", false}};
 
-	auto make_params = [](const EndpointCase &test_case) {
-		S3AuthParams params;
-		if (test_case.is_alias) {
-			params.scheme_is_alias = true;
-		} else {
-			params.provider_type = S3ProviderType::R2;
-		}
-		return params;
+	auto make_config = [](const EndpointCase &test_case) {
+		S3AuthConfig config;
+		config.route = test_case.is_alias ? S3ProviderMatch {S3ProviderType::S3, "oss://", S3UrlSchemeOrigin::ALIAS}
+		                                  : S3UrlScheme::Match("r2://");
+		return config;
 	};
 
 	SECTION("no source supplies one") {
 		for (auto &test_case : CASES) {
-			auto params = make_params(test_case);
-			// Reading secrets and settings leaves it unresolved rather than deriving an AWS endpoint
-			S3Provider::InitializeAuthParams(params);
-			REQUIRE(params.GetEndpoint().IsEmpty());
-			REQUIRE_THROWS(S3Url::Resolve(test_case.url, params));
+			auto config = make_config(test_case);
+			REQUIRE(config.endpoint.empty());
+			REQUIRE_THROWS(S3AuthResolver::Resolve(std::move(config), test_case.url));
 		}
 	}
 
 	SECTION("only the url supplies one") {
 		for (auto &test_case : CASES) {
-			auto params = make_params(test_case);
-			S3Provider::InitializeAuthParams(params);
-			auto parsed = S3Url::Resolve(string(test_case.url) + "?s3_endpoint=storage.example.com", params);
-			REQUIRE(params.GetEndpoint().GetHost() == "storage.example.com");
-			REQUIRE(params.endpoint_mode == S3EndpointMode::EXPLICIT);
+			auto params = S3AuthResolver::Resolve(make_config(test_case),
+			                                      string(test_case.url) + "?s3_endpoint=storage.example.com");
+			auto parsed = S3Url::Parse(test_case.url, params);
+			REQUIRE(params.GetURLParams().endpoint.GetHost() == "storage.example.com");
+			REQUIRE(params.GetURLParams().endpoint_mode == S3EndpointMode::EXPLICIT);
 			REQUIRE(parsed.GetHost() == "bucket.storage.example.com");
 		}
 	}
@@ -98,19 +93,20 @@ TEST_CASE("a required endpoint may arrive from any source, but must arrive", "[h
 	SECTION("the url clears one supplied by a secret or setting") {
 		for (auto &test_case : CASES) {
 			for (const auto &cleared : {"", "%20"}) {
-				auto params = make_params(test_case);
-				params.SetEndpoint("storage.example.com");
-				S3Provider::InitializeAuthParams(params);
-				REQUIRE_THROWS(S3Url::Resolve(string(test_case.url) + "?s3_endpoint=" + cleared, params));
+				auto config = make_config(test_case);
+				config.endpoint = "storage.example.com";
+				config.endpoint_mode = S3EndpointMode::EXPLICIT;
+				REQUIRE_THROWS(
+				    S3AuthResolver::Resolve(std::move(config), string(test_case.url) + "?s3_endpoint=" + cleared));
 			}
 		}
 	}
 
 	SECTION("built-in s3 still derives the AWS default") {
-		S3AuthParams params;
-		S3Provider::InitializeAuthParams(params);
-		S3Provider::FinalizeAuthParams(params);
-		REQUIRE(params.GetEndpoint().GetHost() == "s3.amazonaws.com");
+		S3AuthConfig config;
+		config.route = S3UrlScheme::Match("s3://");
+		auto params = S3AuthResolver::Resolve(std::move(config), "s3://bucket/key");
+		REQUIRE(params.GetURLParams().endpoint.GetHost() == "s3.amazonaws.com");
 	}
 }
 

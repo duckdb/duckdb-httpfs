@@ -90,8 +90,8 @@ void HTTPClientConnectionCache::Clear() {
 // HTTPFSCurlUtil — connection caching
 //===--------------------------------------------------------------------===//
 
-bool HTTPFSCurlUtil::EnableCaching(BaseRequest &request) {
-	if (!connection_caching_enabled) {
+bool HTTPFSCurlUtil::EnableCaching(const BaseRequest &request) const {
+	if (!ConnectionCachingEnabled()) {
 		return false;
 	}
 	if (!request.params.http_proxy.empty()) {
@@ -100,21 +100,54 @@ bool HTTPFSCurlUtil::EnableCaching(BaseRequest &request) {
 	return true;
 }
 
+bool HTTPFSCurlUtil::ConnectionCachingEnabled() const {
+	return connection_caching_enabled.load();
+}
+
+unique_ptr<HTTPClient> HTTPFSCurlUtil::FindCachedClient(const string &base_url) {
+	if (!ConnectionCachingEnabled()) {
+		return nullptr;
+	}
+	auto client = connection_cache.Find(base_url);
+	if (!ConnectionCachingEnabled()) {
+		client.reset();
+	}
+	return client;
+}
+
+void HTTPFSCurlUtil::StoreCachedClient(unique_ptr<HTTPClient> &&client) {
+	if (!ConnectionCachingEnabled()) {
+		client.reset();
+		return;
+	}
+	connection_cache.Store(std::move(client));
+	if (!ConnectionCachingEnabled()) {
+		connection_cache.Clear();
+	}
+}
+
 void HTTPFSCurlUtil::ClearCachedConnections() {
 	connection_cache.Clear();
 }
 
 HTTPClientReuseMode HTTPFSCurlUtil::GetClientReuseMode() const {
-	return connection_caching_enabled ? HTTPClientReuseMode::SHARED : HTTPClientReuseMode::SESSION_LOCAL;
+	return ConnectionCachingEnabled() ? HTTPClientReuseMode::SHARED : HTTPClientReuseMode::SESSION_LOCAL;
+}
+
+void HTTPFSCurlUtil::SetConnectionCachingEnabled(bool enabled) {
+	connection_caching_enabled.store(enabled);
+	if (!enabled) {
+		ClearCachedConnections();
+	}
 }
 
 void HTTPFSCurlUtil::CloseClient(unique_ptr<HTTPClient> &&client) {
-	if (!client || !connection_caching_enabled) {
+	if (!client) {
 		return;
 	}
 	client->Cleanup();
 	// TODO: would be nice to log connection_cache_store here, but no logger is available at this call site
-	connection_cache.Store(std::move(client));
+	StoreCachedClient(std::move(client));
 }
 
 unique_ptr<HTTPResponse> HTTPFSCurlUtil::BaseSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) {
@@ -125,7 +158,7 @@ unique_ptr<HTTPResponse> HTTPFSCurlUtil::CachingSendRequest(BaseRequest &request
 	bool caller_owns_client = client != nullptr;
 
 	if (!client) {
-		auto cached_client = connection_cache.Find(request.proto_host_port);
+		auto cached_client = FindCachedClient(request.proto_host_port);
 		if (cached_client) {
 			if (request.params.logger &&
 			    request.params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
@@ -150,7 +183,7 @@ unique_ptr<HTTPResponse> HTTPFSCurlUtil::CachingSendRequest(BaseRequest &request
 	// Only cache if the caller didn't provide the client — otherwise the caller manages its lifecycle
 	if (!caller_owns_client) {
 		if (r && !r->HasRequestError()) {
-			connection_cache.Store(std::move(client));
+			StoreCachedClient(std::move(client));
 		} else {
 			client.reset();
 		}

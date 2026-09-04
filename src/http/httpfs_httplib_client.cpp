@@ -32,7 +32,7 @@ private:
 			auto chunk_size = NumericCast<idx_t>(data_length);
 			total_bytes += chunk_size;
 			if (client.state) {
-				client.state->total_bytes_received += chunk_size;
+				client.state->RecordBytesReceived(chunk_size);
 			}
 			if (deferred_response) {
 				deferred_response->body.append(data, data_length);
@@ -132,15 +132,11 @@ public:
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
-			state->get_count++;
+			state->RecordRequest(RequestType::GET_REQUEST);
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
 		if (!info.response_handler && !info.content_handler) {
-			auto result = TransformResult(client->Get(info.path, headers));
-			if (state) {
-				state->total_bytes_received += result->body.size();
-			}
-			return result;
+			return TransformBufferedResult(client->Get(info.path, headers));
 		}
 		GetTransferState transfer(*this, info);
 		auto result = client->Get(
@@ -152,8 +148,8 @@ public:
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
-			state->put_count++;
-			state->total_bytes_sent += info.buffer_in_len;
+			state->RecordRequest(RequestType::PUT_REQUEST);
+			state->RecordBytesSent(info.buffer_in_len);
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
 		auto body_size = NumericCast<size_t>(info.buffer_in_len);
@@ -165,38 +161,41 @@ public:
 			}
 			return sink.write(const_char_ptr_cast(body + NumericCast<idx_t>(offset)), length);
 		};
-		return TransformResult(
+		return TransformBufferedResult(
 		    client->Put(info.path, headers, body_size, std::move(content_provider), info.content_type));
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
-			state->head_count++;
+			state->RecordRequest(RequestType::HEAD_REQUEST);
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
-		return TransformResult(client->Head(info.path, headers));
+		return TransformBufferedResult(client->Head(info.path, headers));
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
-			state->delete_count++;
+			state->RecordRequest(RequestType::DELETE_REQUEST);
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
-		return TransformResult(client->Delete(info.path, headers));
+		return TransformBufferedResult(client->Delete(info.path, headers));
 	}
 
 	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
+		if (state) {
+			state->RecordRequest(RequestType::OPTIONS_REQUEST);
+		}
 		auto headers = TransformHeaders(info.headers, info.params);
-		return TransformResult(client->Options(info.path, headers));
+		return TransformBufferedResult(client->Options(info.path, headers));
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
-			state->post_count++;
-			state->total_bytes_sent += info.buffer_in_len;
+			state->RecordRequest(RequestType::POST_REQUEST);
+			state->RecordBytesSent(info.buffer_in_len);
 		}
 		// We use a custom Request method here, because there is no Post call with a contentreceiver in httplib
 		duckdb_httplib_openssl::Request req;
@@ -212,9 +211,6 @@ public:
 		}
 		req.content_receiver = [&](const char *data, size_t data_length, uint64_t /*offset*/,
 		                           uint64_t /*total_length*/) {
-			if (state) {
-				state->total_bytes_received += data_length;
-			}
 			info.buffer_out += string(data, data_length);
 			return true;
 		};
@@ -222,21 +218,20 @@ public:
 		req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
 		auto transformed_req = TransformResult(client->send(req));
 		transformed_req->body = info.buffer_out;
+		if (state) {
+			state->RecordBytesReceived(info.buffer_out.size());
+		}
 		return transformed_req;
 	}
 
 private:
 	static duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
-		auto &httpfs_params = params.Cast<HTTPFSParams>();
-
 		duckdb_httplib_openssl::Headers headers;
 		for (auto &entry : header_map) {
 			headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
 		}
-		if (!httpfs_params.pre_merged_headers) {
-			for (auto &entry : params.extra_headers) {
-				headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
-			}
+		for (auto &entry : params.extra_headers) {
+			headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
 		}
 		return headers;
 	}
@@ -261,6 +256,14 @@ private:
 			result->request_error = to_string(res.error());
 			return result;
 		}
+	}
+
+	unique_ptr<HTTPResponse> TransformBufferedResult(const duckdb_httplib_openssl::Result &res) {
+		auto response = TransformResult(res);
+		if (state) {
+			state->RecordBytesReceived(response->body.size());
+		}
+		return response;
 	}
 
 private:

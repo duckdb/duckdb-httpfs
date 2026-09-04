@@ -35,10 +35,9 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
                            optional<S3MultipartUploadPolicy> multipart_upload_policy)
     : HTTPFileHandle(fs, file, flags, std::move(http_params_p)) {
 	auto captured = request_session->Capture();
-	auto request_params = captured.snapshot->CreateRequestParams();
 	request_session->TryPublish(captured.snapshot,
-	                            make_shared_ptr<S3RequestSnapshot>(*request_params, auth_params_p, file.path,
-	                                                               weak_ptr<ClientContext>(), true, false, 0,
+	                            make_shared_ptr<S3RequestSnapshot>(captured.snapshot->Params(), auth_params_p,
+	                                                               file.path, weak_ptr<ClientContext>(), true, false, 0,
 	                                                               std::move(multipart_upload_policy)));
 	auto_fallback_to_full_file_download = false;
 	if (flags.OpenForReading() && flags.OpenForWriting()) {
@@ -169,26 +168,28 @@ void S3FileHandle::AbortUpload() {
 }
 
 EncryptionUtil &S3FileSystem::GetEncryptionUtil() {
-	auto &config = DBConfig::GetConfig(buffer_manager.GetDatabase());
+	auto &config = DBConfig::GetConfig(GetBufferManager().GetDatabase());
 	if (!config.encryption_util) {
 		throw InternalException("HTTPFS encryption util has not been initialized");
 	}
 	return *config.encryption_util;
 }
 
+BufferManager &S3FileSystem::GetBufferManager() {
+	return buffer_manager;
+}
+
 unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                       optional_ptr<FileOpener> opener) {
 	FileOpenerInfo info = {file.path};
-	S3AuthParams auth_params = S3AuthParams::ReadFrom(opener, info);
-
-	S3Url::Resolve(file.path, auth_params);
+	auto auth_params = S3AuthResolver::Resolve(opener, info);
 
 	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
 	auto params = http_util.InitializeParameters(opener, info);
 	S3UploadConfig upload_config;
 	optional<S3MultipartUploadPolicy> multipart_upload_policy;
 	if (flags.OpenForWriting()) {
-		multipart_upload_policy = S3Provider::GetMultipartUploadPolicy(auth_params);
+		multipart_upload_policy = auth_params.GetProvider().GetMultipartUploadPolicy();
 		upload_config = S3UploadConfig::ReadFrom(opener, *multipart_upload_policy);
 	}
 
@@ -209,8 +210,8 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 	auto captured = request_session->Capture();
 	auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
 	if (snapshot.region_redirected) {
-		D_ASSERT(!snapshot.auth_params.region.empty());
-		result.properties["s3_region"] = snapshot.auth_params.region;
+		D_ASSERT(!snapshot.auth_params.GetCredentials().region.empty());
+		result.properties["s3_region"] = snapshot.auth_params.GetCredentials().region;
 	}
 	return result;
 }
@@ -221,14 +222,13 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 	{
 		auto captured = request_session->Capture();
 		auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-		auto request_params = snapshot.CreateRequestParams();
 		weak_ptr<ClientContext> weak_context;
 		if (context && refresh_enabled) {
 			weak_context = context->shared_from_this();
 		}
 		request_session->TryPublish(
 		    captured.snapshot,
-		    make_shared_ptr<S3RequestSnapshot>(*request_params, snapshot.auth_params, snapshot.refresh_path,
+		    make_shared_ptr<S3RequestSnapshot>(snapshot.Params(), snapshot.auth_params, snapshot.refresh_path,
 		                                       std::move(weak_context), refresh_enabled, snapshot.region_redirected,
 		                                       snapshot.credential_generation, snapshot.multipart_upload_policy));
 	}
@@ -238,14 +238,14 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 bool S3FileSystem::CanHandleFile(const string &fpath) {
 	// This runs for every path the VFS probes, so keep local paths and built-in schemes off the
 	// setting lookup, which takes the database-wide settings lock
-	if (S3Provider::TryMatchUrl(fpath)) {
+	if (S3UrlScheme::TryMatch(fpath)) {
 		return true;
 	}
 	if (fpath.find("://") == string::npos) {
 		return false;
 	}
-	auto &config = DBConfig::GetConfig(buffer_manager.GetDatabase());
-	return S3Provider::TryMatchUrl(fpath, S3Provider::GetSchemeAliasPrefixes(config)).has_value();
+	auto &config = DBConfig::GetConfig(GetBufferManager().GetDatabase());
+	return S3UrlScheme::TryMatch(fpath, S3UrlScheme::GetAliasPrefixes(config)).has_value();
 }
 
 bool S3FileSystem::OnDiskFile(FileHandle &) {

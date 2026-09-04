@@ -104,7 +104,7 @@ static void ValidateMultipartUploadPolicy(const S3MultipartUploadPolicy &policy)
 } // namespace
 
 static void SetS3URLStyle(ClientContext &, SetScope, Value &parameter) {
-	S3Provider::ParseURLStyle(StringValue::Get(parameter));
+	S3AuthURLParams::ParseStyle(StringValue::Get(parameter));
 }
 
 S3UploadConfig S3UploadConfig::Create(uint64_t max_file_size, uint64_t max_parts,
@@ -205,7 +205,7 @@ void S3Settings::Register(DBConfig &config) {
 			    throw InvalidInputException("s3_url_scheme_aliases can only be set globally");
 		    }
 		    // Validate only: routing reads the stored value from DBConfig
-		    parameter = S3Provider::NormalizeSchemeAliases(parameter);
+		    parameter = S3UrlScheme::NormalizeAliases(parameter);
 	    },
 	    SetScope::GLOBAL);
 	config.AddExtensionOption(

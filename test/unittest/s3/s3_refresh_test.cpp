@@ -438,14 +438,12 @@ static void PublishTestS3Region(const shared_ptr<HTTPRequestSession> &session, c
 	for (;;) {
 		auto captured = session->Capture();
 		auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-		if (snapshot.auth_params.region == region) {
+		if (snapshot.auth_params.GetCredentials().region == region) {
 			return;
 		}
-		auto auth_params = snapshot.auth_params;
-		auth_params.SetRegion(region);
-		auto http_params = snapshot.CreateRequestParams();
+		auto auth_params = snapshot.auth_params.WithRegion(region);
 		auto replacement = make_shared_ptr<S3RequestSnapshot>(
-		    *http_params, auth_params, snapshot.refresh_path, snapshot.client_context,
+		    snapshot.Params(), auth_params, snapshot.refresh_path, snapshot.client_context,
 		    snapshot.credential_refresh_enabled, true, snapshot.credential_generation);
 		if (session->TryPublish(captured.snapshot, std::move(replacement)).published) {
 			return;
@@ -488,10 +486,10 @@ static void RunRefreshPublicationScenario(const string &client_implementation, b
 	S3TestHelper::RequireQueryOk(con, "COMMIT");
 
 	auto &snapshot = session->Capture().snapshot->Cast<S3RequestSnapshot>();
-	REQUIRE(snapshot.auth_params.access_key_id == S3TestHelper::FRESH_KEY_ID);
+	REQUIRE(snapshot.auth_params.GetCredentials().access_key_id == S3TestHelper::FRESH_KEY_ID);
 	REQUIRE(snapshot.credential_generation == 1);
 	if (publish_region) {
-		REQUIRE(snapshot.auth_params.region == "eu-west-1");
+		REQUIRE(snapshot.auth_params.GetCredentials().region == "eu-west-1");
 		REQUIRE(snapshot.region_redirected);
 	}
 
@@ -547,9 +545,8 @@ CREATE SECRET refresh_s3_endpoint_mode (
 	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 	ClientContextFileOpener opener(*con.context);
 	FileOpenerInfo info = {S3TestHelper::S3_PATH};
-	auto auth_params = S3AuthParams::ReadFrom(opener, info);
-	S3Url::Resolve(S3TestHelper::S3_PATH, auth_params);
-	REQUIRE(auth_params.endpoint_mode == initial_mode);
+	auto auth_params = S3AuthResolver::Resolve(opener, info);
+	REQUIRE(auth_params.GetURLParams().endpoint_mode == initial_mode);
 	auto session = S3RequestExecutor::CreateSession(opener, S3TestHelper::S3_PATH, auth_params);
 	if (!published_region.empty()) {
 		string previous_region;
@@ -560,29 +557,32 @@ CREATE SECRET refresh_s3_endpoint_mode (
 	vector<S3EndpointMode> observed_modes;
 	vector<string> observed_endpoints;
 	vector<string> observed_regions;
-	auto response = S3RequestExecutor::RunSession(
-	    encryption_util, *session, S3TestHelper::S3_PATH, RequestType::GET_REQUEST, S3RequestTarget::OBJECT,
-	    [](const ParsedS3Url &) { return S3RequestQuery(); }, "", "", "",
-	    [&](S3RequestData &request_data) {
-		    observed_modes.push_back(request_data.auth_params.endpoint_mode);
-		    observed_endpoints.push_back(request_data.auth_params.GetEndpoint().GetHost());
-		    observed_regions.push_back(request_data.auth_params.region);
-		    if (observed_modes.size() == 1) {
-			    auto result = make_uniq<HTTPResponse>(HTTPStatusCode::Forbidden_403);
-			    result->body = "<Error><Code>AccessDenied</Code><Message>stale credentials</Message></Error>";
-			    return result;
-		    }
-		    return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
-	    });
-	REQUIRE(response);
-	REQUIRE(response->status == HTTPStatusCode::OK_200);
+	S3RequestSpec spec {S3TestHelper::S3_PATH,
+	                    S3RequestOperation::GET_OBJECT,
+	                    [](const ParsedS3Url &) { return S3RequestQuery(); },
+	                    "",
+	                    "",
+	                    ""};
+	auto result = S3RequestExecutor::RunSession(encryption_util, *session, spec, [&](S3RequestData &request_data) {
+		observed_modes.push_back(request_data.auth_params.GetURLParams().endpoint_mode);
+		observed_endpoints.push_back(request_data.auth_params.GetURLParams().endpoint.GetHost());
+		observed_regions.push_back(request_data.auth_params.GetCredentials().region);
+		if (observed_modes.size() == 1) {
+			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::Forbidden_403);
+			result->body = "<Error><Code>AccessDenied</Code><Message>stale credentials</Message></Error>";
+			return result;
+		}
+		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+	});
+	REQUIRE(result.response);
+	REQUIRE(result.response->status == HTTPStatusCode::OK_200);
 	REQUIRE(observed_modes == vector<S3EndpointMode> {initial_mode, refreshed_mode});
 	REQUIRE(observed_endpoints == vector<string> {initial_resolved_endpoint, refreshed_resolved_endpoint});
 	auto expected_region = published_region.empty() ? string("us-east-1") : published_region;
 	REQUIRE(observed_regions == vector<string> {expected_region, expected_region});
 	auto &snapshot = session->Capture().snapshot->Cast<S3RequestSnapshot>();
-	REQUIRE(snapshot.auth_params.endpoint_mode == refreshed_mode);
-	REQUIRE(snapshot.auth_params.GetEndpoint().GetHost() == refreshed_resolved_endpoint);
+	REQUIRE(snapshot.auth_params.GetURLParams().endpoint_mode == refreshed_mode);
+	REQUIRE(snapshot.auth_params.GetURLParams().endpoint.GetHost() == refreshed_resolved_endpoint);
 	S3TestHelper::RequireQueryOk(con, "COMMIT");
 	S3TestHelper::AssertSingleRefresh(test_id);
 }

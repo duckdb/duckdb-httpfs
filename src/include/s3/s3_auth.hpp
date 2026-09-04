@@ -11,6 +11,61 @@ namespace duckdb {
 
 enum class S3EndpointMode : uint8_t { AUTOMATIC, EXPLICIT };
 
+struct S3AuthCredentials {
+	string region;
+	string access_key_id;
+	string secret_access_key;
+	string session_token;
+	string oauth2_bearer_token;
+
+	bool operator==(const S3AuthCredentials &other) const;
+};
+
+struct S3AuthURLParams {
+	static S3URLStyle ParseStyle(const string &url_style);
+
+	NormalizedS3Endpoint endpoint;
+	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
+	S3URLStyle style = S3URLStyle::VIRTUAL_HOSTED;
+	bool compatibility_mode = false;
+
+	bool operator==(const S3AuthURLParams &other) const;
+};
+
+struct S3AuthRequestOptions {
+	string kms_key_id;
+	bool requester_pays = false;
+	string user_project;
+
+	bool operator==(const S3AuthRequestOptions &other) const;
+};
+
+struct S3AuthRefreshIdentity {
+	bool use_ssl = true;
+
+	bool operator==(const S3AuthRefreshIdentity &other) const {
+		return use_ssl == other.use_ssl;
+	}
+};
+
+struct S3AuthConfig {
+	//! Provider and URL routing
+	S3ProviderMatch route {S3ProviderType::S3, "s3://"};
+
+	//! Authentication
+	S3AuthCredentials credentials;
+
+	//! Endpoint and URL behavior
+	string endpoint;
+	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
+	string url_style;
+	bool use_ssl = true;
+	bool compatibility_mode = false;
+
+	//! Request headers
+	S3AuthRequestOptions request_options;
+};
+
 class S3KeyValueReader {
 public:
 	S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
@@ -58,49 +113,44 @@ private:
 	KeyValueSecretReader reader;
 };
 
-struct S3AuthParams {
+class S3AuthParams {
 public:
-	//! Construction and secret lookup
-	static S3AuthParams ReadFrom(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
-	static S3AuthParams ReadFrom(S3KeyValueReader &secret_reader, const string &file_path);
-
-	//! Endpoint resolution
-	void SetEndpoint(string endpoint_p);
-	const NormalizedS3Endpoint &GetEndpoint() const;
-
-	//! Refresh and session identity
-	void SetRegion(string region_p);
+	const S3Provider &GetProvider() const {
+		return provider;
+	}
+	const S3AuthCredentials &GetCredentials() const {
+		return credentials;
+	}
+	const S3AuthURLParams &GetURLParams() const {
+		return url;
+	}
+	const S3AuthRequestOptions &GetRequestOptions() const {
+		return request_options;
+	}
+	const S3AuthRefreshIdentity &GetRefreshIdentity() const {
+		return refresh_identity;
+	}
+	S3AuthParams WithRegion(string region) const;
 	bool operator==(const S3AuthParams &other) const;
 
-public:
-	//! Provider and URL routing
-	S3ProviderType provider_type = S3ProviderType::S3;
-	bool scheme_is_alias = false;
+private:
+	friend struct S3AuthResolver;
+	S3AuthParams();
 
-	//! Authentication
-	string region;
-	string access_key_id;
-	string secret_access_key;
-	string session_token;
-	string oauth2_bearer_token;
+	S3Provider provider;
+	S3AuthCredentials credentials;
+	S3AuthURLParams url;
+	S3AuthRequestOptions request_options;
+	S3AuthRefreshIdentity refresh_identity;
+};
 
-	//! Endpoint and URL behavior
-	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
-	string url_style;
-	bool use_ssl = true;
-	bool s3_url_compatibility_mode = false;
-
-	//! Request headers
-	string kms_key_id;
-	bool requester_pays = false;
-	string user_project;
+struct S3AuthResolver {
+	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
+	static S3AuthParams Resolve(S3KeyValueReader &secret_reader, const string &file_path);
+	static S3AuthParams Resolve(S3AuthConfig config, const string &file_path);
 
 private:
-	friend struct S3Provider;
-
-	//! Selected endpoint text before finalization and its normalized value afterwards
-	string endpoint_source;
-	NormalizedS3Endpoint endpoint;
+	static S3AuthConfig ReadConfig(S3KeyValueReader &secret_reader, const string &file_path);
 };
 
 struct AWSEnvironmentCredentialsProvider {

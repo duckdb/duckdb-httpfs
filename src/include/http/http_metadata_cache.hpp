@@ -42,7 +42,7 @@ public:
 		map.erase(path);
 	}
 
-	bool Find(const string &path, HTTPMetadataCacheEntry &ret_val) DUCKDB_EXCLUDES(lock) {
+	bool Find(const string &path, HTTPMetadataCacheEntry &ret_val) const DUCKDB_EXCLUDES(lock) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		auto lookup = map.find(path);
 		if (lookup == map.end()) {
@@ -64,10 +64,13 @@ public:
 		}
 	}
 
-protected:
-	annotated_mutex lock;
+private:
+	//! Cache policy
+	const HTTPMetadataCacheMode mode;
+
+	//! Cached metadata
+	mutable annotated_mutex lock;
 	unordered_map<string, HTTPMetadataCacheEntry> map DUCKDB_GUARDED_BY(lock);
-	HTTPMetadataCacheMode mode;
 };
 
 } // namespace duckdb

@@ -21,6 +21,20 @@ namespace duckdb {
 
 namespace {
 
+static ssize_t WriteMockResponseHeaders(httplib::Stream &stream, httplib::Headers &headers) {
+	ssize_t total_size = 0;
+	for (const auto &header : headers) {
+		auto field = header.first + (header.second.empty() ? ":\r\n" : ": " + header.second + "\r\n");
+		auto field_size = stream.write(field.data(), field.size());
+		if (field_size < 0) {
+			return field_size;
+		}
+		total_size += field_size;
+	}
+	auto end_size = stream.write("\r\n", 2);
+	return end_size < 0 ? end_size : total_size + end_size;
+}
+
 static string ExtractCredentialKey(const string &authorization) {
 	auto credential_pos = authorization.find("Credential=");
 	if (credential_pos == string::npos) {
@@ -264,6 +278,9 @@ public:
 		if (config.range.behavior == MockS3RangeBehavior::SHORT_SUCCESS && config.range.behavior_requests > 0) {
 			server.set_keep_alive_max_count(1);
 		}
+		if (config.metadata.exact_empty_response_headers) {
+			server.set_header_writer(WriteMockResponseHeaders);
+		}
 		RegisterRoutes();
 		port = server.bind_to_any_port("127.0.0.1");
 		if (port <= 0) {
@@ -458,6 +475,9 @@ public:
 		if (config.metadata.version_on_head && !config.metadata.version_id.empty()) {
 			response.set_header("x-amz-version-id", config.metadata.version_id);
 		}
+		for (const auto &header : config.metadata.response_headers) {
+			response.set_header(header.first, header.second);
+		}
 	}
 
 	string GetResponseETag() const {
@@ -514,6 +534,9 @@ public:
 			SetETagHeader(response, response_config.etag, "\"httpfs-refresh-test-upload-etag\"");
 			annotated_lock_guard<annotated_mutex> lock(upload_lock);
 			uploaded_object = request.body;
+			if (!config.http_response.object_put_body.empty()) {
+				response.set_content(config.http_response.object_put_body, "application/octet-stream");
+			}
 		}
 		Record(request, response.status);
 	}
@@ -864,7 +887,12 @@ public:
 			SendS3Error400(request, response, config.failures.failure_is_request_timeout);
 			return;
 		}
-		response.status = 204;
+		if (config.http_response.object_delete_body.empty()) {
+			response.status = 204;
+		} else {
+			response.status = 200;
+			response.set_content(config.http_response.object_delete_body, "application/octet-stream");
+		}
 		Record(request, response.status);
 	}
 
@@ -893,6 +921,14 @@ public:
 		server.set_pre_routing_handler([this, path](const httplib::Request &request, httplib::Response &response) {
 			if (request.method != "HEAD" || request.path != path) {
 				return httplib::Server::HandlerResponse::Unhandled;
+			}
+			if (config.metadata.redirect_head && !request.has_param("redirected")) {
+				response.set_redirect(path + "?redirected=true");
+				for (const auto &header : config.metadata.redirect_response_headers) {
+					response.set_header(header.first, header.second);
+				}
+				Record(request, response.status);
+				return httplib::Server::HandlerResponse::Handled;
 			}
 			if (ShouldRedirectRegion(request)) {
 				SendRegionRedirect(request, response);
@@ -1154,6 +1190,14 @@ public:
 		server.Delete(proxy_path, [this](const httplib::Request &request, httplib::Response &response) {
 			HandleObjectDelete(request, response);
 		});
+
+		if (!config.http_response.options_body.empty()) {
+			server.Options(path, [this](const httplib::Request &request, httplib::Response &response) {
+				response.status = 200;
+				response.set_content(config.http_response.options_body, "application/octet-stream");
+				Record(request, response.status);
+			});
+		}
 	}
 
 public:

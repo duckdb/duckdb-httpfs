@@ -1,7 +1,6 @@
 #include "catch.hpp"
 
 #include "http/http_request_session.hpp"
-#include "http/httpfs_curl_client.hpp"
 #include "s3/s3fs.hpp"
 
 #include <functional>
@@ -145,16 +144,27 @@ TEST_CASE("HTTP request snapshots are immutable and checked", "[httpfs][request-
 	REQUIRE(publication.published);
 	auto current = publication.current;
 
-	HTTPHeaders initial_headers;
-	initial.snapshot->AddConfiguredHeaders(initial_headers);
-	REQUIRE(initial_headers.GetHeaderValue("User-Agent") == "httpfs-session-test");
-	REQUIRE(initial_headers.GetHeaderValue("X-Test") == "first");
+	auto initial_request = initial.snapshot->CreateRequest();
+	REQUIRE(initial_request.headers.GetHeaderValue("User-Agent") == "httpfs-session-test");
+	REQUIRE(initial_request.headers.GetHeaderValue("X-Test") == "first");
+	REQUIRE(initial_request.configured_headers.user_agent == "httpfs-session-test");
+	REQUIRE(initial_request.configured_headers.extra_headers.at("X-Test") == "first");
+	REQUIRE(initial_request.params->user_agent.empty());
+	REQUIRE(initial_request.params->extra_headers.empty());
 
-	HTTPHeaders current_headers;
-	current.snapshot->AddConfiguredHeaders(current_headers);
-	current.snapshot->AddConfiguredHeaders(current_headers);
-	REQUIRE(current_headers.GetHeaderValue("User-Agent") == "httpfs-session-test");
-	REQUIRE(current_headers.GetHeaderValue("X-Test") == "second");
+	HTTPHeaders caller_headers;
+	caller_headers["User-Agent"] = "caller-agent";
+	caller_headers["X-Test"] = "caller";
+	auto current_request = current.snapshot->CreateRequest(std::move(caller_headers));
+	REQUIRE(current_request.headers.GetHeaderValue("User-Agent") == "caller-agent");
+	REQUIRE(current_request.headers.GetHeaderValue("X-Test") == "second");
+
+	params.extra_headers["uSeR-aGeNt"] = "extra-agent";
+	auto override_snapshot = make_shared_ptr<HTTPRequestSnapshot>(params);
+	HTTPHeaders overridden_headers;
+	overridden_headers["USER-AGENT"] = "caller-agent";
+	auto override_request = override_snapshot->CreateRequest(std::move(overridden_headers));
+	REQUIRE(override_request.headers.GetHeaderValue("User-Agent") == "extra-agent");
 
 	auto stale_replacement = make_shared_ptr<HTTPRequestSnapshot>(CreateParams(http_util));
 	auto stale_publication = session->TryPublish(initial.snapshot, stale_replacement);
@@ -189,9 +199,9 @@ TEST_CASE("HTTP client leases obey snapshot generations", "[httpfs][request-sess
 
 	{
 		auto captured = session->Capture();
-		auto request_params = captured.snapshot->CreateRequestParams();
-		REQUIRE(&request_params->http_util == &http_util);
-		auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+		auto request = captured.snapshot->CreateRequest();
+		REQUIRE(&request.params->http_util == &http_util);
+		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 		REQUIRE(lease.Client());
 	}
 	REQUIRE(lifecycle.initialized == 1);
@@ -200,8 +210,8 @@ TEST_CASE("HTTP client leases obey snapshot generations", "[httpfs][request-sess
 
 	{
 		auto captured = session->Capture();
-		auto request_params = captured.snapshot->CreateRequestParams();
-		auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+		auto request = captured.snapshot->CreateRequest();
+		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 		REQUIRE(lease.Client());
 		REQUIRE(lifecycle.initialized == 1);
 		lease.Invalidate();
@@ -211,8 +221,8 @@ TEST_CASE("HTTP client leases obey snapshot generations", "[httpfs][request-sess
 
 	{
 		auto captured = session->Capture();
-		auto request_params = captured.snapshot->CreateRequestParams();
-		auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+		auto request = captured.snapshot->CreateRequest();
+		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 		REQUIRE(lease.Client());
 
 		auto incompatible_params = CreateParams(other_http_util);
@@ -225,8 +235,8 @@ TEST_CASE("HTTP client leases obey snapshot generations", "[httpfs][request-sess
 
 	{
 		auto captured = session->Capture();
-		auto request_params = captured.snapshot->CreateRequestParams();
-		auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+		auto request = captured.snapshot->CreateRequest();
+		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 		REQUIRE(lease.Client());
 	}
 	REQUIRE(lifecycle.initialized == 3);
@@ -253,8 +263,8 @@ TEST_CASE("HTTP request sessions reinitialize reused clients", "[httpfs][request
 
 	{
 		auto captured = session->Capture();
-		auto request_params = captured.snapshot->CreateRequestParams();
-		auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+		auto request = captured.snapshot->CreateRequest();
+		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 		REQUIRE(lease.Client());
 	}
 	REQUIRE(lifecycle.initialized == 1);
@@ -271,8 +281,8 @@ TEST_CASE("HTTP request sessions reinitialize reused clients", "[httpfs][request
 
 	{
 		auto current = session->Capture();
-		auto request_params = current.snapshot->CreateRequestParams();
-		auto lease = session->AcquireClient(current, *request_params, "http://localhost");
+		auto request = current.snapshot->CreateRequest();
+		auto lease = session->AcquireClient(current, *request.params, "http://localhost");
 		REQUIRE(lease.Client());
 	}
 	REQUIRE(lifecycle.initialized == 1);
@@ -295,22 +305,22 @@ TEST_CASE("HTTP request sessions discard clients that fail reinitialization", "[
 
 	{
 		auto captured = session->Capture();
-		auto request_params = captured.snapshot->CreateRequestParams();
-		auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+		auto request = captured.snapshot->CreateRequest();
+		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 		REQUIRE(lease.Client());
 	}
 
 	auto captured = session->Capture();
-	auto request_params = captured.snapshot->CreateRequestParams();
-	REQUIRE_THROWS(session->AcquireClient(captured, *request_params, "http://localhost"));
+	auto request = captured.snapshot->CreateRequest();
+	REQUIRE_THROWS(session->AcquireClient(captured, *request.params, "http://localhost"));
 	REQUIRE(lifecycle.initialized == 1);
 	REQUIRE(lifecycle.client_initializations == 2);
 	REQUIRE(lifecycle.destroyed == 1);
 
 	captured = session->Capture();
-	request_params = captured.snapshot->CreateRequestParams();
+	request = captured.snapshot->CreateRequest();
 	{
-		auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 		REQUIRE(lease.Client());
 	}
 	REQUIRE(lifecycle.initialized == 2);
@@ -392,22 +402,25 @@ TEST_CASE("HTTP request snapshots copy HTTPFS parameters through one source", "[
 	params.state = make_shared_ptr<HTTPState>();
 
 	HTTPRequestSnapshot snapshot(params);
-	auto request_params = snapshot.CreateRequestParams();
-	REQUIRE(&request_params->http_util == &http_util);
-	REQUIRE(request_params->timeout == 17);
-	REQUIRE(request_params->timeout_usec == 23);
-	REQUIRE(request_params->retries == 5);
-	REQUIRE(request_params->http_proxy == "proxy.test");
-	REQUIRE(request_params->http_proxy_port == 8123);
-	REQUIRE(request_params->http_proxy_username == "user");
-	REQUIRE(request_params->http_proxy_password == "password");
-	REQUIRE(request_params->user_agent == "snapshot-agent");
-	REQUIRE(request_params->extra_headers == params.extra_headers);
-	REQUIRE(request_params->force_download);
-	REQUIRE(request_params->force_download_threshold == 42);
-	REQUIRE(request_params->hf_max_per_page == 99);
-	REQUIRE(request_params->state == params.state);
-	REQUIRE(request_params->pre_merged_headers);
+	auto request = snapshot.CreateRequest();
+	REQUIRE(&request.params->http_util == &http_util);
+	REQUIRE(request.params->timeout == 17);
+	REQUIRE(request.params->timeout_usec == 23);
+	REQUIRE(request.params->retries == 5);
+	REQUIRE(request.params->http_proxy == "proxy.test");
+	REQUIRE(request.params->http_proxy_port == 8123);
+	REQUIRE(request.params->http_proxy_username == "user");
+	REQUIRE(request.params->http_proxy_password == "password");
+	REQUIRE(request.params->user_agent.empty());
+	REQUIRE(request.params->extra_headers.empty());
+	REQUIRE(request.configured_headers.user_agent == "snapshot-agent");
+	REQUIRE(request.configured_headers.extra_headers == params.extra_headers);
+	REQUIRE(request.headers.GetHeaderValue("User-Agent") == "snapshot-agent");
+	REQUIRE(request.headers.GetHeaderValue("X-Snapshot") == "present");
+	REQUIRE(request.params->force_download);
+	REQUIRE(request.params->force_download_threshold == 42);
+	REQUIRE(request.params->hf_max_per_page == 99);
+	REQUIRE(request.params->state == params.state);
 }
 
 TEST_CASE("HTTP client leases preserve backend reuse policy", "[httpfs][request-session]") {
@@ -419,9 +432,9 @@ TEST_CASE("HTTP client leases preserve backend reuse policy", "[httpfs][request-
 		auto session = make_shared_ptr<HTTPRequestSession>(make_shared_ptr<HTTPRequestSnapshot>(params));
 
 		auto captured = session->Capture();
-		auto request_params = captured.snapshot->CreateRequestParams();
+		auto request = captured.snapshot->CreateRequest();
 		{
-			auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+			auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 			REQUIRE(lease.Client());
 		}
 		REQUIRE(lifecycle.initialized == 1);
@@ -437,26 +450,15 @@ TEST_CASE("HTTP client leases preserve backend reuse policy", "[httpfs][request-
 		auto session = make_shared_ptr<HTTPRequestSession>(make_shared_ptr<HTTPRequestSnapshot>(params));
 
 		auto captured = session->Capture();
-		auto request_params = captured.snapshot->CreateRequestParams();
+		auto request = captured.snapshot->CreateRequest();
 		{
-			auto lease = session->AcquireClient(captured, *request_params, "http://localhost");
+			auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
 			REQUIRE_FALSE(lease.Client());
 		}
 		REQUIRE(lifecycle.initialized == 0);
 		REQUIRE(lifecycle.closed == 0);
 		REQUIRE(lifecycle.destroyed == 0);
 	}
-}
-
-TEST_CASE("CURL request headers preserve empty field values", "[httpfs][curl][headers]") {
-	CURLRequestHeaders headers;
-	headers.Add("X-Empty", "");
-	headers.Add("X-Whitespace", " \t ");
-	headers.Add("X-Value", "value");
-
-	REQUIRE(string(headers.headers->data) == "X-Empty;");
-	REQUIRE(string(headers.headers->next->data) == "X-Whitespace;");
-	REQUIRE(string(headers.headers->next->next->data) == "X-Value: value");
 }
 
 } // namespace duckdb

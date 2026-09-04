@@ -4,6 +4,7 @@
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "http/httpfs_client.hpp"
 
 namespace duckdb {
@@ -14,6 +15,17 @@ class Logger;
 
 enum class HTTPRequestSnapshotType : uint8_t { HTTP, S3 };
 
+struct HTTPConfiguredHeaders {
+	string user_agent;
+	unordered_map<string, string> extra_headers;
+};
+
+struct HTTPSessionRequest {
+	HTTPHeaders headers;
+	unique_ptr<HTTPFSParams> params;
+	HTTPConfiguredHeaders configured_headers;
+};
+
 struct HTTPRequestSnapshot {
 	explicit HTTPRequestSnapshot(const HTTPFSParams &params,
 	                             HTTPRequestSnapshotType type_p = HTTPRequestSnapshotType::HTTP);
@@ -21,8 +33,7 @@ struct HTTPRequestSnapshot {
 
 public:
 	bool CanReuseClientsWith(const HTTPRequestSnapshot &other) const;
-	unique_ptr<HTTPFSParams> CreateRequestParams() const;
-	void AddConfiguredHeaders(HTTPHeaders &headers) const;
+	HTTPSessionRequest CreateRequest(HTTPHeaders headers = {}) const;
 	const HTTPFSParams &Params() const {
 		return params;
 	}

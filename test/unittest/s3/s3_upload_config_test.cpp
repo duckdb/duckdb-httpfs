@@ -15,9 +15,14 @@ static constexpr idx_t MIB = 1024ULL * 1024ULL;
 static constexpr idx_t GIB = 1024ULL * MIB;
 
 static S3MultipartUploadPolicy GetUploadPolicy(S3ProviderType provider_type) {
-	S3AuthParams auth_params;
-	auth_params.provider_type = provider_type;
-	return S3Provider::GetMultipartUploadPolicy(auth_params);
+	const char *scheme = provider_type == S3ProviderType::R2 ? "r2://" : "s3://";
+	S3AuthConfig config;
+	config.route = S3UrlScheme::Match(scheme);
+	if (provider_type == S3ProviderType::R2) {
+		config.endpoint = "account.r2.cloudflarestorage.com";
+	}
+	auto auth_params = S3AuthResolver::Resolve(std::move(config), scheme);
+	return auth_params.GetProvider().GetMultipartUploadPolicy();
 }
 
 } // namespace

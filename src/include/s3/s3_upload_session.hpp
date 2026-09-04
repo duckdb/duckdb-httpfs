@@ -18,6 +18,8 @@ class S3FileSystem;
 struct HTTPResponse;
 struct S3RequestContext;
 struct S3RequestQuery;
+struct S3RequestResult;
+enum class S3RequestOperation : uint8_t;
 enum class RequestType : uint8_t;
 
 class S3UploadSession {
@@ -144,16 +146,15 @@ private:
 	void CompleteMultipartUpload();
 
 	//! S3 upload and cleanup requests.
-	unique_ptr<HTTPResponse> RunUploadRequest(const_data_ptr_t data, idx_t size, const S3RequestQuery &query,
-	                                          S3RequestContext &request_context);
+	S3RequestResult RunUploadRequest(S3RequestOperation operation, const_data_ptr_t data, idx_t size,
+	                                 const S3RequestQuery &query);
 	void UploadObject(const_data_ptr_t data, idx_t size);
 	void UploadPart(PreparedPart &part);
 	shared_ptr<const ErrorData> AbortMultipartUpload(const string &upload_id);
 
 	//! Request diagnostics.
 	string GetDisplayPath() const;
-	static HTTPException GetStatusError(const HTTPResponse &response, const S3RequestContext &request_context,
-	                                    const string &operation);
+	static HTTPException GetStatusError(const HTTPResponse &response, const S3RequestContext &request_context);
 
 private:
 	//! Immutable upload context.

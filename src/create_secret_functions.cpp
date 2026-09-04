@@ -8,7 +8,7 @@
 namespace duckdb {
 
 void CreateS3SecretFunctions::Register(ExtensionLoader &loader) {
-	for (const auto secret_type : S3Provider::SecretTypes()) {
+	for (const auto secret_type : S3SecretConfig::SecretTypes()) {
 		RegisterCreateSecretFunction(loader, secret_type);
 	}
 }
@@ -31,15 +31,15 @@ static Value MapToStruct(const Value &map) {
 struct S3SecretBuilder {
 public:
 	explicit S3SecretBuilder(CreateSecretInput &input_p) : input(input_p) {
-		auto scope =
-		    input.scope.empty() ? S3Provider::DefaultSecretScope(static_cast<const string &>(input.type)) : input.scope;
+		auto scope = input.scope.empty() ? S3SecretConfig::DefaultSecretScope(static_cast<const string &>(input.type))
+		                                 : input.scope;
 		secret = make_uniq<KeyValueSecret>(std::move(scope), input.type, input.provider, input.name);
 		secret->redact_keys = {"secret", "session_token"};
 	}
 
 public:
 	unique_ptr<BaseSecret> Create() {
-		S3Provider::ApplySecretDefaults(input, *secret);
+		S3SecretConfig::ApplySecretDefaults(input, *secret);
 		for (const auto &option : input.options) {
 			ApplyOption(StringUtil::Lower(option.first), option.second);
 		}
@@ -55,7 +55,7 @@ private:
 			secret->secret_map[Identifier(name)] = value.ToString();
 		} else if (name == "url_style") {
 			auto url_style = StringUtil::Lower(value.ToString());
-			S3Provider::ParseURLStyle(url_style);
+			S3AuthURLParams::ParseStyle(url_style);
 			secret->secret_map[Identifier(name)] = std::move(url_style);
 		} else if (name == "use_ssl" || name == "verify_ssl" || name == "url_compatibility_mode" ||
 		           name == "requester_pays") {
@@ -64,7 +64,7 @@ private:
 			SetRefresh(value);
 		} else if (name == "refresh_info") {
 			SetRefreshInfo(value);
-		} else if (S3Provider::TryApplySecretOption(input, name, value, *secret)) {
+		} else if (S3SecretConfig::TryApplySecretOption(input, name, value, *secret)) {
 			return;
 		} else {
 			throw InvalidInputException("Unknown named parameter passed to CreateSecretFunctionInternal: " + name);
@@ -140,7 +140,7 @@ CreateSecretInput CreateS3SecretFunctions::GenerateRefreshSecretInfo(const Secre
 }
 
 static bool SecretCredentialMaterialChanged(const KeyValueSecret &old_secret, const KeyValueSecret &new_secret) {
-	for (const auto key : S3Provider::CredentialMaterialKeys()) {
+	for (const auto key : S3SecretConfig::CredentialMaterialKeys()) {
 		Value old_value;
 		Value new_value;
 		auto old_has_value = old_secret.TryGetValue(key, old_value);
@@ -222,7 +222,7 @@ void CreateS3SecretFunctions::SetBaseNamedParams(CreateSecretFunction &function,
 	// Debugging/testing option: it allows specifying how the secret will be refreshed using a manually specfied MAP
 	function.named_parameters["refresh_info"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
 
-	S3Provider::SetSecretNamedParameters(type, function);
+	S3SecretConfig::SetSecretNamedParameters(type, function);
 }
 
 void CreateS3SecretFunctions::RegisterCreateSecretFunction(ExtensionLoader &loader, string type) {
