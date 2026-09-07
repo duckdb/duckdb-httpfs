@@ -1994,6 +1994,68 @@ TEST_CASE("S3 request error context belongs to the final attempt", "[httpfs][s3]
 	CHECK_FALSE(StringUtil::Contains(error.RawMessage(), "hidden"));
 }
 
+TEST_CASE("S3 body requests expose their signed Content-Type to every transport",
+          "[httpfs][s3][signing][content-type]") {
+	::AESStateSSLFactory encryption_util;
+	auto config = TestAuthConfig();
+	config.credentials.access_key_id = "key";
+	config.credentials.secret_access_key = "secret";
+	auto auth_params = ResolveTestAuth(std::move(config));
+	auto parsed_url = S3Url::Parse("s3://bucket/key", auth_params);
+	for (auto operation :
+	     {S3RequestOperation::PUT_OBJECT, S3RequestOperation::UPLOAD_PART, S3RequestOperation::CREATE_MULTIPART_UPLOAD,
+	      S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, S3RequestOperation::DELETE_OBJECTS}) {
+		for (const auto &content_type : {"application/octet-stream", "application/xml"}) {
+			auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_url, operation, S3RequestQuery(),
+			                                            auth_params, "20260907", "20260907T120000Z", "", content_type);
+			REQUIRE(headers.HasHeader("Content-Type"));
+			REQUIRE(headers.GetHeaderValue("Content-Type") == content_type);
+			REQUIRE(StringUtil::Contains(headers.GetHeaderValue("Authorization"), "SignedHeaders=content-type;"));
+		}
+	}
+	for (auto operation : {S3RequestOperation::GET_OBJECT, S3RequestOperation::HEAD_OBJECT}) {
+		auto headers =
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed_url, operation, S3RequestQuery(), auth_params);
+		REQUIRE_FALSE(headers.HasHeader("Content-Type"));
+	}
+}
+
+TEST_CASE("S3 PUT and POST send their signed Content-Type exactly once", "[httpfs][s3][headers][content-type]") {
+	for (const auto &client : {"curl", "httplib"}) {
+		DYNAMIC_SECTION(client) {
+			MockS3ServerConfig config;
+			config.auth.stale_key_id = "NEVER_STALE";
+			MockS3Server server(std::move(config));
+			DuckDB db(nullptr);
+			Connection con(db);
+			S3TestHelper::ConfigureRefresh(db, con, server, client, false, false);
+			S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+			S3TestHelper::WriteSinglePutPayload(con);
+			S3TestHelper::WriteMultipartPayload(con);
+			auto &fs = FileSystem::GetFileSystem(*con.context);
+			fs.RemoveFiles({S3TestHelper::S3_PATH});
+			S3TestHelper::RequireQueryOk(con, "COMMIT");
+			auto observations = server.Observations();
+			INFO(MockS3DescribeObservations(observations));
+			idx_t put_count = 0;
+			idx_t post_count = 0;
+			for (const auto &observation : observations) {
+				if (observation.method != "PUT" && observation.method != "POST") {
+					continue;
+				}
+				put_count += observation.method == "PUT";
+				post_count += observation.method == "POST";
+				const auto expected_type =
+				    observation.delete_key_count ? "application/xml" : "application/octet-stream";
+				REQUIRE(MockS3HeaderValues(observation, "Content-Type") == vector<string> {expected_type});
+				REQUIRE(StringUtil::Contains(observation.authorization, "content-type;"));
+			}
+			REQUIRE(put_count >= 2);
+			REQUIRE(post_count == 3);
+		}
+	}
+}
+
 TEST_CASE("S3 request signing remains deterministic", "[httpfs][s3][signing]") {
 	::AESStateSSLFactory encryption_util;
 	auto config = TestAuthConfig();

@@ -161,8 +161,10 @@ public:
 			}
 			return sink.write(const_char_ptr_cast(body + NumericCast<idx_t>(offset)), length);
 		};
+		// The provider overload appends Content-Type even when it is already in headers.
+		auto content_type = info.headers.HasHeader("Content-Type") ? string() : info.content_type;
 		return TransformBufferedResult(
-		    client->Put(info.path, headers, body_size, std::move(content_provider), info.content_type));
+		    client->Put(info.path, headers, body_size, std::move(content_provider), content_type));
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {

@@ -230,7 +230,7 @@ private:
 		if (!content_md5.empty()) {
 			headers["content-md5"] = content_md5;
 		}
-		if (!content_type.empty() && content_type != "application/octet-stream") {
+		if (!content_type.empty()) {
 			headers["content-type"] = content_type;
 		}
 	}
@@ -269,9 +269,6 @@ private:
 				value = NormalizeHeaderValue(value);
 			}
 			result.push_back({StringUtil::Lower(header.first), std::move(value)});
-		}
-		if (!content_type.empty() && !headers.HasHeader("content-type")) {
-			result.push_back({"content-type", content_type});
 		}
 		std::sort(result.begin(), result.end(),
 		          [](const CanonicalHeader &left, const CanonicalHeader &right) { return left.name < right.name; });

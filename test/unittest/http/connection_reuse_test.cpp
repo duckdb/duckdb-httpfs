@@ -277,6 +277,35 @@ TEST_CASE("Curl request headers preserve empty field values", "[httpfs][curl][he
 	RunCurlRequestHeaderScenario();
 }
 
+TEST_CASE("HTTP PUT respects explicit Content-Type and retains the fallback", "[httpfs][headers][content-type]") {
+	HTTPFSUtil httplib_util;
+	HTTPFSCurlUtil curl_util;
+	for (auto &http_util : {reference<HTTPFSUtil>(httplib_util), reference<HTTPFSUtil>(curl_util)}) {
+		for (bool explicit_header : {false, true}) {
+			DYNAMIC_SECTION(http_util.get().GetName() << " explicit=" << explicit_header) {
+				MockS3Server server {MockS3ServerConfig()};
+				HTTPFSParams params(http_util);
+				auto client = http_util.get().InitializeClient(params, "http://" + server.Endpoint());
+				const string fallback_type = "application/octet-stream";
+				HTTPHeaders headers;
+				if (explicit_header) {
+					headers.Insert("cOnTeNt-TyPe", "application/xml");
+				}
+				const string body = "payload";
+				PutRequestInfo request(server.HTTPPath(), headers, params, const_data_ptr_cast(body.data()),
+				                       body.size(), fallback_type);
+				auto response = http_util.get().Request(request, client);
+				REQUIRE(response);
+				REQUIRE(response->Success());
+				auto observations = server.Observations();
+				REQUIRE(observations.size() == 1);
+				REQUIRE(MockS3HeaderValues(observations[0], "Content-Type") ==
+				        vector<string> {explicit_header ? "application/xml" : fallback_type});
+			}
+		}
+	}
+}
+
 TEST_CASE("HTTP clients record request and byte counters", "[httpfs][http-state]") {
 	SECTION("httplib") {
 		HTTPFSUtil http_util;

@@ -414,8 +414,9 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
-		// Add content type header from info
-		curl_headers.Add("Content-Type: " + info.content_type);
+		if (!info.headers.HasHeader("Content-Type")) {
+			curl_headers.Add("Content-Type: " + info.content_type);
+		}
 		// transform parameters
 		request_info->url = info.url;
 
