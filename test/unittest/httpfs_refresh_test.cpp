@@ -996,6 +996,35 @@ static void RunMultipartInitNotRetriedScenario(const string &client_implementati
 	REQUIRE(CountObservationsTarget(observations, "POST", 400, "uploads") == 1);
 }
 
+static void RunMultipartInitFailureReleasesUploadSlotScenario() {
+	MockS3ServerConfig config;
+	config.bucket = BUCKET;
+	config.object_key = OBJECT_KEY;
+	config.stale_key_id = STALE_KEY_ID;
+	config.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+	config.transient_post_failures = 1;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureRefreshTest(db, con, server, "httplib", false);
+
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+	RequireQueryOk(con, "SET s3_uploader_max_filesize='50GB'");
+	RequireQueryOk(con, "SET s3_uploader_thread_limit=1");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	auto handle = fs.OpenFile(S3_PATH, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
+	string payload(10 * 1024 * 1024 + 1, 'x');
+	REQUIRE_THROWS(handle->Write(QueryContext(*con.context), &payload[0], payload.size()));
+	REQUIRE_NOTHROW(handle->Close());
+	RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(CountObservationsTarget(observations, "POST", 400, "uploads") == 1);
+	REQUIRE(CountObservationsTarget(observations, "POST", 200, "uploads") == 1);
+}
+
 // With curl connection caching, the retry must run on a fresh connection instead of the stalled cached one.
 static void RunCachedConnectionRetryScenario() {
 	MockS3ServerConfig config;
@@ -1317,6 +1346,10 @@ TEST_CASE("HTTPFS retries transient S3 RequestTimeout across request types", "[h
 	SECTION("curl with connection caching retries on a fresh connection") {
 		RunCachedConnectionRetryScenario();
 	}
+}
+
+TEST_CASE("HTTPFS releases the upload slot after multipart initialization fails", "[httpfs][s3][upload]") {
+	RunMultipartInitFailureReleasesUploadSlotScenario();
 }
 
 TEST_CASE("HTTPFS refreshes S3 credentials across request methods", "[httpfs][s3][refresh]") {

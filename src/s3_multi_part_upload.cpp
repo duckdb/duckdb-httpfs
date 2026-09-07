@@ -237,7 +237,12 @@ void S3MultiPartUpload::FlushBuffer(shared_ptr<S3WriteBuffer> write_buffer) {
 		uploads_in_progress++;
 	}
 	if (initialized_multipart_upload == false) {
-		multipart_upload_id = InitializeMultipartUpload();
+		try {
+			multipart_upload_id = InitializeMultipartUpload();
+		} catch (...) {
+			NotifyUploadsInProgress();
+			throw;
+		}
 	}
 
 #ifdef SAME_THREAD_UPLOAD
