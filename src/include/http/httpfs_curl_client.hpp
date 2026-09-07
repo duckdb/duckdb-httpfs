@@ -33,6 +33,9 @@ private:
 };
 
 class CURLHandle {
+private:
+	CURLHandle();
+
 public:
 	CURLHandle(const string &token, const string &cert_path, bool use_native_ca);
 	~CURLHandle();
@@ -44,6 +47,14 @@ public:
 	CURLcode Execute() {
 		return curl_easy_perform(curl);
 	}
+	template <class T>
+	void SetOption(CURLoption option, T value) {
+		auto result = curl_easy_setopt(curl, option, value);
+		if (result != CURLE_OK) {
+			throw IOException("Failed to set curl option %d: %s", static_cast<int>(option), curl_easy_strerror(result));
+		}
+	}
+	uint16_t GetResponseCode();
 
 private:
 	CURL *curl = nullptr;
@@ -77,7 +88,11 @@ private:
 
 public:
 	void Add(const string &header) {
-		headers = curl_slist_append(headers, header.c_str());
+		auto new_headers = curl_slist_append(headers, header.c_str());
+		if (!new_headers) {
+			throw OutOfMemoryException("Failed to allocate curl request headers");
+		}
+		headers = new_headers;
 	}
 	void Add(const string &name, const string &value) {
 		if (HTTPFSHeaderValue::IsEmpty(value)) {

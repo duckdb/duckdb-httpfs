@@ -85,28 +85,40 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	return total_size;
 }
 
-CURLHandle::CURLHandle(const string &token, const string &cert_path, bool use_native_ca) {
+CURLHandle::CURLHandle() {
 	curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize curl");
 	}
+}
+
+CURLHandle::CURLHandle(const string &token, const string &cert_path, bool use_native_ca) : CURLHandle() {
 	if (!token.empty()) {
-		curl_easy_setopt(curl, CURLOPT_XOAUTH2_BEARER, token.c_str());
-		curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
+		SetOption(CURLOPT_XOAUTH2_BEARER, token.c_str());
+		SetOption(CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
 	}
 	if (!cert_path.empty()) {
-		curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
+		SetOption(CURLOPT_CAINFO, cert_path.c_str());
 	}
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
 	if (use_native_ca) {
 		ssl_options |= CURLSSLOPT_NATIVE_CA;
 	}
-	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, ssl_options);
-	curl_easy_setopt(curl, CURLOPT_PATH_AS_IS, 1L);
+	SetOption(CURLOPT_SSL_OPTIONS, ssl_options);
+	SetOption(CURLOPT_PATH_AS_IS, 1L);
 }
 
 CURLHandle::~CURLHandle() {
 	curl_easy_cleanup(curl);
+}
+
+uint16_t CURLHandle::GetResponseCode() {
+	long response_code = 0; // NOLINT(google-runtime-int): required by curl_easy_getinfo
+	auto result = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+	if (result != CURLE_OK) {
+		throw IOException("Failed to read curl response status: %s", curl_easy_strerror(result));
+	}
+	return NumericCast<uint16_t>(response_code);
 }
 
 CURLURLHandle::CURLURLHandle() : CURLURLHandle(curl_url()) {
@@ -171,39 +183,39 @@ private:
 		}
 
 		static void ConfigureConnection(HTTPFSCurlClient &client, const HTTPFSParams &params) {
-			curl_easy_setopt(*client.curl, CURLOPT_FORBID_REUSE, params.keep_alive ? 0L : 1L);
+			client.curl->SetOption(CURLOPT_FORBID_REUSE, params.keep_alive ? 0L : 1L);
 			const bool verify_ssl =
 			    params.override_verify_ssl ? params.verify_ssl : params.enable_curl_server_cert_verification;
-			curl_easy_setopt(*client.curl, CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
-			curl_easy_setopt(*client.curl, CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
+			client.curl->SetOption(CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
+			client.curl->SetOption(CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
 		}
 
 		static void ConfigureTimeoutsAndCallbacks(HTTPFSCurlClient &client, const HTTPFSParams &params) {
-			curl_easy_setopt(*client.curl, CURLOPT_CONNECTTIMEOUT, params.timeout);
-			curl_easy_setopt(*client.curl, CURLOPT_TIMEOUT, 0L);
-			curl_easy_setopt(*client.curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
-			curl_easy_setopt(*client.curl, CURLOPT_LOW_SPEED_TIME, params.timeout);
-			curl_easy_setopt(*client.curl, CURLOPT_ACCEPT_ENCODING, nullptr);
-			curl_easy_setopt(*client.curl, CURLOPT_FOLLOWLOCATION, params.follow_location ? 1L : 0L);
-			curl_easy_setopt(*client.curl, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERDATA, &client.request_info->header_collection);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEDATA, &client.request_info->body);
+			client.curl->SetOption(CURLOPT_CONNECTTIMEOUT, params.timeout);
+			client.curl->SetOption(CURLOPT_TIMEOUT, 0L);
+			client.curl->SetOption(CURLOPT_LOW_SPEED_LIMIT, 1024L);
+			client.curl->SetOption(CURLOPT_LOW_SPEED_TIME, params.timeout);
+			client.curl->SetOption(CURLOPT_ACCEPT_ENCODING, nullptr);
+			client.curl->SetOption(CURLOPT_FOLLOWLOCATION, params.follow_location ? 1L : 0L);
+			client.curl->SetOption(CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
+			client.curl->SetOption(CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
+			client.curl->SetOption(CURLOPT_HEADERDATA, &client.request_info->header_collection);
+			client.curl->SetOption(CURLOPT_WRITEFUNCTION, RequestWriteCallback);
+			client.curl->SetOption(CURLOPT_WRITEDATA, &client.request_info->body);
 		}
 
 		static void ConfigureProxy(HTTPFSCurlClient &client, const HTTPFSParams &params) {
-			curl_easy_setopt(*client.curl, CURLOPT_PROXY, nullptr);
-			curl_easy_setopt(*client.curl, CURLOPT_PROXYUSERNAME, nullptr);
-			curl_easy_setopt(*client.curl, CURLOPT_PROXYPASSWORD, nullptr);
+			client.curl->SetOption(CURLOPT_PROXY, nullptr);
+			client.curl->SetOption(CURLOPT_PROXYUSERNAME, nullptr);
+			client.curl->SetOption(CURLOPT_PROXYPASSWORD, nullptr);
 			if (params.http_proxy.empty()) {
 				return;
 			}
-			curl_easy_setopt(*client.curl, CURLOPT_PROXY,
-			                 StringUtil::Format("%s:%d", params.http_proxy, params.http_proxy_port).c_str());
+			client.curl->SetOption(CURLOPT_PROXY,
+			                       StringUtil::Format("%s:%d", params.http_proxy, params.http_proxy_port).c_str());
 			if (!params.http_proxy_username.empty()) {
-				curl_easy_setopt(*client.curl, CURLOPT_PROXYUSERNAME, params.http_proxy_username.c_str());
-				curl_easy_setopt(*client.curl, CURLOPT_PROXYPASSWORD, params.http_proxy_password.c_str());
+				client.curl->SetOption(CURLOPT_PROXYUSERNAME, params.http_proxy_username.c_str());
+				client.curl->SetOption(CURLOPT_PROXYPASSWORD, params.http_proxy_password.c_str());
 			}
 		}
 	};
@@ -212,22 +224,33 @@ private:
 	public:
 		GetTransferState(HTTPFSCurlClient &client_p, GetRequestInfo &request_p)
 		    : client(client_p), request(request_p), stream_content(bool(request.content_handler)) {
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERDATA, this);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEDATA, this);
+			try {
+				client.curl->SetOption(CURLOPT_HEADERFUNCTION, HeaderCallback);
+				client.curl->SetOption(CURLOPT_HEADERDATA, this);
+				client.curl->SetOption(CURLOPT_WRITEFUNCTION, WriteCallback);
+				client.curl->SetOption(CURLOPT_WRITEDATA, this);
+			} catch (...) {
+				// Discard a handle that may retain callbacks to this incomplete transfer.
+				client.curl.reset();
+				throw;
+			}
 		}
 
 		~GetTransferState() {
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERDATA, &client.request_info->header_collection);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEDATA, &client.request_info->body);
+			try {
+				client.curl->SetOption(CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
+				client.curl->SetOption(CURLOPT_HEADERDATA, &client.request_info->header_collection);
+				client.curl->SetOption(CURLOPT_WRITEFUNCTION, RequestWriteCallback);
+				client.curl->SetOption(CURLOPT_WRITEDATA, &client.request_info->body);
+			} catch (...) {
+				// Cleanup must not throw or leave callbacks pointing to this destroyed transfer.
+				client.curl.reset();
+			}
 		}
 
 	public:
 		unique_ptr<HTTPResponse> Finish(CURLcode result) {
-			curl_easy_getinfo(*client.curl, CURLINFO_RESPONSE_CODE, &client.request_info->response_code);
+			client.request_info->response_code = client.curl->GetResponseCode();
 			const bool include_body = !stream_content || client.request_info->response_code >= 400;
 			unique_ptr<HTTPResponse> response;
 			try {
@@ -306,11 +329,8 @@ private:
 		}
 
 		bool StartResponse() {
-			long response_code; // NOLINT(google-runtime-int): required by curl_easy_getinfo
-			if (curl_easy_getinfo(*client.curl, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_OK) {
-				throw IOException("Failed to read the HTTP response status");
-			}
-			client.request_info->response_code = NumericCast<uint16_t>(response_code);
+			auto response_code = client.curl->GetResponseCode();
+			client.request_info->response_code = response_code;
 			if (response_code < 200 || (response_code >= 300 && response_code < 400)) {
 				return false;
 			}
@@ -391,14 +411,14 @@ public:
 
 		CURLcode res;
 		{
-			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
-			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
+			curl->SetOption(CURLOPT_NOBODY, 0L);
+			curl->SetOption(CURLOPT_HTTPGET, 1L);
 			CURLURLHandle url(curl_base_url);
 			SetRequestURL(url, info.url, info.path);
 
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 			GetTransferState transfer(*this, info);
 			res = curl->Execute();
 			return transfer.Finish(res);
@@ -425,25 +445,25 @@ public:
 			CURLURLHandle url(curl_base_url);
 			SetRequestURL(url, info.url, info.path);
 
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 
 			// Perform PUT
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "PUT");
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, "PUT");
 			// Include PUT body
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE_LARGE, NumericCast<curl_off_t>(info.buffer_in_len));
+			curl->SetOption(CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
+			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, NumericCast<curl_off_t>(info.buffer_in_len));
 
 			// Apply headers
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.Get());
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
+			curl->SetOption(CURLOPT_POSTFIELDS, nullptr);
+			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
 		}
 
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		request_info->response_code = curl->GetResponseCode();
 
 		return TransformBufferedResponseCurl(res);
 	}
@@ -462,25 +482,25 @@ public:
 		CURLcode res;
 		{
 			// Perform HEAD request instead of GET
-			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
-			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
+			curl->SetOption(CURLOPT_NOBODY, 1L);
+			curl->SetOption(CURLOPT_HTTPGET, 0L);
 
 			CURLURLHandle url(curl_base_url);
 			SetRequestURL(url, info.url, info.path);
 
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 
 			// Add headers if any
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.Get());
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute HEAD request
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
-			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
+			curl->SetOption(CURLOPT_NOBODY, 0L);
+			curl->SetOption(CURLOPT_HTTPGET, 1L);
 		}
 
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
 
@@ -499,22 +519,22 @@ public:
 			CURLURLHandle url(curl_base_url);
 			SetRequestURL(url, info.url, info.path);
 
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 
 			// Set DELETE request method
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, "DELETE");
 
 			// Add headers if any
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.Get());
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute DELETE request
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
 		}
 
 		// Get HTTP response status code
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
 
@@ -531,18 +551,18 @@ public:
 			CURLURLHandle url(curl_base_url);
 			SetRequestURL(url, info.url, info.path);
 
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "OPTIONS");
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, "OPTIONS");
 
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.Get());
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
 		}
 
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
 
@@ -567,29 +587,29 @@ public:
 			CURLURLHandle url(curl_base_url);
 			SetRequestURL(url, info.url, info.path);
 
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 			if (info.send_post_as_get_request) {
-				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "GET");
+				curl->SetOption(CURLOPT_CUSTOMREQUEST, "GET");
 			} else {
-				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
+				curl->SetOption(CURLOPT_POST, 1L);
 			}
 			// Set POST body
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, info.buffer_in_len);
+			curl->SetOption(CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
+			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, NumericCast<curl_off_t>(info.buffer_in_len));
 
 			// Add headers if any
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers.Get());
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute POST request
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, 0);
-			curl_easy_setopt(*curl, CURLOPT_POST, 0L);
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
+			curl->SetOption(CURLOPT_POSTFIELDS, nullptr);
+			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
+			curl->SetOption(CURLOPT_POST, 0L);
 		}
 
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		request_info->response_code = curl->GetResponseCode();
 		info.buffer_out = request_info->body;
 
 		return TransformBufferedResponseCurl(res);
@@ -622,6 +642,9 @@ private:
 	}
 
 	void ResetRequestInfo() {
+		if (!curl) {
+			throw IOException("Curl client must be reinitialized after failed callback configuration");
+		}
 		// clear headers after transform
 		request_info->header_collection.clear();
 		// reset request info.
@@ -670,7 +693,10 @@ private:
 		auto &state = GetCURLGlobalState();
 		annotated_lock_guard<annotated_mutex> lock(state.lock);
 		if (state.client_count == 0) {
-			curl_global_init(CURL_GLOBAL_DEFAULT);
+			auto result = curl_global_init(CURL_GLOBAL_DEFAULT);
+			if (result != CURLE_OK) {
+				throw IOException("Failed to initialize curl: %s", curl_easy_strerror(result));
+			}
 		}
 		++state.client_count;
 	}
