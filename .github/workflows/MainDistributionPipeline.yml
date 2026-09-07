@@ -29,7 +29,7 @@ jobs:
       - prepare
     with:
       extension_name: httpfs
-      duckdb_version: c38d7e0739a7377f0c3f9eb8f4b7b87b000db433
+      duckdb_version: 31151d40e6906f2056db8a2c45b336b153c9f871
       ci_tools_version: main
       runners: ${{ needs.prepare.outputs.runners }}
 
@@ -42,7 +42,7 @@ jobs:
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: c38d7e0739a7377f0c3f9eb8f4b7b87b000db433
+      duckdb_version: 31151d40e6906f2056db8a2c45b336b153c9f871
       ci_tools_version: main
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
@@ -52,7 +52,7 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
     with:
       extension_name: httpfs
-      duckdb_version: c38d7e0739a7377f0c3f9eb8f4b7b87b000db433
+      duckdb_version: 31151d40e6906f2056db8a2c45b336b153c9f871
       ci_tools_version: main
       extra_toolchains: 'python3'
       format_checks: 'format'
