@@ -38,12 +38,12 @@ CREATE TABLE test1 as SELECT * FROM range(10,20) tbl(i);
 query II
 EXPLAIN ANALYZE COPY test TO 's3://test-bucket-public/root-dir/metadata_cache/test.parquet';
 ----
-analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 0.*GET\: 0.*PUT\: 1.*\#POST\: 0.*
+analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 2.*GET\: 0.*PUT\: 1.*\#POST\: 0.*
 
 query II
 EXPLAIN ANALYZE COPY test TO 's3://test-bucket-public/root-dir/metadata_cache/test1.parquet';
 ----
-analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 0.*GET\: 0.*PUT\: 1.*\#POST\: 0.*
+analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 2.*GET\: 0.*PUT\: 1.*\#POST\: 0.*
 
 # Now we query the file metadata without the global metadata cache: There should be 1 HEAD request for the file size,
 # then a GET for the pointer to the parquet metadata, then a GET for the metadata.
@@ -72,6 +72,30 @@ query II
 EXPLAIN ANALYZE SELECT COUNT(*) FROM 's3://test-bucket-public/root-dir/metadata_cache/test1.parquet';
 ----
 analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 0.*GET\: 1.*PUT\: 0.*\#POST\: 0.*
+
+# A query-param-auth overwrite targets the same S3 object through a different handle path.
+# The following stale-cache read should detect the changed ETag, erase the cache entry,
+# and allow a retry to load the new metadata.
+statement ok
+COPY (SELECT * from range(0,10) tbl(i)) TO 's3://test-bucket-public/root-dir/metadata_cache/etag_mismatch.parquet' (FORMAT PARQUET);
+
+query I
+SELECT COUNT(*) FROM 's3://test-bucket-public/root-dir/metadata_cache/etag_mismatch.parquet';
+----
+10
+
+statement ok
+COPY (SELECT * from range(0,25) tbl(i)) TO 's3://test-bucket-public/root-dir/metadata_cache/etag_mismatch.parquet?s3_access_key_id={AWS_ACCESS_KEY_ID}&s3_secret_access_key={AWS_SECRET_ACCESS_KEY}' (FORMAT PARQUET);
+
+statement error
+SELECT COUNT(*) FROM 's3://test-bucket-public/root-dir/metadata_cache/etag_mismatch.parquet';
+----
+<REGEX>:.*ETag on reading file.*
+
+query I
+SELECT COUNT(*) FROM 's3://test-bucket-public/root-dir/metadata_cache/etag_mismatch.parquet';
+----
+25
 
 # Now when we write a file to a cached url, this would break so the cache entry should be invalidated
 statement ok

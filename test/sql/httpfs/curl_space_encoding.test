@@ -32,11 +32,11 @@ SET httpfs_client_implementation = curl
 foreach prefix s3:// r2:// s3a:// s3n://
 
 statement ok
-COPY test_1 TO '${prefix}test-bucket-public/url_encode/just because you can doesnt mean you should.parquet' (FORMAT 'parquet');
+COPY test_1 TO '{prefix}test-bucket-public/url_encode/just because you can doesnt mean you should.parquet' (FORMAT 'parquet');
 
 # For HTTP urls, we also allow regular spaces, which will get encoded to %20 by duckdb
 query I
-SELECT * FROM "http://test-bucket-public.${DUCKDB_S3_ENDPOINT}/url_encode/just because you can doesnt mean you should.parquet" LIMIT 1;
+SELECT * FROM "http://test-bucket-public.{DUCKDB_S3_ENDPOINT}/url_encode/just because you can doesnt mean you should.parquet" LIMIT 1;
 ----
 1
 

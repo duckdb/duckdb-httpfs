@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #Note: DONT run as root
 
+HTTPFS_SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
 if [ ! -f test/test_data/attach.db ]; then
     echo "File test/test_data/attach.db not found, run ./scripts/generate_presigned_url.sh to generate"
 else
-  rm -rf /tmp/minio_test_data
-  rm -rf /tmp/minio_root_data
+  "${HTTPFS_SCRIPT_DIR}/cleanup_s3_test_server.sh"
   mkdir -p /tmp/minio_test_data
   mkdir -p /tmp/minio_root_data
-  docker compose -f scripts/minio_s3.yml -p duckdb-minio up -d
+  docker compose -f "${HTTPFS_SCRIPT_DIR}/minio_s3.yml" -p duckdb-minio up -d
 
   # for testing presigned url
   container_name=$(docker ps -a --format '{{.Names}}' | grep -m 1 "duckdb-minio")

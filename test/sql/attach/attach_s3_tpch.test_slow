@@ -22,12 +22,15 @@ statement ok
 CREATE SECRET (
     TYPE S3,
     PROVIDER config,
-    KEY_ID '${AWS_ACCESS_KEY_ID}',
-    SECRET '${AWS_SECRET_ACCESS_KEY}',
-    REGION '${AWS_DEFAULT_REGION}',
-    ENDPOINT '${DUCKDB_S3_ENDPOINT}',
-    USE_SSL '${DUCKDB_S3_USE_SSL}'
+    KEY_ID '{AWS_ACCESS_KEY_ID}',
+    SECRET '{AWS_SECRET_ACCESS_KEY}',
+    REGION '{AWS_DEFAULT_REGION}',
+    ENDPOINT '{DUCKDB_S3_ENDPOINT}',
+    USE_SSL '{DUCKDB_S3_USE_SSL}'
 )
+
+statement ok
+CALL enable_logging('HTTP');
 
 # ATTACH a DuckDB database over HTTPFS
 statement ok
@@ -39,18 +42,18 @@ USE db
 loop i 1 9
 
 query I
-PRAGMA tpch(${i})
+PRAGMA tpch({i})
 ----
-<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q0${i}.csv
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q0{i}.csv
 
 endloop
 
 loop i 10 23
 
 query I
-PRAGMA tpch(${i})
+PRAGMA tpch({i})
 ----
-<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q${i}.csv
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q{i}.csv
 
 endloop
 
@@ -65,6 +68,14 @@ ATTACH 's3://test-bucket/presigned/lineitem_sf1.db' AS db (READONLY 1);
 
 statement ok
 USE db
+
+# every logged request must carry a User-Agent that identifies duckdb
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['User-Agent'] IS NULL
+   OR NOT starts_with(request.headers['User-Agent'], 'duckdb')
+----
+0
 
 query IIIIIIIIIIIIIIII
 select count(distinct columns(*)) from lineitem;

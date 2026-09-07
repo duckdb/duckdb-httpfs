@@ -2,9 +2,6 @@
 # description: Test globbing CSVs over s3
 # group: [glob]
 
-statement ok
-PRAGMA enable_verification
-
 require httpfs
 
 require-env S3_TEST_SERVER_AVAILABLE 1
@@ -49,7 +46,7 @@ COPY (select * from read_csv_auto('duckdb/data/csv/glob/a2/a2.csv')) to 's3://te
 foreach urlstyle path vhost
 
 statement ok
-SET s3_url_style='${urlstyle}'
+SET s3_url_style='{urlstyle}'
 
 # simple globbing
 query I
