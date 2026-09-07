@@ -1,0 +1,99 @@
+# name: test/sql/httpfs/http_extra_headers_setting.test
+# description: Test extra HTTP headers from the extra_http_headers setting
+# group: [httpfs]
+
+require httpfs
+
+require-env PYTHON_HTTP_SERVER_URL
+
+require-env PYTHON_HTTP_SERVER_DIR
+
+# FIXME: extra_http_headers is not yet in duckdb's autoload registry
+statement ok
+LOAD httpfs;
+
+statement ok
+SET enable_external_file_cache=false;
+
+query I
+SELECT current_setting('extra_http_headers');
+----
+{}
+
+statement ok
+COPY (SELECT 1 AS a) TO '{PYTHON_HTTP_SERVER_DIR}/extra_http_headers.csv';
+
+statement ok
+SET extra_http_headers = MAP {'X-Setting-One': 'one', 'X-Setting-Two': 'two'};
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+SELECT * FROM read_csv_auto('{PYTHON_HTTP_SERVER_URL}/extra_http_headers.csv');
+
+query II
+SELECT DISTINCT request.headers['X-Setting-One'], request.headers['X-Setting-Two']
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.type = 'GET'
+----
+one	two
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE SECRET extra_http_headers_setting_override (
+    TYPE HTTP,
+    EXTRA_HTTP_HEADERS MAP {
+        'X-Setting-One': 'secret'
+    }
+);
+
+statement ok
+SELECT * FROM read_csv_auto('{PYTHON_HTTP_SERVER_URL}/extra_http_headers.csv');
+
+query II
+SELECT DISTINCT request.headers['X-Setting-One'], request.headers['X-Setting-Two']
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.type = 'GET'
+----
+secret	two
+
+statement ok
+DROP SECRET extra_http_headers_setting_override;
+
+# SET replaces the map, so compose to add a header
+statement ok
+SET extra_http_headers = map_concat(current_setting('extra_http_headers'), MAP {'X-Setting-Three': 'three'});
+
+reconnect
+
+query II
+SELECT current_setting('extra_http_headers')['X-Setting-One'], current_setting('extra_http_headers')['X-Setting-Three'];
+----
+one	three
+
+statement error
+SET extra_http_headers = NULL;
+----
+NULL is not a valid option for extra_http_headers
+
+# NULL would otherwise be sent as the literal string "NULL"
+statement error
+SET extra_http_headers = MAP {'X-Setting-Null': NULL};
+----
+extra_http_headers value for "X-Setting-Null" must not be NULL
+
+statement ok
+CREATE SECRET extra_http_headers_null (
+    TYPE HTTP,
+    EXTRA_HTTP_HEADERS MAP {
+        'X-Secret-Null': NULL
+    }
+);
+
+statement error
+SELECT * FROM read_csv_auto('{PYTHON_HTTP_SERVER_URL}/extra_http_headers.csv')
+----
+extra_http_headers value for "X-Secret-Null" must not be NULL

@@ -1,0 +1,101 @@
+# name: test/sql/httpfs/user_agent_httplib.test
+# description: httplib client must send a duckdb User-Agent on every request type
+# group: [httpfs]
+
+#              (S3 LIST/glob, PUT, multipart POST, HEAD, GET, and generic HTTP)
+
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+require-env PYTHON_HTTP_SERVER_URL
+
+require-env PYTHON_HTTP_SERVER_DIR
+
+require httpfs
+
+require parquet
+
+statement ok
+SET httpfs_client_implementation='httplib';
+
+statement ok
+set s3_use_ssl='{DUCKDB_S3_USE_SSL}'
+
+statement ok
+set s3_endpoint='{DUCKDB_S3_ENDPOINT}'
+
+statement ok
+set s3_region='{AWS_DEFAULT_REGION}'
+
+statement ok
+CREATE SECRET s1 (TYPE S3, KEY_ID '{AWS_ACCESS_KEY_ID}', SECRET '{AWS_SECRET_ACCESS_KEY}')
+
+# shrink the aggregation threshold toward the 5 MiB minimum so a small write
+# still exercises the multipart path
+statement ok
+SET s3_uploader_max_filesize='50GB'
+
+statement ok
+SET s3_uploader_max_parts_per_file=10000
+
+# publish a file to the local dir the python http.server serves (local write, not HTTP)
+statement ok
+COPY (SELECT 42 AS a) TO '{PYTHON_HTTP_SERVER_DIR}/ua_http.csv'
+
+statement ok
+CALL enable_logging('HTTP');
+
+# --- write: single PUT + multipart POST ---
+statement ok
+COPY (SELECT 42 AS a) TO 's3://test-bucket/ua_small.parquet'
+
+statement ok
+COPY (SELECT repeat('x', 1000) AS a FROM range(6000)) TO 's3://test-bucket/ua_big.csv'
+
+# --- read: HEAD + ranged GET, then a forced full GET ---
+statement ok
+SELECT count(*) FROM 's3://test-bucket/ua_small.parquet'
+
+statement ok
+SET force_download=true
+
+statement ok
+SELECT count(*) FROM 's3://test-bucket/ua_small.parquet'
+
+statement ok
+SET force_download=false
+
+# --- list: glob issues an S3 LIST (GET) ---
+statement ok
+SELECT count(*) FROM glob('s3://test-bucket/*')
+
+# --- generic (non-S3) HTTP: HEAD + GET via HTTPFileSystem ---
+statement ok
+SELECT count(*) FROM '{PYTHON_HTTP_SERVER_URL}/ua_http.csv'
+
+# we actually exercised every verb
+query I
+SELECT count(*) FILTER (WHERE request.type = 'PUT')  > 0
+   AND count(*) FILTER (WHERE request.type = 'POST') > 0
+   AND count(*) FILTER (WHERE request.type = 'HEAD') > 0
+   AND count(*) FILTER (WHERE request.type = 'GET')  > 0
+FROM duckdb_logs_parsed('HTTP')
+----
+true
+
+# every logged request must carry a User-Agent that identifies duckdb
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['User-Agent'] IS NULL
+   OR NOT starts_with(request.headers['User-Agent'], 'duckdb')
+----
+0

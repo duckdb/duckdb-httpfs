@@ -4,6 +4,15 @@ project(HTTPFsExtension)
 
 add_extension_definitions()
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-Wpessimizing-move)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Werror=thread-safety)
+  add_compile_options(-Werror=mismatched-tags)
+endif()
+
 if (NOT EMSCRIPTEN)
   add_definitions(-DOVERRIDE_ENCRYPTION_UTILS=1)
 else()
@@ -32,14 +41,23 @@ build_loadable_extension(httpfs ${PARAMETERS} ${EXTENSION_SOURCES})
 if(EMSCRIPTEN)
   target_link_libraries(httpfs_loadable_extension duckdb_mbedtls)
 else()
-  target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
-                        ${OPENSSL_LIBRARIES})
-  target_link_libraries(httpfs_extension duckdb_mbedtls ${OPENSSL_LIBRARIES})
-
   # Link dependencies into extension
   target_link_libraries(httpfs_loadable_extension ${CURL_LIBRARIES})
   target_link_libraries(httpfs_extension ${CURL_LIBRARIES})
 
+  target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
+                        ${OPENSSL_LIBRARIES})
+  target_link_libraries(httpfs_extension duckdb_mbedtls ${OPENSSL_LIBRARIES})
+
+  if(APPLE)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
+    find_library(SECURITY_FRAMEWORK Security)
+    target_link_libraries(httpfs_loadable_extension
+                          ${COREFOUNDATION_FRAMEWORK}
+                          ${SECURITY_FRAMEWORK})
+    target_link_libraries(httpfs_extension ${COREFOUNDATION_FRAMEWORK}
+                          ${SECURITY_FRAMEWORK})
+  endif()
 
   if(MINGW)
     find_package(ZLIB)
@@ -54,3 +72,7 @@ install(
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+if(BUILD_UNITTESTS AND NOT EMSCRIPTEN)
+  add_subdirectory(test/unittest)
+endif()

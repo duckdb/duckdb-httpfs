@@ -36,8 +36,9 @@ FROM 's3://test-bucket/http_log/test.parquet'
 ----
 value-1
 
+# due to versioning, the GET will have optionally a `?versionId=..` encoded in the url
 query II rowsort
-SELECT request.type, parse_filename(request.url) FROM duckdb_logs_parsed('HTTP');
+SELECT request.type, parse_filename(request.url) ILIKE 'test.parquet%' FROM duckdb_logs_parsed('HTTP');
 ----
-GET	test.parquet
-HEAD	test.parquet
+GET	1
+HEAD	1

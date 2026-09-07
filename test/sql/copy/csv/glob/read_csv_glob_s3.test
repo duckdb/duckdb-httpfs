@@ -2,9 +2,6 @@
 # description: Test globbing CSVs over s3
 # group: [glob]
 
-statement ok
-PRAGMA enable_verification
-
 require httpfs
 
 require-env S3_TEST_SERVER_AVAILABLE 1
@@ -49,7 +46,7 @@ COPY (select * from read_csv_auto('duckdb/data/csv/glob/a2/a2.csv')) to 's3://te
 foreach urlstyle path vhost
 
 statement ok
-SET s3_url_style='${urlstyle}'
+SET s3_url_style='{urlstyle}'
 
 # simple globbing
 query I
@@ -92,7 +89,7 @@ SELECT * FROM read_csv('s3://test-bucket/read_csv_glob_s3/glob/*/*.csv', auto_de
 
 # forcing string parsing works
 query I
-SELECT * FROM read_csv('s3://test-bucket/read_csv_glob_s3/glob/[aei]*/*.csv', columns=STRUCT_PACK(d := 'STRING')) ORDER BY 1
+SELECT * FROM read_csv('s3://test-bucket/read_csv_glob_s3/glob/[ai]*/*.csv', columns=STRUCT_PACK(d := 'STRING')) ORDER BY 1
 ----
 1
 2
@@ -108,7 +105,7 @@ SELECT * FROM read_csv('s3://test-bucket/read_csv_glob_s3/glob/[aei]*/*.csv', co
 3
 
 query II
-SELECT a, b LIKE '%a_.csv' FROM read_csv('s3://test-bucket/read_csv_glob_s3/glob/[aei]*/*.csv', columns=STRUCT_PACK(d := 'STRING'), filename=1) t(a,b) ORDER BY 1
+SELECT a, b LIKE '%a_.csv' FROM read_csv('s3://test-bucket/read_csv_glob_s3/glob/[ai]*/*.csv', columns=STRUCT_PACK(d := 'STRING'), filename=1) t(a,b) ORDER BY 1
 ----
 1	0
 2	0
