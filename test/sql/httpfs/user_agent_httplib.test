@@ -28,16 +28,16 @@ statement ok
 SET httpfs_client_implementation='httplib';
 
 statement ok
-set s3_use_ssl='${DUCKDB_S3_USE_SSL}'
+set s3_use_ssl='{DUCKDB_S3_USE_SSL}'
 
 statement ok
-set s3_endpoint='${DUCKDB_S3_ENDPOINT}'
+set s3_endpoint='{DUCKDB_S3_ENDPOINT}'
 
 statement ok
-set s3_region='${AWS_DEFAULT_REGION}'
+set s3_region='{AWS_DEFAULT_REGION}'
 
 statement ok
-CREATE SECRET s1 (TYPE S3, KEY_ID '${AWS_ACCESS_KEY_ID}', SECRET '${AWS_SECRET_ACCESS_KEY}')
+CREATE SECRET s1 (TYPE S3, KEY_ID '{AWS_ACCESS_KEY_ID}', SECRET '{AWS_SECRET_ACCESS_KEY}')
 
 # shrink the aggregation threshold toward the 5 MiB minimum so a small write
 # still exercises the multipart path
@@ -49,7 +49,7 @@ SET s3_uploader_max_parts_per_file=10000
 
 # publish a file to the local dir the python http.server serves (local write, not HTTP)
 statement ok
-COPY (SELECT 42 AS a) TO '${PYTHON_HTTP_SERVER_DIR}/ua_http.csv'
+COPY (SELECT 42 AS a) TO '{PYTHON_HTTP_SERVER_DIR}/ua_http.csv'
 
 statement ok
 CALL enable_logging('HTTP');
@@ -80,7 +80,7 @@ SELECT count(*) FROM glob('s3://test-bucket/*')
 
 # --- generic (non-S3) HTTP: HEAD + GET via HTTPFileSystem ---
 statement ok
-SELECT count(*) FROM '${PYTHON_HTTP_SERVER_URL}/ua_http.csv'
+SELECT count(*) FROM '{PYTHON_HTTP_SERVER_URL}/ua_http.csv'
 
 # we actually exercised every verb
 query I

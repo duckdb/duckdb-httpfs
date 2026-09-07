@@ -92,15 +92,23 @@ struct TestS3SecretFunctions : public CreateS3SecretFunctions {
 	static void SetTestNamedParams(CreateSecretFunction &function, string type) {
 		SetBaseNamedParams(function, type);
 		function.named_parameters["test_id"] = LogicalType::VARCHAR;
+		function.named_parameters["test_extra_header_name"] = LogicalType::VARCHAR;
+		function.named_parameters["test_extra_header_value"] = LogicalType::VARCHAR;
 	}
 
 	static unique_ptr<BaseSecret> CreateTestSecret(ClientContext &context, CreateSecretInput &input) {
 		RecordProviderCall(GetOptionString(input, "test_id"), GetOptionString(input, "key_id"));
 
 		auto delegated_input = input;
-		auto test_id_entry = delegated_input.options.find("test_id");
-		if (test_id_entry != delegated_input.options.end()) {
-			delegated_input.options.erase(test_id_entry);
+		delegated_input.options.erase("test_id");
+		auto extra_header_name = GetOptionString(delegated_input, "test_extra_header_name");
+		auto extra_header_value = GetOptionString(delegated_input, "test_extra_header_value");
+		delegated_input.options.erase("test_extra_header_name");
+		delegated_input.options.erase("test_extra_header_value");
+		if (!extra_header_name.empty()) {
+			InsertionOrderPreservingMap<string> extra_headers;
+			extra_headers.insert(extra_header_name, extra_header_value);
+			delegated_input.options["extra_http_headers"] = Value::MAP(extra_headers);
 		}
 		return CreateSecretFunctionInternal(context, delegated_input);
 	}
@@ -133,12 +141,14 @@ void S3TestHelper::RegisterRefreshProvider(DuckDB &db) {
 	ExtensionActiveLoad load_info(*db.instance, extension_info, "httpfs_refresh_test", "");
 	ExtensionLoader loader(load_info);
 
-	CreateSecretFunction function;
-	function.secret_type = "s3";
-	function.provider = S3TestHelper::TEST_PROVIDER;
-	function.function = TestS3SecretFunctions::CreateTestSecret;
-	TestS3SecretFunctions::SetTestNamedParams(function, "s3");
-	loader.RegisterFunction(function);
+	for (const auto secret_type : {"s3", "gcs"}) {
+		CreateSecretFunction function;
+		function.secret_type = secret_type;
+		function.provider = S3TestHelper::TEST_PROVIDER;
+		function.function = TestS3SecretFunctions::CreateTestSecret;
+		TestS3SecretFunctions::SetTestNamedParams(function, secret_type);
+		loader.RegisterFunction(function);
+	}
 }
 
 void S3TestHelper::RequireQueryOk(Connection &con, const string &query) {
@@ -212,6 +222,12 @@ CREATE SECRET refresh_s3 (
 
 void S3TestHelper::ConfigureEndpointRefresh(DuckDB &db, Connection &con, MockS3Server &stale_server,
                                             MockS3Server &fresh_server, const string &client_implementation) {
+	ConfigureEndpointRefresh(db, con, stale_server.Endpoint(), fresh_server.Endpoint(), client_implementation, false);
+}
+
+string S3TestHelper::ConfigureEndpointRefresh(DuckDB &db, Connection &con, const string &initial_endpoint,
+                                              const string &refreshed_endpoint, const string &client_implementation,
+                                              bool refresh_credentials, const string &http_proxy) {
 	auto test_id = NextTestId();
 
 	LoadExtension(db);
@@ -223,6 +239,12 @@ void S3TestHelper::ConfigureEndpointRefresh(DuckDB &db, Connection &con, MockS3S
 	RequireQueryOk(con, "SET s3_region='us-east-1'");
 	RequireQueryOk(con, "SET s3_use_ssl=false");
 	RequireQueryOk(con, "SET s3_url_style='path'");
+	if (!http_proxy.empty()) {
+		RequireQueryOk(con, StringUtil::Format("SET http_proxy='%s'", http_proxy));
+	}
+
+	auto refreshed_key_id = refresh_credentials ? FRESH_KEY_ID : STALE_KEY_ID;
+	auto refreshed_secret = refresh_credentials ? FRESH_SECRET : STALE_SECRET;
 
 	RequireQueryOk(con, StringUtil::Format(R"(
 CREATE SECRET refresh_s3 (
@@ -241,9 +263,9 @@ CREATE SECRET refresh_s3 (
 	}
 ))",
 	                                       S3TestHelper::TEST_PROVIDER, S3TestHelper::STALE_KEY_ID,
-	                                       S3TestHelper::STALE_SECRET, stale_server.Endpoint(), test_id,
-	                                       S3TestHelper::STALE_KEY_ID, S3TestHelper::STALE_SECRET,
-	                                       fresh_server.Endpoint(), test_id));
+	                                       S3TestHelper::STALE_SECRET, initial_endpoint, test_id, refreshed_key_id,
+	                                       refreshed_secret, refreshed_endpoint, test_id));
+	return test_id;
 }
 
 void S3TestHelper::AssertSingleRefresh(const string &test_id) {
@@ -278,14 +300,36 @@ idx_t S3TestHelper::CountObservations(const vector<MockS3RequestObservation> &ob
 	return result;
 }
 
-vector<int> S3TestHelper::ObservationPorts(const vector<MockS3RequestObservation> &observations, const string &method,
-                                           const string &key_id, int status, const string &range) {
-	vector<int> result;
-	for (auto &observation : observations) {
-		if (observation.method == method && observation.key_id == key_id && observation.status == status &&
-		    observation.range == range) {
-			result.push_back(observation.remote_port);
+vector<MockS3RequestObservation>
+S3TestHelper::CompletionObservations(const vector<MockS3RequestObservation> &observations) {
+	vector<MockS3RequestObservation> result;
+	for (const auto &observation : observations) {
+		if (observation.method == "POST" && StringUtil::Contains(observation.target, "uploadId")) {
+			result.push_back(observation);
 		}
+	}
+	return result;
+}
+
+void S3TestHelper::RequireCompletionIdentity(const vector<MockS3RequestObservation> &observations,
+                                             idx_t expected_attempts) {
+	auto completions = CompletionObservations(observations);
+	REQUIRE(completions.size() == expected_attempts);
+	REQUIRE(completions.front().body_size > 0);
+	REQUIRE_FALSE(completions.front().body_digest.empty());
+	REQUIRE_FALSE(completions.front().upload_id.empty());
+	for (const auto &completion : completions) {
+		REQUIRE(completion.body_size == completions.front().body_size);
+		REQUIRE(completion.body_digest == completions.front().body_digest);
+		REQUIRE(completion.upload_id == completions.front().upload_id);
+	}
+}
+
+vector<string> S3TestHelper::CreateBulkDeletePaths(const string &scheme, idx_t count) {
+	vector<string> result;
+	result.reserve(count);
+	for (idx_t i = 0; i < count; i++) {
+		result.push_back(StringUtil::Format("%s://%s/object-%llu.bin", scheme, BUCKET, i));
 	}
 	return result;
 }

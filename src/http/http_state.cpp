@@ -1,7 +1,13 @@
 #include "http/http_state.hpp"
+#include "duckdb/common/http_util.hpp"
 #include "duckdb/main/query_profiler.hpp"
 
 namespace duckdb {
+
+bool HTTPStateCounters::IsEmpty() const {
+	return head_count == 0 && get_count == 0 && put_count == 0 && post_count == 0 && delete_count == 0 &&
+	       options_count == 0 && total_bytes_received == 0 && total_bytes_sent == 0;
+}
 
 unique_ptr<CachedFileHandle> CachedFile::TryGetHandle() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
@@ -123,12 +129,63 @@ void HTTPState::Reset() {
 	put_count = 0;
 	post_count = 0;
 	delete_count = 0;
+	options_count = 0;
 	total_bytes_received = 0;
 	total_bytes_sent = 0;
 
 	// Reset per-path state
 	annotated_lock_guard<annotated_mutex> lock(file_states_mutex);
 	file_states.clear();
+}
+
+void HTTPState::RecordRequest(RequestType request_type) {
+	switch (request_type) {
+	case RequestType::HEAD_REQUEST:
+		head_count++;
+		break;
+	case RequestType::GET_REQUEST:
+		get_count++;
+		break;
+	case RequestType::PUT_REQUEST:
+		put_count++;
+		break;
+	case RequestType::POST_REQUEST:
+		post_count++;
+		break;
+	case RequestType::DELETE_REQUEST:
+		delete_count++;
+		break;
+	case RequestType::OPTIONS_REQUEST:
+		options_count++;
+		break;
+	default:
+		throw InternalException("Unsupported HTTP request type");
+	}
+}
+
+void HTTPState::RecordBytesReceived(idx_t byte_count) {
+	total_bytes_received += byte_count;
+}
+
+void HTTPState::RecordBytesSent(idx_t byte_count) {
+	total_bytes_sent += byte_count;
+}
+
+HTTPStateCounters HTTPState::GetCounters() const {
+	HTTPStateCounters result;
+	result.head_count = head_count.load();
+	result.get_count = get_count.load();
+	result.put_count = put_count.load();
+	result.post_count = post_count.load();
+	result.delete_count = delete_count.load();
+	result.options_count = options_count.load();
+	result.total_bytes_received = total_bytes_received.load();
+	result.total_bytes_sent = total_bytes_sent.load();
+	return result;
+}
+
+bool HTTPState::IsEmpty() const {
+	return GetCounters().IsEmpty();
 }
 
 shared_ptr<HTTPState> HTTPState::TryGetState(ClientContext &context) {
@@ -144,13 +201,15 @@ shared_ptr<HTTPState> HTTPState::TryGetState(optional_ptr<FileOpener> opener) {
 }
 
 void HTTPState::WriteProfilingInformation(std::ostream &ss) {
-	string read = "in: " + StringUtil::BytesToHumanReadableString(total_bytes_received);
-	string written = "out: " + StringUtil::BytesToHumanReadableString(total_bytes_sent);
-	string head = "#HEAD: " + to_string(head_count);
-	string get = "#GET: " + to_string(get_count);
-	string put = "#PUT: " + to_string(put_count);
-	string post = "#POST: " + to_string(post_count);
-	string del = "#DELETE: " + to_string(delete_count);
+	auto counters = GetCounters();
+	string read = "in: " + StringUtil::BytesToHumanReadableString(counters.total_bytes_received);
+	string written = "out: " + StringUtil::BytesToHumanReadableString(counters.total_bytes_sent);
+	string head = "#HEAD: " + to_string(counters.head_count);
+	string get = "#GET: " + to_string(counters.get_count);
+	string put = "#PUT: " + to_string(counters.put_count);
+	string post = "#POST: " + to_string(counters.post_count);
+	string del = "#DELETE: " + to_string(counters.delete_count);
+	string options = "#OPTIONS: " + to_string(counters.options_count);
 
 	constexpr idx_t TOTAL_BOX_WIDTH = 39;
 	ss << "┌─────────────────────────────────────┐\n";
@@ -164,6 +223,7 @@ void HTTPState::WriteProfilingInformation(std::ostream &ss) {
 	ss << "││" + QueryProfiler::DrawPadded(put, TOTAL_BOX_WIDTH - 4) + "││\n";
 	ss << "││" + QueryProfiler::DrawPadded(post, TOTAL_BOX_WIDTH - 4) + "││\n";
 	ss << "││" + QueryProfiler::DrawPadded(del, TOTAL_BOX_WIDTH - 4) + "││\n";
+	ss << "││" + QueryProfiler::DrawPadded(options, TOTAL_BOX_WIDTH - 4) + "││\n";
 	ss << "│└───────────────────────────────────┘│\n";
 	ss << "└─────────────────────────────────────┘\n";
 }

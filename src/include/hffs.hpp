@@ -5,17 +5,14 @@
 namespace duckdb {
 
 struct ParsedHFUrl {
-	//! Path within the
-	string path;
-	//! Name of the repo (i presume)
-	string repository;
-
-	//! Endpoint, defaults to HF
-	string endpoint = "https://huggingface.co";
-	//! Which revision/branch/tag to use
-	string revision = "main";
-	//! For DuckDB this may be a sensible default?
+	//! Repository coordinates
 	string repo_type = "datasets";
+	string repository;
+	string revision = "main";
+
+	//! Request routing
+	string endpoint = "https://huggingface.co";
+	string path;
 };
 
 class HuggingFaceFileSystem : public HTTPFileSystem {
@@ -23,8 +20,16 @@ public:
 	~HuggingFaceFileSystem() override;
 
 public:
+	//! FileSystem overrides
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
+	bool CanHandleFile(const string &fpath) override {
+		return fpath.rfind("hf://", 0) == 0;
+	}
+	string GetName() const override {
+		return "HuggingFaceFileSystem";
+	}
 
+	//! HTTP request overrides
 	unique_ptr<HTTPResponse> HeadRequest(FileHandle &handle, const string &hf_url, HTTPHeaders header_map) override;
 	unique_ptr<HTTPResponse> GetRequest(FileHandle &handle, string hf_url, HTTPHeaders header_map,
 	                                    const HTTPReadConfig &read_config, CachedFileDownload &download) override;
@@ -32,27 +37,21 @@ public:
 	                                         const HTTPReadConfig &read_config, idx_t file_offset,
 	                                         data_ptr_t buffer_out, idx_t buffer_out_len) override;
 
-	bool CanHandleFile(const string &fpath) override {
-		return fpath.rfind("hf://", 0) == 0;
-	};
-
-	string GetName() const override {
-		return "HuggingFaceFileSystem";
-	}
-	static ParsedHFUrl HFUrlParse(const string &url);
+	//! List response parsing
 	static void ParseListResult(const string &input, vector<string> &files, vector<string> &directories);
-	static string GetHFUrl(const ParsedHFUrl &url);
-	string GetTreeUrl(const ParsedHFUrl &url, idx_t limit);
-	string GetFileUrl(const ParsedHFUrl &url);
-
-	static void SetParams(HTTPFSParams &params, const string &path, optional_ptr<FileOpener> opener);
 
 protected:
 	unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                        optional_ptr<FileOpener> opener) override;
 
-	static string ListHFRequest(ParsedHFUrl &url, HTTPFSParams &http_params, string &next_page_url,
-	                            optional_ptr<HTTPState> state);
+	static string ListHFRequest(const ParsedHFUrl &url, HTTPFSParams &http_params, string &next_page_url);
+
+private:
+	static ParsedHFUrl HFUrlParse(const string &url);
+	static string GetHFUrl(const ParsedHFUrl &url);
+	static string GetTreeUrl(const ParsedHFUrl &url, idx_t limit);
+	static string GetFileUrl(const ParsedHFUrl &url);
+	static void SetParams(HTTPFSParams &params, const string &path, optional_ptr<FileOpener> opener);
 };
 
 class HFFileHandle : public HTTPFileHandle {
@@ -65,7 +64,7 @@ public:
 	}
 	~HFFileHandle() override;
 
-protected:
+private:
 	ParsedHFUrl parsed_url;
 };
 

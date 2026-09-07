@@ -3,13 +3,14 @@
 #include <curl/curl.h>
 #include <utility>
 
-#include "duckdb/common/http_util.hpp"
+#include "http/httpfs_client.hpp"
 
 namespace duckdb {
 class HTTPLogger;
 class FileOpener;
 struct FileOpenerInfo;
 class HTTPState;
+class HTTPFSCurlClient;
 
 class CURLURLHandle {
 private:
@@ -49,11 +50,11 @@ private:
 };
 
 class CURLRequestHeaders {
+	friend class HTTPFSCurlClient;
+
 public:
-	CURLRequestHeaders() {
-	}
-	CURLRequestHeaders(CURLRequestHeaders &&other) noexcept {
-		headers = other.headers;
+	CURLRequestHeaders() = default;
+	CURLRequestHeaders(CURLRequestHeaders &&other) noexcept : headers(other.headers) {
 		other.headers = nullptr;
 	}
 	CURLRequestHeaders &operator=(CURLRequestHeaders &&other) noexcept {
@@ -69,16 +70,24 @@ public:
 		headers = nullptr;
 	}
 
-public:
-	explicit operator bool() const {
-		return headers != nullptr;
+private:
+	curl_slist *Get() const {
+		return headers;
 	}
 
+public:
 	void Add(const string &header) {
 		headers = curl_slist_append(headers, header.c_str());
 	}
+	void Add(const string &name, const string &value) {
+		if (HTTPFSHeaderValue::IsEmpty(value)) {
+			Add(name + ";");
+		} else {
+			Add(name + ": " + value);
+		}
+	}
 
-public:
+private:
 	curl_slist *headers = nullptr;
 };
 

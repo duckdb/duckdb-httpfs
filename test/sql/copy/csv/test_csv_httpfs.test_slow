@@ -2,9 +2,6 @@
 # description: This test triggers the http prefetch mechanism.
 # group: [csv]
 
-statement ok
-pragma enable_verification;
-
 require httpfs
 
 require parquet

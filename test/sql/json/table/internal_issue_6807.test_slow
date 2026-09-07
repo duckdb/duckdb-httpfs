@@ -6,6 +6,18 @@ require json
 
 require httpfs
 
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
 statement ok
 LOAD json;
 
@@ -13,12 +25,21 @@ statement ok
 LOAD httpfs;
 
 statement ok
+COPY (SELECT i, md5(i::VARCHAR) AS payload FROM range(1000000) t(i))
+TO 's3://test-bucket/internal_issue_6807.json.gz' (FORMAT JSON, COMPRESSION GZIP);
+
+statement ok
 CALL enable_logging('HTTP');
 
 statement ok
-CREATE TABLE T AS FROM 'https://data.gharchive.org/2023-02-08-0.json.gz';
+CREATE TABLE T AS FROM 's3://test-bucket/internal_issue_6807.json.gz';
 
 query I
-SELECT count(*) < 60 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET' GROUP BY request.type;
+SELECT count(*) FROM T;
+----
+1000000
+
+query I
+SELECT count(*) BETWEEN 2 AND 59 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET';
 ----
 true

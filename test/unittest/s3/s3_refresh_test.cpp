@@ -4,6 +4,7 @@
 #include "s3/s3_test_helper.hpp"
 
 #include "create_secret_functions.hpp"
+#include "crypto.hpp"
 #include "http/httpfs_client.hpp"
 #include "s3/s3fs.hpp"
 
@@ -12,6 +13,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
 #include <atomic>
@@ -180,14 +182,71 @@ static void RunBulkDeleteEndpointRefreshScenario(const string &client_implementa
 	REQUIRE(S3TestHelper::CountObservations(fresh_observations, "POST", S3TestHelper::STALE_KEY_ID, 200) == 1);
 }
 
+static void RunBulkDeleteR2PolicyRefreshScenario(const string &client_implementation, idx_t key_count) {
+	MockS3ServerConfig config;
+	config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+	config.auth.refresh_target = MockS3RefreshTarget::BULK_DELETE_POST;
+	config.bulk_delete.maximum_key_count = 700;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto test_id = S3TestHelper::ConfigureEndpointRefresh(db, con, "objects.example.com",
+	                                                      "account.r2.cloudflarestorage.com", client_implementation,
+	                                                      true, StringUtil::Format("http://%s", server.Endpoint()));
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	string error;
+	try {
+		auto &fs = FileSystem::GetFileSystem(*con.context);
+		fs.RemoveFiles(S3TestHelper::CreateBulkDeletePaths("s3", key_count));
+	} catch (std::exception &ex) {
+		error = ex.what();
+	}
+	INFO(error);
+	if (key_count <= 700) {
+		REQUIRE(error.empty());
+		S3TestHelper::RequireQueryOk(con, "COMMIT");
+	} else {
+		REQUIRE(error.find("Cannot send S3 bulk delete with 1000 keys") != string::npos);
+		REQUIRE(error.find("at most 700 keys per request") != string::npos);
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+	}
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	idx_t stale_requests = 0;
+	idx_t fresh_requests = 0;
+	for (const auto &observation : observations) {
+		if (observation.method != "POST" || !StringUtil::EndsWith(observation.target, "?delete=")) {
+			continue;
+		}
+		if (observation.key_id == S3TestHelper::STALE_KEY_ID) {
+			stale_requests++;
+			REQUIRE(observation.status == 403);
+			REQUIRE(observation.delete_key_count == key_count);
+		} else if (observation.key_id == S3TestHelper::FRESH_KEY_ID) {
+			fresh_requests++;
+			REQUIRE(observation.status == 200);
+			REQUIRE(observation.delete_key_count == key_count);
+		}
+	}
+	REQUIRE(stale_requests == 1);
+	REQUIRE(fresh_requests == (key_count <= 700 ? 1 : 0));
+	S3TestHelper::AssertSingleRefresh(test_id);
+}
+
 static void RunDeleteRefreshScenario(const string &client_implementation, bool connection_caching) {
 	auto observations = RunRefreshScenario(MockS3RefreshTarget::DELETE_OBJECT, client_implementation,
 	                                       connection_caching, [](Connection &con, const string &) {
 		                                       auto &fs = FileSystem::GetFileSystem(*con.context);
 		                                       fs.RemoveFile(S3TestHelper::S3_PATH);
 	                                       });
-	REQUIRE(MockS3HasObservation(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 403));
-	REQUIRE(MockS3HasObservation(observations, "DELETE", S3TestHelper::FRESH_KEY_ID, 204));
+	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 403) == 1);
+	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::FRESH_KEY_ID, 204) == 1);
+	for (const auto &observation : observations) {
+		REQUIRE(observation.method == "DELETE");
+	}
 }
 
 static void RunListGlobRefreshScenario(const string &client_implementation, bool connection_caching) {
@@ -382,14 +441,12 @@ static void PublishTestS3Region(const shared_ptr<HTTPRequestSession> &session, c
 	for (;;) {
 		auto captured = session->Capture();
 		auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-		if (snapshot.auth_params.region == region) {
+		if (snapshot.auth_params.GetCredentials().region == region) {
 			return;
 		}
-		auto auth_params = snapshot.auth_params;
-		auth_params.SetRegion(region);
-		auto http_params = snapshot.CreateRequestParams();
+		auto auth_params = snapshot.auth_params.WithRegion(region);
 		auto replacement = make_shared_ptr<S3RequestSnapshot>(
-		    *http_params, auth_params, snapshot.refresh_path, snapshot.client_context,
+		    snapshot.Params(), auth_params, snapshot.refresh_path, snapshot.client_context,
 		    snapshot.credential_refresh_enabled, true, snapshot.credential_generation);
 		if (session->TryPublish(captured.snapshot, std::move(replacement)).published) {
 			return;
@@ -432,10 +489,10 @@ static void RunRefreshPublicationScenario(const string &client_implementation, b
 	S3TestHelper::RequireQueryOk(con, "COMMIT");
 
 	auto &snapshot = session->Capture().snapshot->Cast<S3RequestSnapshot>();
-	REQUIRE(snapshot.auth_params.access_key_id == S3TestHelper::FRESH_KEY_ID);
+	REQUIRE(snapshot.auth_params.GetCredentials().access_key_id == S3TestHelper::FRESH_KEY_ID);
 	REQUIRE(snapshot.credential_generation == 1);
 	if (publish_region) {
-		REQUIRE(snapshot.auth_params.region == "eu-west-1");
+		REQUIRE(snapshot.auth_params.GetCredentials().region == "eu-west-1");
 		REQUIRE(snapshot.region_redirected);
 	}
 
@@ -456,7 +513,199 @@ static void RunRefreshPublicationScenario(const string &client_implementation, b
 	S3TestHelper::AssertSingleRefresh(test_id);
 }
 
+static void RunEndpointModeRefreshScenario(const string &initial_endpoint, const string &initial_resolved_endpoint,
+                                           S3EndpointMode initial_mode, const string &refreshed_endpoint,
+                                           const string &refreshed_resolved_endpoint, S3EndpointMode refreshed_mode,
+                                           const string &published_region = string()) {
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RegisterRefreshProvider(db);
+	auto test_id = S3TestHelper::NextTestId();
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE SECRET refresh_s3_endpoint_mode (
+	TYPE S3,
+	PROVIDER %s,
+	SCOPE 's3://refresh-bucket/',
+	KEY_ID '%s',
+	SECRET '%s',
+	REGION 'us-east-1',
+	ENDPOINT '%s',
+	TEST_ID '%s',
+	REFRESH_INFO MAP {
+		'KEY_ID': '%s',
+		'SECRET': '%s',
+		'REGION': 'us-east-1',
+		'ENDPOINT': '%s',
+		'TEST_ID': '%s'
+	}
+))",
+	                                                     S3TestHelper::TEST_PROVIDER, S3TestHelper::STALE_KEY_ID,
+	                                                     S3TestHelper::STALE_SECRET, initial_endpoint, test_id,
+	                                                     S3TestHelper::FRESH_KEY_ID, S3TestHelper::FRESH_SECRET,
+	                                                     refreshed_endpoint, test_id));
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	ClientContextFileOpener opener(*con.context);
+	FileOpenerInfo info = {S3TestHelper::S3_PATH};
+	auto auth_params = S3AuthResolver::Resolve(opener, info);
+	REQUIRE(auth_params.GetURLParams().endpoint_mode == initial_mode);
+	auto session = S3RequestExecutor::CreateSession(opener, S3TestHelper::S3_PATH, auth_params);
+	if (!published_region.empty()) {
+		string previous_region;
+		REQUIRE(S3RequestExecutor::SetSessionRegion(*session, published_region, previous_region));
+		REQUIRE(previous_region == "us-east-1");
+	}
+	::AESStateSSLFactory encryption_util;
+	vector<S3EndpointMode> observed_modes;
+	vector<string> observed_endpoints;
+	vector<string> observed_regions;
+	S3RequestSpec spec {S3TestHelper::S3_PATH,
+	                    S3RequestOperation::GET_OBJECT,
+	                    [](const ParsedS3Url &) { return S3RequestQuery(); },
+	                    "",
+	                    "",
+	                    ""};
+	auto result = S3RequestExecutor::RunSession(encryption_util, *session, spec, [&](S3RequestData &request_data) {
+		observed_modes.push_back(request_data.auth_params.GetURLParams().endpoint_mode);
+		observed_endpoints.push_back(request_data.auth_params.GetURLParams().endpoint.GetHost());
+		observed_regions.push_back(request_data.auth_params.GetCredentials().region);
+		if (observed_modes.size() == 1) {
+			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::Forbidden_403);
+			result->body = "<Error><Code>AccessDenied</Code><Message>stale credentials</Message></Error>";
+			return result;
+		}
+		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+	});
+	REQUIRE(result.response);
+	REQUIRE(result.response->status == HTTPStatusCode::OK_200);
+	REQUIRE(observed_modes == vector<S3EndpointMode> {initial_mode, refreshed_mode});
+	REQUIRE(observed_endpoints == vector<string> {initial_resolved_endpoint, refreshed_resolved_endpoint});
+	auto expected_region = published_region.empty() ? string("us-east-1") : published_region;
+	REQUIRE(observed_regions == vector<string> {expected_region, expected_region});
+	auto &snapshot = session->Capture().snapshot->Cast<S3RequestSnapshot>();
+	REQUIRE(snapshot.auth_params.GetURLParams().endpoint_mode == refreshed_mode);
+	REQUIRE(snapshot.auth_params.GetURLParams().endpoint.GetHost() == refreshed_resolved_endpoint);
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+	S3TestHelper::AssertSingleRefresh(test_id);
+}
+
+static void RunConfiguredHeaderRefreshScenario(const string &client_implementation, bool refresh_to_reserved_header) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+	config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RegisterRefreshProvider(db);
+	auto test_id = S3TestHelper::NextTestId();
+	S3TestHelper::RequireQueryOk(con,
+	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
+	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
+	S3TestHelper::RequireQueryOk(con, "SET httpfs_enable_credential_refresh=true");
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format("SET s3_endpoint='%s'", server.Endpoint()));
+	S3TestHelper::RequireQueryOk(con, "SET s3_region='us-east-1'");
+	S3TestHelper::RequireQueryOk(con, "SET s3_use_ssl=false");
+	S3TestHelper::RequireQueryOk(con, "SET s3_url_style='path'");
+	auto fresh_header_name = refresh_to_reserved_header ? "hOsT" : "x-GoOg-Meta-Fresh";
+	S3TestHelper::RequireQueryOk(con,
+	                             StringUtil::Format(R"(
+CREATE SECRET refresh_s3_headers (
+	TYPE S3,
+	PROVIDER %s,
+	SCOPE 's3://refresh-bucket/',
+	KEY_ID '%s',
+	SECRET '%s',
+	TEST_ID '%s',
+	TEST_EXTRA_HEADER_NAME 'X-AmZ-Meta-Stale',
+	TEST_EXTRA_HEADER_VALUE 'stale-value',
+	REFRESH_INFO MAP {
+		'KEY_ID': '%s',
+		'SECRET': '%s',
+		'TEST_ID': '%s',
+		'TEST_EXTRA_HEADER_NAME': '%s',
+		'TEST_EXTRA_HEADER_VALUE': 'fresh-value'
+	}
+))",
+	                                                S3TestHelper::TEST_PROVIDER, S3TestHelper::STALE_KEY_ID,
+	                                                S3TestHelper::STALE_SECRET, test_id, S3TestHelper::FRESH_KEY_ID,
+	                                                S3TestHelper::FRESH_SECRET, test_id, fresh_header_name));
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	string error;
+	try {
+		OpenForRead(con, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	} catch (std::exception &ex) {
+		error = ex.what();
+	}
+	S3TestHelper::RequireQueryOk(con, error.empty() ? "COMMIT" : "ROLLBACK");
+	auto observations = server.Observations();
+	INFO(client_implementation);
+	INFO(MockS3DescribeObservations(observations));
+	S3TestHelper::AssertSingleRefresh(test_id);
+	REQUIRE(observations.size() == (refresh_to_reserved_header ? 1 : 2));
+	const auto &stale_observation = observations[0];
+	REQUIRE(stale_observation.key_id == S3TestHelper::STALE_KEY_ID);
+	REQUIRE(stale_observation.status == 403);
+	REQUIRE(MockS3HeaderValues(stale_observation, "X-AmZ-Meta-Stale") == vector<string> {"stale-value"});
+	REQUIRE(StringUtil::Contains(stale_observation.authorization, "x-amz-meta-stale"));
+
+	if (refresh_to_reserved_header) {
+		REQUIRE(StringUtil::Contains(error, "hOsT"));
+		REQUIRE(StringUtil::Contains(error, "Host"));
+		return;
+	}
+
+	REQUIRE(error.empty());
+	const auto &fresh_observation = observations[1];
+	REQUIRE(fresh_observation.key_id == S3TestHelper::FRESH_KEY_ID);
+	REQUIRE(fresh_observation.status == 200);
+	REQUIRE(MockS3HeaderValues(fresh_observation, "x-GoOg-Meta-Fresh") == vector<string> {"fresh-value"});
+	REQUIRE(MockS3HeaderValues(fresh_observation, "X-AmZ-Meta-Stale").empty());
+	REQUIRE(StringUtil::Contains(fresh_observation.authorization, "x-goog-meta-fresh"));
+	REQUIRE_FALSE(StringUtil::Contains(fresh_observation.authorization, "x-amz-meta-stale"));
+}
+
 } // namespace
+
+TEST_CASE("Explicit S3 versions survive credential refresh", "[httpfs][s3][refresh][s3-version]") {
+	for (const auto &client : {"curl", "httplib"}) {
+		for (auto target : {MockS3RefreshTarget::HEAD, MockS3RefreshTarget::RANGE_GET, MockS3RefreshTarget::FULL_GET}) {
+			DYNAMIC_SECTION(client << " " << MockS3RefreshTargetName(target)) {
+				auto observations =
+				    RunRefreshScenario(target, client, false, [&](Connection &con, const string &object_data) {
+					    const bool full_download = target == MockS3RefreshTarget::FULL_GET;
+					    S3TestHelper::RequireQueryOk(con, "SET s3_version_id_pinning=false");
+					    S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
+					    if (full_download) {
+						    S3TestHelper::RequireQueryOk(con, "SET force_download=true");
+					    }
+					    auto &fs = FileSystem::GetFileSystem(*con.context);
+					    auto handle =
+					        fs.OpenFile(string(S3TestHelper::S3_PATH) + "?s3_version_id=chosen%2Fversion",
+					                    full_download ? FileFlags::FILE_FLAGS_READ
+					                                  : FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+					    string buffer(8, '\0');
+					    handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 0);
+					    REQUIRE(buffer == object_data.substr(0, buffer.size()));
+				    });
+				REQUIRE(observations.size() >= 2);
+				for (const auto &observation : observations) {
+					REQUIRE(observation.version_id == "chosen/version");
+				}
+				const auto method = target == MockS3RefreshTarget::HEAD ? "HEAD" : "GET";
+				const auto range = target == MockS3RefreshTarget::RANGE_GET ? "bytes=0-7" : "";
+				const auto status = target == MockS3RefreshTarget::RANGE_GET ? 206 : 200;
+				REQUIRE(MockS3HasObservation(observations, method, S3TestHelper::STALE_KEY_ID, 403, range));
+				REQUIRE(MockS3HasObservation(observations, method, S3TestHelper::FRESH_KEY_ID, status, range));
+			}
+		}
+	}
+}
 
 TEST_CASE("HTTPFS refreshes S3 credentials across request methods", "[httpfs][s3][refresh]") {
 	SECTION("httplib without connection caching") {
@@ -552,12 +801,47 @@ TEST_CASE("S3 credential refresh composes with a concurrent region publication",
 	}
 }
 
+TEST_CASE("S3 credential refresh reconstructs endpoint provenance", "[httpfs][s3][refresh][endpoint]") {
+	SECTION("explicit to automatic") {
+		RunEndpointModeRefreshScenario("s3.dualstack.us-east-1.amazonaws.com", "s3.dualstack.us-east-1.amazonaws.com",
+		                               S3EndpointMode::EXPLICIT, "s3.amazonaws.com", "s3.us-east-1.amazonaws.com",
+		                               S3EndpointMode::AUTOMATIC);
+	}
+	SECTION("automatic to explicit") {
+		RunEndpointModeRefreshScenario("s3.amazonaws.com", "s3.eu-west-1.amazonaws.com", S3EndpointMode::AUTOMATIC,
+		                               "s3.dualstack.us-east-1.amazonaws.com", "s3.dualstack.us-east-1.amazonaws.com",
+		                               S3EndpointMode::EXPLICIT, "eu-west-1");
+	}
+}
+
+TEST_CASE("S3 credential refresh revalidates and re-signs configured headers", "[httpfs][s3][refresh][headers]") {
+	for (const string client_implementation : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client_implementation << " signs refreshed header material") {
+			RunConfiguredHeaderRefreshScenario(client_implementation, false);
+		}
+		DYNAMIC_SECTION(client_implementation << " rejects a refreshed reserved header before dispatch") {
+			RunConfiguredHeaderRefreshScenario(client_implementation, true);
+		}
+	}
+}
+
 TEST_CASE("HTTPFS bulk delete follows a refreshed S3 endpoint", "[httpfs][s3][refresh]") {
 	SECTION("httplib") {
 		RunBulkDeleteEndpointRefreshScenario("httplib");
 	}
 	SECTION("curl") {
 		RunBulkDeleteEndpointRefreshScenario("curl");
+	}
+}
+
+TEST_CASE("HTTPFS bulk delete revalidates R2 limits after endpoint refresh", "[httpfs][s3][refresh][delete]") {
+	for (const string client_implementation : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client_implementation << " accepts a compatible prepared batch") {
+			RunBulkDeleteR2PolicyRefreshScenario(client_implementation, 700);
+		}
+		DYNAMIC_SECTION(client_implementation << " rejects an oversized prepared batch before dispatch") {
+			RunBulkDeleteR2PolicyRefreshScenario(client_implementation, 1000);
+		}
 	}
 }
 

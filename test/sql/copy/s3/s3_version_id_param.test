@@ -21,9 +21,15 @@ require-env DUCKDB_S3_USE_SSL
 # override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
 set ignore_error_messages
 
-# disable external file cache to avoid interference from locally cached file content
+# Different versions must remain separate in both caches.
 statement ok
-SET enable_external_file_cache=false;
+SET enable_external_file_cache=true;
+
+statement ok
+SET enable_http_metadata_cache=true;
+
+statement ok
+SET s3_version_id_pinning=false;
 
 # Create two differing tables so we can distinguish them
 statement ok
@@ -42,9 +48,15 @@ COPY T1 TO 's3://test-bucket/root-dir/version_id_param/test.parquet';
 statement ok
 SET VARIABLE v1 = (SELECT response.headers['x-amz-version-id'] FROM duckdb_logs_parsed('HTTP') WHERE request.type='PUT' AND request.url LIKE '%version_id_param%' LIMIT 1);
 
+statement ok
+CALL truncate_duckdb_logs();
+
 # Overwrite the file with T2 and hence also the latest version
 statement ok
 COPY T2 TO 's3://test-bucket/root-dir/version_id_param/test.parquet';
+
+statement ok
+SET VARIABLE v2 = (SELECT response.headers['x-amz-version-id'] FROM duckdb_logs_parsed('HTTP') WHERE request.type='PUT' AND request.url LIKE '%version_id_param%' LIMIT 1);
 
 # A plain read returns the latest version
 query I
@@ -63,6 +75,37 @@ SELECT DISTINCT request.type FROM duckdb_logs_parsed('HTTP') WHERE request.url I
 ----
 GET
 HEAD
+
+# Make both explicit versions historical, then alternate cached reads.
+statement ok
+COPY (SELECT 42 AS i) TO 's3://test-bucket/root-dir/version_id_param/test.parquet';
+
+loop pass 0 2
+
+query II
+SELECT COUNT(*), SUM(i) FROM read_parquet('s3://test-bucket/root-dir/version_id_param/test.parquet?s3_version_id=' || getvariable('v2'));
+----
+200	2646700
+
+query II
+SELECT COUNT(*), SUM(i) FROM read_parquet('s3://test-bucket/root-dir/version_id_param/test.parquet?s3_version_id=' || getvariable('v1'));
+----
+100	4950
+
+query II
+SELECT COUNT(*), SUM(i) FROM 's3://test-bucket/root-dir/version_id_param/test.parquet';
+----
+1	42
+
+endloop
+
+statement ok
+SET s3_version_id_pinning=true;
+
+query I
+SELECT COUNT(*) FROM read_parquet('s3://test-bucket/root-dir/version_id_param/test.parquet?s3_version_id=' || getvariable('v1'));
+----
+100
 
 # Writing to a specific version_id is not possible, they are generated on the server
 statement error

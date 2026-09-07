@@ -55,7 +55,7 @@ TEST_CASE("Hugging Face list status errors preserve HTTP metadata", "[httpfs][hf
 	string next_page_url = url.endpoint + "/missing-hugging-face-page";
 
 	try {
-		TestHuggingFaceFileSystem::ListHFRequest(url, httpfs_params, next_page_url, nullptr);
+		TestHuggingFaceFileSystem::ListHFRequest(url, httpfs_params, next_page_url);
 		FAIL("Expected the missing page to fail");
 	} catch (std::exception &ex) {
 		ErrorData error(ex);

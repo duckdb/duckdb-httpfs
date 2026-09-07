@@ -12,22 +12,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-slim' || 'ubuntu-slim' }}
+    name: Prepare
+    outputs:
+      runners: ${{ steps.runners.outputs.runners }}
+    steps:
+      - name: Detect runners
+        id: runners
+        uses: duckdb/duckdb-ci/detect-runners@main
+
   duckdb-stable-build:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    needs:
+      - prepare
     with:
       extension_name: httpfs
-      duckdb_version: 043e1894425b49984c5010f253589e5d9c5fdde4
+      duckdb_version: c38d7e0739a7377f0c3f9eb8f4b7b87b000db433
       ci_tools_version: main
+      runners: ${{ needs.prepare.outputs.runners }}
 
   duckdb-stable-deploy:
     name: Deploy extension binaries
-    needs: duckdb-stable-build
+    needs:
+      - prepare
+      - duckdb-stable-build
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: 043e1894425b49984c5010f253589e5d9c5fdde4
+      duckdb_version: c38d7e0739a7377f0c3f9eb8f4b7b87b000db433
       ci_tools_version: main
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
@@ -37,8 +52,9 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
     with:
       extension_name: httpfs
-      duckdb_version: 043e1894425b49984c5010f253589e5d9c5fdde4
+      duckdb_version: c38d7e0739a7377f0c3f9eb8f4b7b87b000db433
       ci_tools_version: main
+      extra_toolchains: 'python3'
       format_checks: 'format'
 
   tidy:

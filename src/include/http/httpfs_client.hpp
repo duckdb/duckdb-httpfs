@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/array.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/vector.hpp"
@@ -34,6 +35,17 @@ class HTTPException;
 
 enum class HTTPClientReuseMode : uint8_t { SESSION_LOCAL, SHARED, NONE };
 
+struct HTTPFSHeaderValue {
+	static bool IsEmpty(const string &value) {
+		for (const auto character : value) {
+			if (character != ' ' && character != '\t') {
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
 struct HTTPFSParams : public HTTPParams {
 public:
 	explicit HTTPFSParams(HTTPUtil &http_util) : HTTPParams(http_util) {
@@ -61,7 +73,6 @@ public:
 	bool s3_version_id_pinning {false};
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
-	bool pre_merged_headers = false;
 	idx_t force_download_threshold = 0;
 	HTTPClientReuseMode client_reuse_mode = HTTPClientReuseMode::SESSION_LOCAL;
 	optional_ptr<HTTPFSUtil> httpfs_util;
@@ -93,6 +104,7 @@ public:
 	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
 
 	//! Clear any cached connections
 	virtual void ClearCachedConnections();
@@ -112,9 +124,12 @@ public:
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
+	unique_ptr<HTTPClient> InitializeClientExtended(HTTPParams &http_params, const string &proto_host_port,
+	                                                const HTTPClientInitializationOptions &options) override;
 	void CloseClient(unique_ptr<HTTPClient> &&client) override;
 	void ClearCachedConnections() override;
 	HTTPClientReuseMode GetClientReuseMode() const override;
+	void SetConnectionCachingEnabled(bool enabled);
 	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override;
 
 	string GetName() const override;
@@ -125,20 +140,17 @@ private:
 	//! Send request without caching (delegates to HTTPUtil::SendRequest)
 	unique_ptr<HTTPResponse> BaseSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client);
 
-	bool EnableCaching(BaseRequest &request);
-
-public:
-	//! Whether connection caching is enabled
-	bool connection_caching_enabled = true;
+	bool EnableCaching(const BaseRequest &request) const;
+	bool ConnectionCachingEnabled() const;
+	unique_ptr<HTTPClient> FindCachedClient(const string &base_url);
+	void StoreCachedClient(unique_ptr<HTTPClient> &&client);
 
 private:
+	//! Shared connection-cache state
+	atomic<bool> connection_caching_enabled {true};
 	HTTPClientConnectionCache connection_cache;
 };
 
 #endif
-
-struct HeaderCollector {
-	vector<HTTPHeaders> header_collection;
-};
 
 } // namespace duckdb

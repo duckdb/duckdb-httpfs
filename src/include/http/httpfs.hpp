@@ -150,7 +150,6 @@ public:
 	bool IsPipe(const string &filename, optional_ptr<FileOpener> opener) override;
 	string GetName() const override;
 	string PathSeparator(const string &path) override;
-	static void Verify();
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, RequestType request_type,

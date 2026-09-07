@@ -22,8 +22,6 @@
 #include <map>
 #include <string>
 
-#include "s3/s3_url.hpp"
-
 namespace duckdb {
 
 void RangeRequestNotSupportedException::Throw() {
@@ -35,6 +33,19 @@ HTTPUtil &HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 		return opener->GetHTTPUtil();
 	}
 	throw InternalException("FileOpener not provided, can't get HTTPUtil");
+}
+
+void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) {
+	if (!request.params.logger || !request.params.logger->ShouldLog(HTTPLogType::NAME, HTTPLogType::LEVEL)) {
+		return;
+	}
+	if (!request.headers.HasHeader("x-amz-server-side-encryption-customer-key")) {
+		HTTPUtil::LogRequest(request, response);
+		return;
+	}
+	auto sanitized_request = request;
+	sanitized_request.headers["x-amz-server-side-encryption-customer-key"] = "redacted";
+	HTTPUtil::LogRequest(sanitized_request, response);
 }
 
 struct HTTPParametersInitializer {
@@ -94,7 +105,7 @@ private:
 		}
 	}
 
-	SettingLookupResult TryGetSetting(const string &key, Value &value) {
+	SettingLookupResult TryGetSetting(const Identifier &key, Value &value) {
 		if (info) {
 			return FileOpener::TryGetCurrentSetting(opener, key, value, *info);
 		}
@@ -126,9 +137,18 @@ private:
 		}
 	}
 
+	bool IsS3Path() {
+		if (!info) {
+			return false;
+		}
+		auto db = FileOpener::TryGetDatabase(opener);
+		auto aliases = db ? S3UrlScheme::GetAliasPrefixes(db->config) : vector<string>();
+		return S3UrlScheme::TryMatch(info->file_path, aliases).has_value();
+	}
+
 	unique_ptr<KeyValueSecretReader> CreateSettingsReader() {
-		if (info && !S3Url::TryGetPrefix(info->file_path).empty()) {
-			auto provider_secret_types = S3Provider::SecretTypes();
+		if (IsS3Path()) {
+			auto provider_secret_types = S3SecretConfig::SecretTypes();
 			vector<const char *> s3_secret_types(provider_secret_types.begin(), provider_secret_types.end());
 			s3_secret_types.push_back("http");
 			idx_t secret_type_count = s3_secret_types.size();
@@ -815,12 +835,12 @@ void HTTPFileHandle::InitializeRequestState(optional_ptr<FileOpener> opener) {
 		buffer_allocator = database ? BufferAllocator::Get(*database) : Allocator::DefaultAllocator();
 	}
 	auto captured = request_session->Capture();
-	auto request_params = captured.snapshot->CreateRequestParams();
-	request_params->state = HTTPState::TryGetState(opener);
-	if (!request_params->state) {
-		request_params->state = make_shared_ptr<HTTPState>();
+	auto snapshot_params = captured.snapshot->Params();
+	snapshot_params.state = HTTPState::TryGetState(opener);
+	if (!snapshot_params.state) {
+		snapshot_params.state = make_shared_ptr<HTTPState>();
 	}
-	request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(*request_params));
+	request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
 	auto request_snapshot = request_session->Capture().snapshot;
 	file_state = request_snapshot->Params().state->GetFileState(path);
 

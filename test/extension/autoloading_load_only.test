@@ -22,7 +22,7 @@ set autoinstall_known_extensions=false
 statement error
 SET s3_region='eu-west-1';
 ----
-<REGEX>:.*Catalog Error.*Setting with name "s3_region" is not in the catalog.*
+<REGEX>:.*Catalog Error.*Setting with name s3_region is not in the catalog.*
 
 ### Autoloading but not autoinstall, while the extension is not installed: still not working
 statement ok

@@ -19,6 +19,8 @@ enum class MockS3RefreshTarget : uint8_t {
 
 enum class MockS3RangeBehavior : uint8_t { NORMAL, IGNORE_RANGE, TRUNCATE_TRANSFER, SHORT_SUCCESS };
 
+enum class MockS3MalformedListBehavior : uint8_t { TRUNCATED_XML, FOREIGN_NAMESPACE_KEY };
+
 enum class MockS3MultipartInitializationBehavior : uint8_t {
 	SUCCESS,
 	NAMESPACED_ESCAPED_SUCCESS,
@@ -36,6 +38,10 @@ enum class MockS3MultipartCompletionBehavior : uint8_t {
 };
 
 enum class MockS3MultipartAbortBehavior : uint8_t { SUCCESS, ERROR };
+
+enum class MockS3MultipartGeometry : uint8_t { FLEXIBLE, FIXED_EQUAL };
+
+enum class MockS3ETagBehavior : uint8_t { VALUE, EMPTY, OMIT };
 
 struct MockS3ObjectConfig {
 	string bucket = "refresh-bucket";
@@ -64,6 +70,21 @@ struct MockS3MetadataConfig {
 	bool enforce_if_match = false;
 	//! Override the Content-Length reported by HEAD while keeping the GET body unchanged
 	optional_idx head_content_length;
+	//! Extra HEAD response headers, including repeated field lines
+	vector<std::pair<string, string>> response_headers;
+	//! Write empty response fields without optional whitespace after the colon
+	bool exact_empty_response_headers = false;
+	//! Emit one HTTP redirect before the successful HEAD response
+	bool redirect_head = false;
+	vector<std::pair<string, string>> redirect_response_headers;
+};
+
+struct MockS3CompletionFaultConfig {
+	//! Number of leading multipart-completion responses to replace
+	idx_t count = 0;
+	int status = 200;
+	string code = "InternalError";
+	string message = "Injected multipart completion failure";
 };
 
 struct MockS3FailureConfig {
@@ -71,6 +92,9 @@ struct MockS3FailureConfig {
 	idx_t transient_503_lists = 0;
 	//! Answer this many leading ListObjectsV2 requests with HTTP 400
 	idx_t transient_400_lists = 0;
+	//! Answer this many leading ListObjectsV2 requests with malformed HTTP 200 bodies
+	idx_t malformed_success_lists = 0;
+	MockS3MalformedListBehavior malformed_list_behavior = MockS3MalformedListBehavior::TRUNCATED_XML;
 	//! Number of object PUTs to fail with a 400 before succeeding
 	idx_t transient_put_failures = 0;
 	//! Number of object GETs to fail with a 400 before succeeding
@@ -81,16 +105,28 @@ struct MockS3FailureConfig {
 	idx_t head_not_found_requests = 0;
 	//! Number of object DELETEs to fail with a 400 before succeeding
 	idx_t transient_delete_failures = 0;
-	//! Number of multipart-init POSTs (uploads=) to fail with a 400 before succeeding
+	//! Number of object DELETE responses to disconnect before succeeding
+	idx_t transient_delete_disconnects = 0;
+	//! Number of multipart-init POSTs (uploads=) to fail before succeeding
 	idx_t transient_post_failures = 0;
-	//! Number of multipart-complete POSTs (uploadId=) to fail with a 400 before succeeding
-	idx_t transient_complete_post_failures = 0;
-	//! Number of multipart-complete POSTs to answer with an HTTP 200 containing InternalError before succeeding
-	idx_t transient_complete_post_200_errors = 0;
+	//! HTTP status used for injected multipart-init failures
+	int transient_post_status = 400;
+	//! Leading multipart-completion response fault
+	MockS3CompletionFaultConfig completion_fault;
 	//! Whether injected 400s carry S3's retryable RequestTimeout code or a generic (non-retryable) code
 	bool failure_is_request_timeout = true;
 	//! Whether injected 400 bodies are truncated mid-XML (an open <Code> with no closing tag)
 	bool truncated_failure_body = false;
+};
+
+struct MockS3ListConfig {
+	//! Return a truncated first page before the final object page
+	bool paginate = false;
+};
+
+struct MockS3BulkDeleteConfig {
+	//! Reject DeleteObjects requests containing more than this many keys
+	optional_idx maximum_key_count;
 };
 
 struct MockS3RangeConfig {
@@ -115,7 +151,26 @@ struct MockS3FullGetConfig {
 	bool block_until_released = false;
 };
 
+struct MockS3PutResponseConfig {
+	int status = 200;
+	MockS3ETagBehavior etag = MockS3ETagBehavior::VALUE;
+};
+
+struct MockS3HTTPResponseConfig {
+	string object_put_body;
+	string object_delete_body;
+	//! Zero retains the default 204/200 selection based on whether a body is configured
+	int object_delete_status = 0;
+	string options_body;
+};
+
 struct MockS3UploadConfig {
+	//! PUT response behavior
+	MockS3PutResponseConfig object_put;
+	MockS3PutResponseConfig multipart_part_put;
+
+	//! Existing object preserved when an upload is abandoned
+	string initial_published_object;
 	//! Multipart upload ID returned by the mock server
 	string upload_id = "refresh-test-upload-id";
 	//! Hold these one-based part numbers until ReleasePartUploads is called
@@ -126,20 +181,36 @@ struct MockS3UploadConfig {
 	bool block_initialization = false;
 	MockS3MultipartInitializationBehavior initialization_behavior = MockS3MultipartInitializationBehavior::SUCCESS;
 	MockS3MultipartCompletionBehavior completion_behavior = MockS3MultipartCompletionBehavior::SUCCESS;
+	//! HTTP status sent before disconnecting a multipart-completion response body
+	int completion_disconnect_status = 200;
 	MockS3MultipartAbortBehavior abort_behavior = MockS3MultipartAbortBehavior::SUCCESS;
+	MockS3MultipartGeometry geometry = MockS3MultipartGeometry::FLEXIBLE;
+};
+
+struct MockS3SSECustomerConfig {
+	//! Raw keys accepted by the mock; request observations never retain them
+	vector<string> accepted_keys;
 };
 
 struct MockS3ServerConfig {
+	//! Path prefix configured as part of the endpoint, without a trailing slash
+	string endpoint_base_path;
+	bool use_ssl = false;
 	MockS3ObjectConfig object;
 	MockS3AuthConfig auth;
 	MockS3MetadataConfig metadata;
 	MockS3FailureConfig failures;
+	MockS3ListConfig list;
+	MockS3BulkDeleteConfig bulk_delete;
 	MockS3RangeConfig range;
 	MockS3FullGetConfig full_get;
 	MockS3UploadConfig upload;
+	MockS3SSECustomerConfig sse_customer;
+	MockS3HTTPResponseConfig http_response;
 };
 
 struct MockS3RequestObservation {
+	vector<std::pair<string, string>> headers;
 	string method;
 	string path;
 	string target;
@@ -154,12 +225,18 @@ struct MockS3RequestObservation {
 	string upload_id;
 	string server_side_encryption;
 	string kms_key_id;
+	string sse_customer_algorithm;
+	string sse_customer_key_md5;
 	string body_digest;
 	optional_idx part_number;
 	idx_t body_size = 0;
+	idx_t delete_key_count = 0;
 	idx_t user_agent_count = 0;
 	idx_t session_header_count = 0;
 	int status = 0;
+	bool multipart_upload_published = false;
+	bool has_sse_customer_key = false;
+	bool sse_customer_key_matches = false;
 	//! Client's ephemeral source port; a new connection shows a new port
 	int remote_port = 0;
 };
@@ -199,6 +276,7 @@ string MockS3RefreshTargetName(MockS3RefreshTarget target);
 bool MockS3HasObservation(const vector<MockS3RequestObservation> &observations, const string &method,
                           const string &key_id, int status, const string &range = string(),
                           const string &target_contains = string());
+vector<string> MockS3HeaderValues(const MockS3RequestObservation &observation, const string &name);
 string MockS3DescribeObservations(const vector<MockS3RequestObservation> &observations);
 
 } // namespace duckdb

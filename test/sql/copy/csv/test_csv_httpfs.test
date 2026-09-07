@@ -6,8 +6,6 @@ require httpfs
 
 require parquet
 
-statement ok
-PRAGMA enable_verification
 
 statement ok
 CALL enable_logging('HTTP');

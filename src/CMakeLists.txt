@@ -1,5 +1,4 @@
-set(HTTPFS_SOURCES hffs.cpp hash_functions.cpp create_secret_functions.cpp
-                   httpfs_extension.cpp)
+set(HTTPFS_SOURCES hffs.cpp create_secret_functions.cpp httpfs_extension.cpp)
 if(NOT EMSCRIPTEN)
   list(APPEND HTTPFS_SOURCES crypto.cpp)
 endif()

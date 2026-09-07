@@ -120,6 +120,7 @@ SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE response.headers
 ----
 HEAD
 GET
+HEAD
 PUT
 GET
 GET
