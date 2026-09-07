@@ -36,7 +36,7 @@ statement ok
 CREATE TABLE T1 AS SELECT i FROM range(100) tbl(i);
 
 statement ok
-CREATE TABLE T2 AS SELECT i*i FROM range(200) tbl(i);
+CREATE TABLE T2 AS SELECT i*i AS i FROM range(200) tbl(i);
 
 statement ok
 CALL enable_logging('HTTP');
