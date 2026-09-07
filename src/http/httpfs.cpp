@@ -8,14 +8,20 @@
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/operator/add.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/operator/multiply.hpp"
+#include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/common/types/hash.hpp"
+#include "duckdb/common/types/interval.hpp"
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/function/scalar/strftime_format.hpp"
 #include "duckdb/logging/file_system_logger.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "http/http_state.hpp"
 
@@ -97,6 +103,16 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks,
 		                                 info);
 		FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
+		auto context = FileOpener::TryGetClientContext(opener);
+		Value external_cache_enabled;
+		if (context &&
+		    context->TryGetCurrentUserSetting(EnableExternalFileCacheSetting::SettingIndex, external_cache_enabled) &&
+		    external_cache_enabled.GetValue<bool>()) {
+			result->override_response_cache_policy = true;
+		} else if (context &&
+		           Settings::Get<ValidateExternalFileCacheSetting>(*context) == CacheValidationMode::NO_VALIDATION) {
+			result->override_response_cache_policy = true;
+		}
 
 		// The base set of headers for every request - a matching secret merges over these per key
 		Value extra_http_headers;
@@ -237,6 +253,13 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		auto force_full_download_entry = info.find("force_full_download");
 		if (force_full_download_entry != info.end()) {
 			force_full_download = force_full_download_entry->second.GetValue<bool>();
+		}
+		auto validate_cache_entry = info.find("validate_external_file_cache");
+		if (validate_cache_entry != info.end() && !validate_cache_entry->second.GetValue<bool>()) {
+			auto captured = request_session->Capture();
+			auto snapshot_params = captured.snapshot->Params();
+			snapshot_params.override_response_cache_policy = true;
+			request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
 		}
 		if (lm_entry != info.end() && etag_entry != info.end() && fs_entry != info.end()) {
 			// we found all relevant entries (last_modified, etag and file size)
@@ -532,6 +555,22 @@ string HTTPFileSystem::GetVersionTag(FileHandle &handle) {
 	return sfh.etag;
 }
 
+optional<timestamp_t> HTTPFileSystem::GetCacheValidUntil(FileHandle &handle) {
+	auto &sfh = handle.Cast<HTTPFileHandle>();
+	return sfh.GetCacheValidUntil();
+}
+
+FileMetadata HTTPFileSystem::Stats(FileHandle &handle) {
+	auto &sfh = handle.Cast<HTTPFileHandle>();
+	FileMetadata metadata;
+	metadata.file_size = NumericCast<int64_t>(sfh.length);
+	metadata.last_modification_time = sfh.last_modified;
+	metadata.file_type = FileType::FILE_TYPE_REGULAR;
+	metadata.cache_valid_until = sfh.GetCacheValidUntil();
+	metadata.version_tag = sfh.etag;
+	return metadata;
+}
+
 bool HTTPFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
 	try {
 		auto handle = OpenFile(filename, FileFlags::FILE_FLAGS_READ, opener);
@@ -653,6 +692,8 @@ unique_ptr<CachedFileHandle> HTTPFileSystem::FullDownload(HTTPFileHandle &hfh, c
 		if (full_download_result->status != HTTPStatusCode::OK_200) {
 			throw GetHTTPError(hfh, *full_download_result, RequestType::GET_REQUEST, hfh.path);
 		}
+		// Publish unconditionally: this buffer is query-scoped and shared only among identical requests,
+		// so HTTP cache policy (no-store/Vary/freshness) does not restrict it.
 		return download->Finalize();
 	}
 }
@@ -666,6 +707,203 @@ bool HTTPFileSystem::TryParseLastModifiedTime(const string &timestamp, timestamp
 		return false;
 	}
 	return true;
+}
+
+static bool TryParseNonNegativeSeconds(const string &input, int64_t &result) {
+	return TryCast::Operation<string_t, int64_t>(string_t(input), result) && result >= 0;
+}
+
+static vector<string> GetCacheControlDirectives(const HTTPHeaders &headers) {
+	vector<string> result;
+	if (!headers.HasHeader("Cache-Control")) {
+		return result;
+	}
+	for (const auto &header_value : headers.GetHeaderValues("Cache-Control")) {
+		// Commas inside RFC quoted-strings (e.g., no-cache="a,b") are also split; the resulting
+		// fragments are either unparseable (ignored) or match a directive name (conservative).
+		for (auto &directive : StringUtil::Split(header_value, ',')) {
+			result.push_back(std::move(directive));
+		}
+	}
+	return result;
+}
+
+static bool HasCacheControlDirective(const HTTPHeaders &headers, const string &name) {
+	for (auto directive : GetCacheControlDirectives(headers)) {
+		StringUtil::Trim(directive);
+		const auto separator = directive.find('=');
+		auto directive_name = separator == string::npos ? directive : directive.substr(0, separator);
+		StringUtil::Trim(directive_name);
+		if (StringUtil::CIEquals(directive_name, name)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool VaryProhibitsReuse(const HTTPHeaders &headers, const unordered_map<string, string> &request_headers) {
+	if (!headers.HasHeader("Vary")) {
+		return false;
+	}
+	for (const auto &header_value : headers.GetHeaderValues("Vary")) {
+		for (auto field : StringUtil::Split(header_value, ',')) {
+			StringUtil::Trim(field);
+			if (field == "*") {
+				return true;
+			}
+			for (const auto &request_header : request_headers) {
+				if (StringUtil::CIEquals(field, request_header.first)) {
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+static bool TryGetCacheControlSeconds(const HTTPHeaders &headers, const string &name, bool &found, int64_t &result) {
+	found = false;
+	for (auto directive : GetCacheControlDirectives(headers)) {
+		StringUtil::Trim(directive);
+		const auto separator = directive.find('=');
+		if (separator == string::npos) {
+			continue;
+		}
+		auto directive_name = directive.substr(0, separator);
+		StringUtil::Trim(directive_name);
+		if (!StringUtil::CIEquals(directive_name, name)) {
+			continue;
+		}
+		if (found) {
+			return false;
+		}
+		found = true;
+		auto value = directive.substr(separator + 1);
+		StringUtil::Trim(value);
+		if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+			value = value.substr(1, value.size() - 2);
+		}
+		if (!TryParseNonNegativeSeconds(value, result)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+optional<timestamp_t> HTTPFileSystem::ComputeCacheValidUntil(const HTTPHeaders &headers, timestamp_t request_time,
+                                                             timestamp_t response_time) {
+	// Freshness lifetime in seconds (RFC 9111): s-maxage takes precedence over max-age, then Expires.
+	if (HasCacheControlDirective(headers, "no-cache")) {
+		return timestamp_t::ninfinity();
+	}
+	int64_t freshness_lifetime = 0;
+	bool has_freshness_lifetime;
+	if (!TryGetCacheControlSeconds(headers, "s-maxage", has_freshness_lifetime, freshness_lifetime)) {
+		return timestamp_t::ninfinity();
+	}
+	if (!has_freshness_lifetime &&
+	    !TryGetCacheControlSeconds(headers, "max-age", has_freshness_lifetime, freshness_lifetime)) {
+		return timestamp_t::ninfinity();
+	}
+	if (!has_freshness_lifetime && headers.HasHeader("Expires")) {
+		timestamp_t expires;
+		if (TryParseLastModifiedTime(headers.GetHeaderValue("Expires"), expires)) {
+			timestamp_t reference_time;
+			bool has_reference_time = true;
+			if (headers.HasHeader("Date")) {
+				has_reference_time = TryParseLastModifiedTime(headers.GetHeaderValue("Date"), reference_time);
+			} else {
+				reference_time = response_time;
+			}
+			int64_t freshness_micros;
+			if (has_reference_time && TrySubtractOperator::Operation(expires, reference_time, freshness_micros)) {
+				freshness_lifetime = freshness_micros / Interval::MICROS_PER_SEC;
+				has_freshness_lifetime = true;
+			}
+		}
+	}
+	if (!has_freshness_lifetime) {
+		if (headers.HasHeader("Expires")) {
+			return timestamp_t::ninfinity();
+		}
+		return nullopt;
+	}
+
+	// Account for Age, response delay, and the apparent age derived from Date (RFC 9111).
+	int64_t age = 0;
+	if (headers.HasHeader("Age")) {
+		if (!TryParseNonNegativeSeconds(headers.GetHeaderValue("Age"), age)) {
+			age = 0;
+		}
+	}
+	int64_t age_micros = 0;
+	int64_t response_delay_micros = 0;
+	if (!TryMultiplyOperator::Operation(age, Interval::MICROS_PER_SEC, age_micros) ||
+	    !TrySubtractOperator::Operation(response_time, request_time, response_delay_micros)) {
+		return timestamp_t::ninfinity();
+	}
+	response_delay_micros = MaxValue<int64_t>(0, response_delay_micros);
+	int64_t current_age_micros = 0;
+	if (!TryAddOperator::Operation(age_micros, response_delay_micros, current_age_micros)) {
+		return timestamp_t::ninfinity();
+	}
+	if (headers.HasHeader("Date")) {
+		timestamp_t date;
+		if (TryParseLastModifiedTime(headers.GetHeaderValue("Date"), date)) {
+			int64_t apparent_age_micros;
+			if (!TrySubtractOperator::Operation(response_time, date, apparent_age_micros)) {
+				return timestamp_t::ninfinity();
+			}
+			current_age_micros = MaxValue<int64_t>(current_age_micros, MaxValue<int64_t>(0, apparent_age_micros));
+		}
+	}
+
+	int64_t freshness_micros = 0;
+	if (freshness_lifetime <= 0 ||
+	    !TryMultiplyOperator::Operation(freshness_lifetime, Interval::MICROS_PER_SEC, freshness_micros) ||
+	    current_age_micros >= freshness_micros) {
+		return timestamp_t::ninfinity();
+	}
+	// Absurd server-provided lifetimes that would overflow the deadline grant no freshness
+	int64_t deadline_micros = 0;
+	const auto remaining_micros = freshness_micros - current_age_micros;
+	if (!TryAddOperator::Operation(response_time.value, remaining_micros, deadline_micros)) {
+		return timestamp_t::ninfinity();
+	}
+	return timestamp_t(deadline_micros);
+}
+
+void HTTPFileHandle::ApplyCachePolicy(const HTTPResponse &response, timestamp_t request_time,
+                                      timestamp_t response_time) {
+	auto request_snapshot = request_session->Capture().snapshot;
+	if (request_snapshot->Params().override_response_cache_policy) {
+		return;
+	}
+	auto response_valid_until = HTTPFileSystem::ComputeCacheValidUntil(response.headers, request_time, response_time);
+	// TODO(hjiang): Prevent shared reuse of private responses and authenticated requests without explicit permission.
+	if (HasCacheControlDirective(response.headers, "no-store")) {
+		// no-store applies to this response, so only blocks populated by this read are retired.
+		response_valid_until = timestamp_t::ninfinity();
+	}
+	if (VaryProhibitsReuse(response.headers, request_snapshot->Params().extra_headers)) {
+		// The cache key does not include request headers, so responses varying on a supplied header cannot be reused.
+		response_valid_until = timestamp_t::ninfinity();
+	}
+
+	annotated_lock_guard<annotated_mutex> guard(cache_policy_lock);
+	if (response_valid_until && (!cache_valid_until || *response_valid_until < *cache_valid_until)) {
+		cache_valid_until = response_valid_until;
+	}
+}
+
+optional<timestamp_t> HTTPFileHandle::GetCacheValidUntil() const {
+	annotated_lock_guard<annotated_mutex> guard(cache_policy_lock);
+	return cache_valid_until;
+}
+
+bool HTTPFileHandle::CanReuseCachedData() const {
+	annotated_lock_guard<annotated_mutex> guard(cache_policy_lock);
+	return !cache_valid_until || Timestamp::GetCurrentTimestamp() <= *cache_valid_until;
 }
 
 struct HTTPFileInfoParser {
@@ -721,8 +959,11 @@ bool HTTPFileHandle::TryLoadFileInfoWithoutRequest() {
 	return false;
 }
 
-unique_ptr<HTTPResponse> HTTPFileHandle::RequestFileInfo(HTTPFileSystem &hfs) {
+unique_ptr<HTTPResponse> HTTPFileHandle::RequestFileInfo(HTTPFileSystem &hfs, timestamp_t &request_time,
+                                                         timestamp_t &response_time) {
+	request_time = Timestamp::GetCurrentTimestamp();
 	auto response = hfs.HeadRequest(*this, path, {});
+	response_time = Timestamp::GetCurrentTimestamp();
 	if (response->status == HTTPStatusCode::OK_200) {
 		return response;
 	}
@@ -736,14 +977,17 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RequestFileInfo(HTTPFileSystem &hfs) {
 	}
 	if (flags.OpenForReading() && response->status != HTTPStatusCode::NotFound_404 &&
 	    response->status != HTTPStatusCode::MovedPermanently_301) {
-		return RetryFileInfoWithRange(hfs);
+		return RetryFileInfoWithRange(hfs, request_time, response_time);
 	}
 	throw hfs.GetHTTPError(*this, *response, RequestType::HEAD_REQUEST, path);
 }
 
-unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &hfs) {
+unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &hfs, timestamp_t &request_time,
+                                                                timestamp_t &response_time) {
 	auto config = BuildReadConfig();
+	request_time = Timestamp::GetCurrentTimestamp();
 	auto response = hfs.GetRangeRequest(*this, path, {}, config, 0, nullptr, 2);
+	response_time = Timestamp::GetCurrentTimestamp();
 	if (response->status == HTTPStatusCode::PartialContent_206 || response->status == HTTPStatusCode::Accepted_202 ||
 	    response->status == HTTPStatusCode::OK_200) {
 		return response;
@@ -755,7 +999,7 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &
 	throw hfs.GetHTTPError(*this, *response, RequestType::GET_REQUEST, path);
 }
 
-void HTTPFileHandle::ApplyFileInfo(const HTTPResponse &response) {
+void HTTPFileHandle::ApplyFileInfo(const HTTPResponse &response, timestamp_t request_time, timestamp_t response_time) {
 	length = 0;
 	auto content_size = HTTPFileInfoParser::TryParseContentRange(response.headers);
 	if (!content_size.IsValid()) {
@@ -770,6 +1014,7 @@ void HTTPFileHandle::ApplyFileInfo(const HTTPResponse &response) {
 	if (response.headers.HasHeader("ETag")) {
 		etag = response.headers.GetHeaderValue("ETag");
 	}
+	ApplyCachePolicy(response, request_time, response_time);
 	if (request_session->Capture().snapshot->Params().s3_version_id_pinning &&
 	    response.headers.HasHeader("x-amz-version-id")) {
 		SetVersionId(response.headers.GetHeaderValue("x-amz-version-id"));
@@ -789,9 +1034,11 @@ void HTTPFileHandle::LoadFileInfo() {
 		return;
 	}
 	auto &hfs = file_system.Cast<HTTPFileSystem>();
-	auto response = RequestFileInfo(hfs);
+	timestamp_t request_time;
+	timestamp_t response_time;
+	auto response = RequestFileInfo(hfs, request_time, response_time);
 	if (response) {
-		ApplyFileInfo(*response);
+		ApplyFileInfo(*response, request_time, response_time);
 	}
 }
 
@@ -811,6 +1058,12 @@ void HTTPFileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cach
 	last_modified = cache_entry.last_modified;
 	length = cache_entry.length;
 	etag = cache_entry.etag;
+	{
+		annotated_lock_guard<annotated_mutex> guard(cache_policy_lock);
+		cache_valid_until = request_session->Capture().snapshot->Params().override_response_cache_policy
+		                        ? optional<timestamp_t>()
+		                        : cache_entry.cache_valid_until;
+	}
 	SetVersionId(cache_entry.version_id);
 
 	// TODO: handle properties
@@ -821,6 +1074,7 @@ HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
 	result.length = length;
 	result.last_modified = last_modified;
 	result.etag = etag;
+	result.cache_valid_until = GetCacheValidUntil();
 	result.version_id = GetVersionId();
 	// TODO: handle properties
 	return result;
@@ -888,7 +1142,7 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 		if (should_full_download) {
 			length = hfs.FullDownload(*this, GetReadConfig(), should_write_cache)->GetSize();
 		}
-		if (should_write_cache) {
+		if (should_write_cache && (cache->OverridesResponseCachePolicy() || CanReuseCachedData())) {
 			cache->Insert(path, GetCacheEntry());
 		}
 	}

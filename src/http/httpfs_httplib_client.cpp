@@ -244,7 +244,7 @@ private:
 		result->body = response.body;
 		result->reason = response.reason;
 		for (auto &entry : response.headers) {
-			result->headers.Insert(entry.first, entry.second);
+			result->headers.Append(entry.first, entry.second);
 		}
 		return result;
 	}
