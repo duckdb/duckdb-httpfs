@@ -21,6 +21,7 @@
 #include "duckdb/logging/file_system_logger.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "http/http_state.hpp"
 
@@ -102,6 +103,13 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks,
 		                                 info);
 		FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
+		auto context = FileOpener::TryGetClientContext(opener);
+		Value external_cache_enabled;
+		if (context &&
+		    context->TryGetCurrentUserSetting(EnableExternalFileCacheSetting::SettingIndex, external_cache_enabled) &&
+		    external_cache_enabled.GetValue<bool>()) {
+			result->override_response_cache_policy = true;
+		}
 
 		// The base set of headers for every request - a matching secret merges over these per key
 		Value extra_http_headers;
@@ -723,6 +731,21 @@ static bool HasCacheControlDirective(const HTTPHeaders &headers, const string &n
 	return false;
 }
 
+static bool VaryProhibitsReuse(const HTTPHeaders &headers, const HTTPHeaders &request_headers) {
+	if (!headers.HasHeader("Vary")) {
+		return false;
+	}
+	for (const auto &header_value : headers.GetHeaderValues("Vary")) {
+		for (auto field : StringUtil::Split(header_value, ',')) {
+			StringUtil::Trim(field);
+			if (field == "*" || request_headers.HasHeader(field)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 static bool TryGetCacheControlSeconds(const HTTPHeaders &headers, const string &name, bool &found, int64_t &result) {
 	found = false;
 	for (auto directive : GetCacheControlDirectives(headers)) {
@@ -837,14 +860,18 @@ optional<timestamp_t> HTTPFileSystem::ComputeCacheValidUntil(const HTTPHeaders &
 
 void HTTPFileHandle::ApplyCachePolicy(const HTTPResponse &response, timestamp_t request_time,
                                       timestamp_t response_time) {
+	auto request_snapshot = request_session->Capture().snapshot;
+	if (request_snapshot->Params().override_response_cache_policy) {
+		return;
+	}
 	auto response_valid_until = HTTPFileSystem::ComputeCacheValidUntil(response.headers, request_time, response_time);
 	// TODO(hjiang): Prevent shared reuse of private responses and authenticated requests without explicit permission.
 	if (HasCacheControlDirective(response.headers, "no-store")) {
 		// no-store applies to this response, so only blocks populated by this read are retired.
 		response_valid_until = timestamp_t::ninfinity();
 	}
-	if (response.headers.HasHeader("Vary")) {
-		// TODO(hjiang): Include Vary-selected request headers in the cache key instead of disabling reuse.
+	if (VaryProhibitsReuse(response.headers, request_snapshot->Params().extra_headers)) {
+		// The cache key does not include request headers, so responses varying on a supplied header cannot be reused.
 		response_valid_until = timestamp_t::ninfinity();
 	}
 
@@ -1018,7 +1045,9 @@ void HTTPFileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cach
 	etag = cache_entry.etag;
 	{
 		annotated_lock_guard<annotated_mutex> guard(cache_policy_lock);
-		cache_valid_until = cache_entry.cache_valid_until;
+		cache_valid_until = request_session->Capture().snapshot->Params().override_response_cache_policy
+		                        ? optional<timestamp_t>()
+		                        : cache_entry.cache_valid_until;
 	}
 	SetVersionId(cache_entry.version_id);
 
@@ -1098,7 +1127,8 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 		if (should_full_download) {
 			length = hfs.FullDownload(*this, GetReadConfig(), should_write_cache)->GetSize();
 		}
-		if (should_write_cache && CanReuseCachedData()) {
+		// HTTP metadata cache lifetime is controlled by enable_http_metadata_cache and query lifetime.
+		if (should_write_cache) {
 			cache->Insert(path, GetCacheEntry());
 		}
 	}

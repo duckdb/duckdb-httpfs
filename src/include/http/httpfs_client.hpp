@@ -71,6 +71,8 @@ public:
 	string bearer_token;
 	bool unsafe_disable_etag_checks {false};
 	bool s3_version_id_pinning {false};
+	//! Explicitly enabling the external file cache preserves its legacy reuse semantics.
+	bool override_response_cache_policy {false};
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
 	idx_t force_download_threshold = 0;
