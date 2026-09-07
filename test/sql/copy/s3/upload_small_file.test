@@ -24,6 +24,9 @@ require-env DUCKDB_S3_USE_SSL
 set ignore_error_messages
 
 statement ok
+CALL enable_logging('HTTP');
+
+statement ok
 CREATE TABLE web_page as (SELECT * FROM "duckdb/data/csv/real/web_page.csv");
 
 query IIIIIIIIIIIIII
@@ -61,6 +64,14 @@ SELECT * FROM "s3://test-bucket/multipart/web_page.parquet" LIMIT 10;
 # CSV file
 statement ok
 COPY web_page TO 's3://test-bucket/multipart/web_page.csv';
+
+# every logged request must carry a User-Agent that identifies duckdb
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['User-Agent'] IS NULL
+   OR NOT starts_with(request.headers['User-Agent'], 'duckdb')
+----
+0
 
 query IIIIIIIIIIIIII
 SELECT * FROM "s3://test-bucket/multipart/web_page.csv" LIMIT 10;

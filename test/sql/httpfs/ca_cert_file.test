@@ -15,7 +15,7 @@ SET enable_server_cert_verification = true;
 statement error
 SET ca_cert_file = NULL;
 ----
-Invalid Input Error: NULL it's not a valid option for ca_cert_file
+Invalid Input Error: NULL is not a valid option for ca_cert_file
 
 statement ok
 SET ca_cert_file = 'README.md';

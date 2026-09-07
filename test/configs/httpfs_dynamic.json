@@ -1,0 +1,7 @@
+{
+  "description": "Run HTTPFS tests with dynamically loaded extensions.",
+  "skip_error_messages": [],
+  "statically_loaded_extensions": [
+    "core_functions"
+  ]
+}

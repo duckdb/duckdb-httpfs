@@ -5,7 +5,7 @@
 require httpfs
 
 statement ok
-ATTACH '__TEST_DIR__/test_write_only.db' as enc (ENCRYPTION_KEY 'abcde', ENCRYPTION_CIPHER 'GCM');
+ATTACH '{TEST_DIR}/test_write_only.db' as enc (ENCRYPTION_KEY 'abcde', ENCRYPTION_CIPHER 'GCM');
 
 statement ok
 CREATE TABLE enc.test AS SELECT 1 as a;

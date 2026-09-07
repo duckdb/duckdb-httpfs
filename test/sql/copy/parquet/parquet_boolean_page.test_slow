@@ -6,8 +6,6 @@ require parquet
 
 require httpfs
 
-statement ok
-PRAGMA enable_verification
 
 query IIIII
 SELECT

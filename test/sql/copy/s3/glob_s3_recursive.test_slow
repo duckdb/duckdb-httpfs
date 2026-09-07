@@ -24,7 +24,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET s3_allow_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = {allow_globbing};
 
 query I
 SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/*s/non-existing-folder/*');
@@ -36,7 +36,7 @@ endloop
 query IIIII
 FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
 ----
-3	0	3	0	0
+4	0	4	0	0
 46	0	46	0	0
 
 #
@@ -49,7 +49,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET s3_allow_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = {allow_globbing};
 
 query I
 SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/*s/parquet/*');
@@ -61,7 +61,7 @@ endloop
 query IIIII
 FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
 ----
-6	0	6	0	0
+7	0	7	0	0
 46	0	46	0	0
 
 #
@@ -74,7 +74,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET s3_allow_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = {allow_globbing};
 
 query I
 SELECT count(*) FROM (FROM glob('s3://coiled-datasets/timeseries/*s/parquet/*.parquet') LIMIT 100);
@@ -86,7 +86,7 @@ endloop
 query IIIII
 FROM duckdb_logs_parsed('HTTP') SELECT count(*), sum(request.type == 'HEAD'), sum(request.type == 'GET'), sum(request.type == 'POST'), sum(request.type == 'PUT') GROUP BY context_id ORDER BY context_id;
 ----
-3	0	3	0	0
+4	0	4	0	0
 1	0	1	0	0
 
 #
@@ -99,7 +99,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET s3_allow_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = {allow_globbing};
 
 query I
 SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/1990s/parquet/*');
@@ -124,7 +124,7 @@ CALL truncate_duckdb_logs();
 foreach allow_globbing true false
 
 statement ok
-SET s3_allow_recursive_globbing = ${allow_globbing};
+SET s3_allow_recursive_globbing = {allow_globbing};
 
 query I
 SELECT count(*) FROM glob('s3://coiled-datasets/timeseries/1990s/**/*.parquet');

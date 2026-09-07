@@ -12,35 +12,81 @@ require-env PYTHON_HTTP_SERVER_URL
 require-env PYTHON_HTTP_SERVER_DIR
 
 statement ok
-CALL enable_logging();
+CALL enable_logging('HTTP');
 
 statement ok
 call dbgen(sf=1);
 
 statement ok
-copy lineitem to '${PYTHON_HTTP_SERVER_DIR}/lineitem.csv'
+copy lineitem to '{PYTHON_HTTP_SERVER_DIR}/lineitem.csv'
 
 statement ok
 drop table lineitem;
 
 statement ok
-CREATE view lineitem AS FROM '${PYTHON_HTTP_SERVER_URL}/lineitem.csv';
+CREATE TEMP TABLE range_requests_before AS
+SELECT count(*) AS count
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.type='GET' AND request.headers['Range'] IS NOT NULL;
+
+statement ok
+CREATE VIEW lineitem AS
+SELECT * FROM read_csv('{PYTHON_HTTP_SERVER_URL}/lineitem.csv', auto_detect=false, header=true, columns={
+    'l_orderkey': 'BIGINT',
+    'l_partkey': 'BIGINT',
+    'l_suppkey': 'BIGINT',
+    'l_linenumber': 'BIGINT',
+    'l_quantity': 'DECIMAL(15,2)',
+    'l_extendedprice': 'DECIMAL(15,2)',
+    'l_discount': 'DECIMAL(15,2)',
+    'l_tax': 'DECIMAL(15,2)',
+    'l_returnflag': 'VARCHAR',
+    'l_linestatus': 'VARCHAR',
+    'l_shipdate': 'DATE',
+    'l_commitdate': 'DATE',
+    'l_receiptdate': 'DATE',
+    'l_shipinstruct': 'VARCHAR',
+    'l_shipmode': 'VARCHAR',
+    'l_comment': 'VARCHAR'
+});
+
+# Binding the explicitly typed CSV does not read its contents.
+query I
+SELECT count(*) - (SELECT count FROM range_requests_before)
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.type='GET' AND request.headers['Range'] IS NOT NULL;
+----
+0
 
 query I
 pragma tpch(6);
 ----
 123141078.22829981
 
+# Concurrent readers share one range-capability probe for the path.
 query I
-select count(*) from duckdb_logs where log_level='WARNING' and message like '%Falling back to full%'
+SELECT count(*) - (SELECT count FROM range_requests_before)
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.type='GET' AND request.headers['Range'] IS NOT NULL;
 ----
-2
+1
+
+# every logged request must carry a User-Agent that identifies duckdb
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['User-Agent'] IS NULL
+   OR NOT starts_with(request.headers['User-Agent'], 'duckdb')
+----
+0
 
 statement ok
 set auto_fallback_to_full_download=false
+
+# Do not reuse the full download for the negative check below.
+statement ok
+set enable_external_file_cache=false
 
 statement error
 pragma tpch(6);
 ----
 HTTP Error: Content-Length from server mismatches requested range, server may not support range requests. You can try to resolve this by enabling `SET force_download=true`
-
