@@ -731,15 +731,20 @@ static bool HasCacheControlDirective(const HTTPHeaders &headers, const string &n
 	return false;
 }
 
-static bool VaryProhibitsReuse(const HTTPHeaders &headers, const HTTPHeaders &request_headers) {
+static bool VaryProhibitsReuse(const HTTPHeaders &headers, const unordered_map<string, string> &request_headers) {
 	if (!headers.HasHeader("Vary")) {
 		return false;
 	}
 	for (const auto &header_value : headers.GetHeaderValues("Vary")) {
 		for (auto field : StringUtil::Split(header_value, ',')) {
 			StringUtil::Trim(field);
-			if (field == "*" || request_headers.HasHeader(field)) {
+			if (field == "*") {
 				return true;
+			}
+			for (const auto &request_header : request_headers) {
+				if (StringUtil::CIEquals(field, request_header.first)) {
+					return true;
+				}
 			}
 		}
 	}
