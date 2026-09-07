@@ -85,7 +85,7 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	return total_size;
 }
 
-CURLHandle::CURLHandle(const string &token, const string &cert_path) {
+CURLHandle::CURLHandle(const string &token, const string &cert_path, bool use_native_ca) {
 	curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize curl");
@@ -97,7 +97,11 @@ CURLHandle::CURLHandle(const string &token, const string &cert_path) {
 	if (!cert_path.empty()) {
 		curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
 	}
-	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_AUTO_CLIENT_CERT | CURLSSLOPT_NATIVE_CA);
+	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
+	if (use_native_ca) {
+		ssl_options |= CURLSSLOPT_NATIVE_CA;
+	}
+	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, ssl_options);
 	curl_easy_setopt(curl, CURLOPT_PATH_AS_IS, 1L);
 }
 
@@ -162,7 +166,7 @@ private:
 			if (cert_file_path.empty()) {
 				cert_file_path = SelectCURLCertPath();
 			}
-			client.curl = make_uniq<CURLHandle>(params.bearer_token, cert_file_path);
+			client.curl = make_uniq<CURLHandle>(params.bearer_token, cert_file_path, params.ca_cert_file.empty());
 			client.stored_bearer_token = params.bearer_token;
 		}
 
