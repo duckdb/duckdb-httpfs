@@ -40,3 +40,13 @@ statement error
 FROM 'hf://datasets/**/file.parquet'
 ----
 IO Error: Failed to parse 'hf://datasets/**/file.parquet'. Please format url like: 'hf://datasets/my-username/my-dataset/path/to/file.parquet'
+
+statement error
+FROM read_blob('hf://buckets/user/bucket@main/file.csv')
+----
+Hugging Face buckets do not support revisions
+
+query T
+SELECT file FROM glob('hf://buckets/user/bucket/file.csv')
+----
+hf://buckets/user/bucket/file.csv

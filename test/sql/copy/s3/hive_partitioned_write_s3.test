@@ -25,15 +25,18 @@ statement ok
 CREATE SECRET (
     TYPE S3,
     PROVIDER config,
-    KEY_ID '${AWS_ACCESS_KEY_ID}',
-    SECRET '${AWS_SECRET_ACCESS_KEY}',
-    REGION '${AWS_DEFAULT_REGION}',
-    ENDPOINT '${DUCKDB_S3_ENDPOINT}',
-    USE_SSL '${DUCKDB_S3_USE_SSL}'
+    KEY_ID '{AWS_ACCESS_KEY_ID}',
+    SECRET '{AWS_SECRET_ACCESS_KEY}',
+    REGION '{AWS_DEFAULT_REGION}',
+    ENDPOINT '{DUCKDB_S3_ENDPOINT}',
+    USE_SSL '{DUCKDB_S3_USE_SSL}'
 )
 
 statement ok
 set s3_endpoint='ensure.secret.is.used.instead.of.duckdb.setting.com'
+
+statement ok
+CALL enable_logging('HTTP');
 
 # Simple table that is easy to partition
 statement ok
@@ -151,14 +154,14 @@ SELECT part_col, value_col, value2_col FROM 's3://test-bucket/partitioned5/part_
 statement error
 COPY test TO 's3://test-bucket/partitioned6' (FORMAT PARQUET, PARTITION_BY part_col, USE_TMP_FILE TRUE);
 ----
-Not implemented Error: Can't combine USE_TMP_FILE and PARTITION_BY for COPY
+Not implemented Error: Can't combine USE_TMP_FILE and PARTITIONED BY for COPY
 
 # Technically it doesn't really matter, as currently out parition_by behaves similarly, but for clarity user should just
 # EITHER use partition_by or per_thread_output.
 statement error
 COPY test TO 's3://test-bucket/partitioned6' (FORMAT PARQUET, PARTITION_BY part_col, PER_THREAD_OUTPUT TRUE);
 ----
-Not implemented Error: Can't combine PER_THREAD_OUTPUT and PARTITION_BY for COPY
+Not implemented Error: Can't combine PER_THREAD_OUTPUT and PARTITIONED BY for COPY
 
 # partitioning csv files is also a thing
 statement ok
@@ -172,6 +175,14 @@ SELECT part_col, value_col, value2_col FROM 's3://test-bucket/partitioned7/part_
 0	0	4
 0	2	6
 0	4	8
+
+# every logged request must carry a User-Agent that identifies duckdb
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['User-Agent'] IS NULL
+   OR NOT starts_with(request.headers['User-Agent'], 'duckdb')
+----
+0
 
 query III
 SELECT part_col, value_col, value2_col FROM 's3://test-bucket/partitioned7/part_col=1/*.csv' ORDER BY value2_col;

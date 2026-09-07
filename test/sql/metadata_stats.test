@@ -18,4 +18,4 @@ SET force_download=false;
 query II
 explain analyze SELECT id, first_name, last_name, email FROM PARQUET_SCAN('https://raw.githubusercontent.com/duckdb/duckdb/main/data/parquet-testing/userdata1.parquet')
 ----
-analyzed_plan	<REGEX>:.*GET: 2.*
+analyzed_plan	<REGEX>:.*GET: 1.*

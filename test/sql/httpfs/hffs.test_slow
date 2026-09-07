@@ -10,7 +10,6 @@ mode skip
 
 # FIXME: currently this will not fail the Linux HTTPFS ci job if it fails, because it might do so due to networking issues
 #        however having a CI job dedicated to remote tests that may spuriously fail would solve this
-# TODO: add hf://buckets integration coverage here once there is a maintainer-owned public bucket fixture
 
 # Non existent repos get a 401
 statement error
@@ -95,11 +94,49 @@ select size from read_text('hf://spaces/samansmink/duckdb_ci_tests/README.md');
 ----
 199
 
+# Buckets have no revision segment in their file URLs.
+foreach force_download false true
+
+statement ok
+SET force_download = {force_download};
+
+query I
+SELECT size FROM read_text('hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/README.md');
+----
+83
+
+endloop
+
+statement ok
+RESET force_download;
+
+# Traverse nested bucket directories, including paginated listings.
+foreach page_size 0 1
+
+statement ok
+SET hf_max_per_page = {page_size};
+
+query T rowsort
+SELECT file FROM glob('hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/data/**/*.parquet');
+----
+hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/data/CC-MAIN-2013-20/train-00000-of-00058.parquet
+hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/data/CC-MAIN-2013-20/train-00001-of-00058.parquet
+
+endloop
+
+statement ok
+RESET hf_max_per_page;
+
+query I
+SELECT count(*) > 0 FROM parquet_scan('hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/data/CC-MAIN-2013-20/train-00000-of-00058.parquet');
+----
+true
+
 # FIXME: push auth key into CI for this to ensure it is tested in CI properly
 require-env HUGGING_FACE_TOKEN
 
 statement ok
-CREATE SECRET hf1 (TYPE HUGGINGFACE, TOKEN '${HUGGING_FACE_TOKEN}');
+CREATE SECRET hf1 (TYPE HUGGINGFACE, TOKEN '{HUGGING_FACE_TOKEN}');
 
 query III rowsort
 FROM parquet_scan('hf://datasets/samansmink/duckdb_ci_private/hive_data/**/*.parquet', FILENAME=1, hive_partitioning=0);
@@ -113,7 +150,7 @@ DROP SECRET hf1
 # Same can be achieved with an http secret setting the bearer token manually
 
 statement ok
-CREATE SECRET http1 (TYPE HTTP, BEARER_TOKEN '${HUGGING_FACE_TOKEN}');
+CREATE SECRET http1 (TYPE HTTP, BEARER_TOKEN '{HUGGING_FACE_TOKEN}');
 
 query III rowsort
 FROM parquet_scan('hf://datasets/samansmink/duckdb_ci_private/hive_data/**/*.parquet', FILENAME=1, hive_partitioning=0);
@@ -127,7 +164,7 @@ DROP SECRET http1
 # Note that the huggingface secret takes precedence over the http secret
 
 statement ok
-CREATE SECRET hf2 (TYPE HUGGINGFACE, TOKEN '${HUGGING_FACE_TOKEN}');
+CREATE SECRET hf2 (TYPE HUGGINGFACE, TOKEN '{HUGGING_FACE_TOKEN}');
 
 statement ok
 CREATE SECRET http2 (TYPE HTTP, BEARER_TOKEN 'hocus pocus this token is bogus');
@@ -156,7 +193,7 @@ statement ok
 CREATE SECRET http3 (
     TYPE HTTP, 
     EXTRA_HTTP_HEADERS MAP{
-		'Authorization': 'Bearer ${HUGGING_FACE_TOKEN}',
+		'Authorization': 'Bearer {HUGGING_FACE_TOKEN}',
 	}
 );
 

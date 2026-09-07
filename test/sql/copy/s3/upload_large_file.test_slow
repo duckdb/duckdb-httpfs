@@ -41,9 +41,6 @@ statement ok
 PRAGMA temp_directory=''
 
 statement ok
-SET s3_uploader_thread_limit = 5;
-
-statement ok
 CALL DBGEN(sf=1)
 
 query I
@@ -62,6 +59,9 @@ WHERE
 
 # Parquet file ~300MB
 statement ok
+CALL enable_logging('HTTP');
+
+statement ok
 COPY lineitem TO 's3://test-bucket/multipart/export_large.parquet' (FORMAT 'parquet');
 
 query I
@@ -77,3 +77,11 @@ WHERE
     AND l_quantity < 24;
 ----
 123141078.2283
+
+# every logged request must carry a User-Agent that identifies duckdb
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['User-Agent'] IS NULL
+   OR NOT starts_with(request.headers['User-Agent'], 'duckdb')
+----
+0
