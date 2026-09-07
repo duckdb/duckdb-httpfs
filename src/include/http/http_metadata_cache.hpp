@@ -4,6 +4,7 @@
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/list.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -19,6 +20,8 @@ struct HTTPMetadataCacheEntry {
 	idx_t length;
 	timestamp_t last_modified;
 	string etag;
+	//! Freshness deadline (inclusive); unset means the server provides no freshness information.
+	optional<timestamp_t> cache_valid_until;
 	string version_id;
 	unordered_map<string, string> properties;
 };
@@ -32,6 +35,10 @@ public:
 	}
 
 public:
+	bool OverridesResponseCachePolicy() const {
+		return mode == HTTPMetadataCacheMode::GLOBAL;
+	}
+
 	void Insert(const string &path, HTTPMetadataCacheEntry val) DUCKDB_EXCLUDES(lock) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		map[path] = std::move(val);
@@ -42,10 +49,15 @@ public:
 		map.erase(path);
 	}
 
-	bool Find(const string &path, HTTPMetadataCacheEntry &ret_val) DUCKDB_EXCLUDES(lock) {
+	bool Find(const string &path, HTTPMetadataCacheEntry &ret_val) const DUCKDB_EXCLUDES(lock) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		auto lookup = map.find(path);
 		if (lookup == map.end()) {
+			return false;
+		}
+		if (!OverridesResponseCachePolicy() && lookup->second.cache_valid_until &&
+		    Timestamp::GetCurrentTimestamp() > *lookup->second.cache_valid_until) {
+			map.erase(lookup);
 			return false;
 		}
 		ret_val = lookup->second;
@@ -64,10 +76,13 @@ public:
 		}
 	}
 
-protected:
-	annotated_mutex lock;
-	unordered_map<string, HTTPMetadataCacheEntry> map DUCKDB_GUARDED_BY(lock);
-	HTTPMetadataCacheMode mode;
+private:
+	//! Cache policy
+	const HTTPMetadataCacheMode mode;
+
+	//! Cached metadata
+	mutable annotated_mutex lock;
+	mutable unordered_map<string, HTTPMetadataCacheEntry> map DUCKDB_GUARDED_BY(lock);
 };
 
 } // namespace duckdb

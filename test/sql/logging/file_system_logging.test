@@ -24,15 +24,21 @@ pragma threads=1
 query IIII
 SELECT scope, type, log_level, regexp_replace(message, '\"path\":.*test.csv"', '"test.csv"')
 FROM duckdb_logs
-WHERE type = 'FileSystem'
+WHERE type = 'FileSystem' AND message NOT LIKE '%"op":"WRITE"%'
 ORDER BY timestamp
 ----
 CONNECTION	FileSystem	TRACE	{"fs":"LocalFileSystem","test.csv","op":"OPEN"}
-CONNECTION	FileSystem	TRACE	{"fs":"LocalFileSystem","test.csv","op":"WRITE","bytes":"4","pos":"0"}
 CONNECTION	FileSystem	TRACE	{"fs":"LocalFileSystem","test.csv","op":"CLOSE"}
 CONNECTION	FileSystem	TRACE	{"fs":"LocalFileSystem","test.csv","op":"OPEN"}
 CONNECTION	FileSystem	TRACE	{"fs":"LocalFileSystem","test.csv","op":"READ","bytes":"4","pos":"0"}
 CONNECTION	FileSystem	TRACE	{"fs":"LocalFileSystem","test.csv","op":"CLOSE"}
+
+query III
+SELECT sum(bytes), min(pos), max(pos + bytes)
+FROM duckdb_logs_parsed('FileSystem')
+WHERE op = 'WRITE' AND parse_filename(path) = 'test.csv'
+----
+4	0	4
 
 statement ok
 CALL truncate_duckdb_logs();

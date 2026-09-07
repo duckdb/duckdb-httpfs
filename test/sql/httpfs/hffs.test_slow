@@ -94,6 +94,44 @@ select size from read_text('hf://spaces/samansmink/duckdb_ci_tests/README.md');
 ----
 199
 
+# Buckets have no revision segment in their file URLs.
+foreach force_download false true
+
+statement ok
+SET force_download = {force_download};
+
+query I
+SELECT size FROM read_text('hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/README.md');
+----
+83
+
+endloop
+
+statement ok
+RESET force_download;
+
+# Traverse nested bucket directories, including paginated listings.
+foreach page_size 0 1
+
+statement ok
+SET hf_max_per_page = {page_size};
+
+query T rowsort
+SELECT file FROM glob('hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/data/**/*.parquet');
+----
+hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/data/CC-MAIN-2013-20/train-00000-of-00058.parquet
+hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/data/CC-MAIN-2013-20/train-00001-of-00058.parquet
+
+endloop
+
+statement ok
+RESET hf_max_per_page;
+
+query I
+SELECT count(*) > 0 FROM parquet_scan('hf://buckets/cfahlgren1/duckdb-httpfs-fineweb-edu-5gb/data/CC-MAIN-2013-20/train-00000-of-00058.parquet');
+----
+true
+
 # FIXME: push auth key into CI for this to ensure it is tested in CI properly
 require-env HUGGING_FACE_TOKEN
 

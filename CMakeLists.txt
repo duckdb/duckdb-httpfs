@@ -49,6 +49,16 @@ else()
                         ${OPENSSL_LIBRARIES})
   target_link_libraries(httpfs_extension duckdb_mbedtls ${OPENSSL_LIBRARIES})
 
+  if(APPLE)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
+    find_library(SECURITY_FRAMEWORK Security)
+    target_link_libraries(httpfs_loadable_extension
+                          ${COREFOUNDATION_FRAMEWORK}
+                          ${SECURITY_FRAMEWORK})
+    target_link_libraries(httpfs_extension ${COREFOUNDATION_FRAMEWORK}
+                          ${SECURITY_FRAMEWORK})
+  endif()
+
   if(MINGW)
     find_package(ZLIB)
     target_link_libraries(httpfs_loadable_extension ZLIB::ZLIB -lcrypt32)

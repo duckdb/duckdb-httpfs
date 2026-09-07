@@ -1,59 +1,16 @@
 #pragma once
 
 #include <curl/curl.h>
-#include <openssl/x509_vfy.h>
-#include <functional>
 #include <utility>
 
-#include "duckdb/common/http_util.hpp"
-#include "duckdb/common/mutex.hpp"
+#include "http/httpfs_client.hpp"
 
 namespace duckdb {
 class HTTPLogger;
 class FileOpener;
 struct FileOpenerInfo;
 class HTTPState;
-class CurlCertificateStoreCache {
-public:
-	struct FileIdentity {
-		int64_t size = 0;
-		int64_t modification_seconds = 0;
-		int64_t modification_nanoseconds = 0;
-		uint64_t device = 0;
-		uint64_t file = 0;
-
-		bool operator==(const FileIdentity &other) const;
-	};
-
-	using MetadataProvider = std::function<bool(const string &, FileIdentity &)>;
-	using StoreLoader = std::function<CURLcode(const string &, X509_STORE *&)>;
-	using Clock = std::function<int64_t()>;
-
-	static constexpr int64_t DEFAULT_TIMEOUT_SECONDS = 24 * 60 * 60;
-
-	CurlCertificateStoreCache();
-	CurlCertificateStoreCache(MetadataProvider metadata_provider, StoreLoader store_loader, Clock clock,
-	                          int64_t timeout_seconds = DEFAULT_TIMEOUT_SECONDS);
-	~CurlCertificateStoreCache();
-
-	//! Returns a reference-counted store. The caller owns the returned reference.
-	CURLcode Acquire(const string &path, X509_STORE *&result);
-
-	//! Whether the SSL_CTX callback can safely use the OpenSSL linked by this extension.
-	static bool IsSupported();
-
-private:
-	struct Entry;
-
-	shared_ptr<Entry> GetOrCreateEntry(const string &path);
-
-	MetadataProvider metadata_provider;
-	StoreLoader store_loader;
-	Clock clock;
-	int64_t timeout_seconds;
-	annotated_mutex entries_lock;
-	unordered_map<string, shared_ptr<Entry>> entries DUCKDB_GUARDED_BY(entries_lock);
-};
+class HTTPFSCurlClient;
 
 class CURLURLHandle {
 private:
@@ -76,9 +33,12 @@ private:
 };
 
 class CURLHandle {
+private:
+	CURLHandle();
+
 public:
-	CURLHandle(const string &token, const string &cert_path,
-	           shared_ptr<CurlCertificateStoreCache> certificate_store_cache);
+	CURLHandle(const string &token, const string &cert_path, bool use_native_ca,
+	           shared_ptr<CurlCertificateStoreCache> certificate_store_cache = nullptr);
 	~CURLHandle();
 
 public:
@@ -89,23 +49,35 @@ public:
 		return curl_easy_perform(curl);
 	}
 	void SetVerifySSL(bool verify_ssl);
+	template <class T>
+	void SetOption(CURLoption option, T value) {
+		auto result = curl_easy_setopt(curl, option, value);
+		if (result != CURLE_OK) {
+			throw IOException("Failed to set curl option %d: %s", static_cast<int>(option), curl_easy_strerror(result));
+		}
+	}
+	uint16_t GetResponseCode();
 
 private:
 	static CURLcode ConfigureSSLContext(CURL *curl, void *ssl_context, void *user_data);
 
+private:
+	//! Curl transport and the immutable CA bundle selection.
 	CURL *curl = nullptr;
 	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 	string cert_path;
+
+	//! Verification is performed by the callback only on the cached path.
 	bool uses_certificate_store_cache = false;
 	bool verify_ssl = true;
 };
 
 class CURLRequestHeaders {
+	friend class HTTPFSCurlClient;
+
 public:
-	CURLRequestHeaders() {
-	}
-	CURLRequestHeaders(CURLRequestHeaders &&other) noexcept {
-		headers = other.headers;
+	CURLRequestHeaders() = default;
+	CURLRequestHeaders(CURLRequestHeaders &&other) noexcept : headers(other.headers) {
 		other.headers = nullptr;
 	}
 	CURLRequestHeaders &operator=(CURLRequestHeaders &&other) noexcept {
@@ -121,16 +93,28 @@ public:
 		headers = nullptr;
 	}
 
-public:
-	explicit operator bool() const {
-		return headers != nullptr;
+private:
+	curl_slist *Get() const {
+		return headers;
 	}
 
+public:
 	void Add(const string &header) {
-		headers = curl_slist_append(headers, header.c_str());
+		auto new_headers = curl_slist_append(headers, header.c_str());
+		if (!new_headers) {
+			throw OutOfMemoryException("Failed to allocate curl request headers");
+		}
+		headers = new_headers;
+	}
+	void Add(const string &name, const string &value) {
+		if (HTTPFSHeaderValue::IsEmpty(value)) {
+			Add(name + ";");
+		} else {
+			Add(name + ": " + value);
+		}
 	}
 
-public:
+private:
 	curl_slist *headers = nullptr;
 };
 

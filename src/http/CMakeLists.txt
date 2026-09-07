@@ -4,8 +4,9 @@ target_sources(
 
 if(NOT EMSCRIPTEN)
   target_sources(
-    httpfs_library PRIVATE httpfs_httplib_client.cpp
-                           httpfs_connection_caching.cpp httpfs_curl_client.cpp)
+    httpfs_library
+    PRIVATE curl_certificate_store_cache.cpp httpfs_httplib_client.cpp
+            httpfs_connection_caching.cpp httpfs_curl_client.cpp)
 else()
   target_sources(httpfs_library PRIVATE httpfs_client_wasm.cpp)
 endif()

@@ -86,6 +86,9 @@ struct S3UploadLifecycleTest {
 		    [&]() { handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size()); },
 		    primary_error);
 		RequireStableError(*handle, first_error);
+		auto abort_error = RequireError([&]() { handle->AbortWrite(); });
+		REQUIRE(abort_error == first_error);
+		handle->AbortWrite();
 		REQUIRE(StringUtil::Contains(first_error, "Additionally"));
 		REQUIRE(StringUtil::Contains(first_error, "Failed to abort S3 multipart upload"));
 		REQUIRE_FALSE(StringUtil::Contains(first_error, upload_id));
@@ -131,12 +134,18 @@ struct S3UploadLifecycleTest {
 	}
 
 	static void RunAmbiguousCompletion(const string &client_implementation, MockS3MultipartCompletionBehavior behavior,
-	                                   const string &error_fragment) {
+	                                   const string &error_fragment, bool leading_retryable_response = false) {
 		MockS3ServerConfig config;
 		config.object.bucket = S3TestHelper::BUCKET;
 		config.object.key = S3TestHelper::OBJECT_KEY;
 		config.auth.refresh_target = MockS3RefreshTarget::HEAD;
 		config.upload.completion_behavior = behavior;
+		if (behavior == MockS3MultipartCompletionBehavior::COMMIT_THEN_DISCONNECT) {
+			config.upload.completion_disconnect_status = 503;
+		}
+		if (leading_retryable_response) {
+			config.failures.completion_fault = {1, 503, "SlowDown", "Retry before an ambiguous completion"};
+		}
 		auto upload_id = config.upload.upload_id;
 		MockS3Server server(std::move(config));
 
@@ -149,6 +158,9 @@ struct S3UploadLifecycleTest {
 		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
 		auto first_error = RequireError([&]() { handle->Sync(); });
 		RequireStableError(*handle, first_error);
+		auto abort_error = RequireError([&]() { handle->AbortWrite(); });
+		REQUIRE(abort_error == first_error);
+		handle->AbortWrite();
 		REQUIRE(StringUtil::Contains(first_error, error_fragment));
 		REQUIRE_FALSE(StringUtil::Contains(first_error, upload_id));
 		handle.reset();
@@ -156,7 +168,17 @@ struct S3UploadLifecycleTest {
 
 		auto observations = server.Observations();
 		INFO(MockS3DescribeObservations(observations));
-		REQUIRE(Count(observations, "POST", "uploadId") == 1);
+		auto expected_attempts = leading_retryable_response ? 2 : 1;
+		S3TestHelper::RequireCompletionIdentity(observations, expected_attempts);
+		auto completions = S3TestHelper::CompletionObservations(observations);
+		for (idx_t attempt = 0; attempt < completions.size() - 1; attempt++) {
+			REQUIRE_FALSE(completions[attempt].multipart_upload_published);
+		}
+		REQUIRE(completions.back().multipart_upload_published);
+		if (leading_retryable_response) {
+			REQUIRE(completions[0].status == 503);
+			REQUIRE(completions[1].status == 503);
+		}
 		REQUIRE(Count(observations, "DELETE") == 0);
 		REQUIRE(server.UploadedObject() == payload);
 	}
@@ -207,6 +229,8 @@ struct S3UploadLifecycleTest {
 		string payload = "small encrypted object";
 		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
 		handle->Close();
+		handle->AbortWrite();
+		handle->Close();
 		handle.reset();
 		S3TestHelper::RequireQueryOk(con, "COMMIT");
 
@@ -220,6 +244,212 @@ struct S3UploadLifecycleTest {
 				REQUIRE(observation.kms_key_id == "test-kms-key");
 			}
 		}
+	}
+
+	static void RunSkippedClose(const string &client_implementation) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+		config.upload.initial_published_object = "existing object";
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		{
+			auto handle = OpenWriter(con);
+			auto payload = MultipartPayload();
+			handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		}
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(Count(observations, "POST", "uploads") == 1);
+		REQUIRE(Count(observations, "PUT", "partNumber") > 0);
+		REQUIRE(Count(observations, "POST", "uploadId") == 0);
+		REQUIRE(Count(observations, "DELETE", "uploadId") == 0);
+		REQUIRE(server.UploadedObject() == "existing object");
+	}
+
+	static void RunAbortBeforeInitialization(const string &client_implementation) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+		config.upload.initial_published_object = "existing object";
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		handle->AbortWrite();
+		handle->AbortWrite();
+		string payload = "not published";
+		auto write_error = RequireError(
+		    [&]() { handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size()); });
+		auto close_error = RequireError([&]() { handle->Close(); });
+		REQUIRE(StringUtil::Contains(write_error, "Cannot write to an aborted S3 upload"));
+		REQUIRE(StringUtil::Contains(close_error, "Cannot finalize an aborted S3 upload"));
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(Count(observations, "PUT") == 0);
+		REQUIRE(Count(observations, "POST") == 0);
+		REQUIRE(Count(observations, "DELETE") == 0);
+		REQUIRE(server.UploadedObject() == "existing object");
+	}
+
+	static void RunBufferedAbort(const string &client_implementation) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+		config.upload.initial_published_object = "existing object";
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		string payload = "buffered replacement";
+		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		handle->AbortWrite();
+		handle->AbortWrite();
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(Count(observations, "PUT") == 0);
+		REQUIRE(Count(observations, "POST") == 0);
+		REQUIRE(Count(observations, "DELETE") == 0);
+		REQUIRE(server.UploadedObject() == "existing object");
+	}
+
+	static void RunMultipartAbort(const string &client_implementation) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+		config.upload.initial_published_object = "existing object";
+		auto upload_id = config.upload.upload_id;
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		auto payload = MultipartPayload();
+		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		handle->AbortWrite();
+		handle->AbortWrite();
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(Count(observations, "POST", "uploads") == 1);
+		REQUIRE(Count(observations, "PUT", "partNumber") > 0);
+		REQUIRE(Count(observations, "POST", "uploadId") == 0);
+		REQUIRE(Count(observations, "DELETE", "uploadId", optional_idx(204)) == 1);
+		for (const auto &observation : observations) {
+			if (observation.method == "DELETE") {
+				REQUIRE(observation.upload_id == upload_id);
+			}
+		}
+		REQUIRE(server.UploadedObject() == "existing object");
+	}
+
+	static void RunExplicitAbortFailure(const string &client_implementation) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+		config.upload.abort_behavior = MockS3MultipartAbortBehavior::ERROR;
+		config.upload.initial_published_object = "existing object";
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		auto payload = MultipartPayload();
+		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		auto abort_error = RequireError([&]() { handle->AbortWrite(); });
+		REQUIRE(StringUtil::Contains(abort_error, "Failed to abort S3 multipart upload"));
+		handle->AbortWrite();
+		auto close_error = RequireError([&]() { handle->Close(); });
+		REQUIRE(StringUtil::Contains(close_error, "Cannot finalize an aborted S3 upload"));
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(Count(observations, "DELETE", "uploadId", optional_idx(400)) == 1);
+		REQUIRE(Count(observations, "POST", "uploadId") == 0);
+		REQUIRE(server.UploadedObject() == "existing object");
+	}
+
+	static void RunBlockedPartAbort(const string &client_implementation) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+		config.upload.blocked_part_numbers = {1};
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		auto payload = MultipartPayload();
+		string write_error;
+		string abort_error;
+		std::atomic<bool> abort_finished(false);
+
+		std::thread writer([&]() {
+			try {
+				handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+			} catch (std::exception &ex) {
+				write_error = ex.what();
+			}
+		});
+		REQUIRE(server.WaitForPartUpload(1));
+		std::thread aborter([&]() {
+			try {
+				handle->AbortWrite();
+			} catch (std::exception &ex) {
+				abort_error = ex.what();
+			}
+			abort_finished.store(true);
+		});
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		auto observations_before_release = server.Observations();
+		REQUIRE_FALSE(abort_finished.load());
+		REQUIRE(Count(observations_before_release, "DELETE", "uploadId") == 0);
+		server.ReleasePartUpload(1);
+		writer.join();
+		aborter.join();
+		REQUIRE(write_error.empty());
+		REQUIRE(abort_error.empty());
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(Count(observations, "DELETE", "uploadId", optional_idx(204)) == 1);
+		REQUIRE(Count(observations, "POST", "uploadId") == 0);
 	}
 
 	static void RunExceptionUnwinding(const string &client_implementation) {
@@ -381,6 +611,24 @@ struct S3UploadLifecycleTest {
 	}
 
 	static void Run(const string &client_implementation) {
+		SECTION("abort before initialization does not publish") {
+			RunAbortBeforeInitialization(client_implementation);
+		}
+		SECTION("buffered abort preserves an existing object") {
+			RunBufferedAbort(client_implementation);
+		}
+		SECTION("multipart abort uses the upload ID exactly once") {
+			RunMultipartAbort(client_implementation);
+		}
+		SECTION("explicit abort failure still detaches the upload") {
+			RunExplicitAbortFailure(client_implementation);
+		}
+		SECTION("abort waits for an active part upload") {
+			RunBlockedPartAbort(client_implementation);
+		}
+		SECTION("skipped close destruction does not publish") {
+			RunSkippedClose(client_implementation);
+		}
 		SECTION("abort failures are secondary and stable") {
 			RunAbortFailure(client_implementation);
 		}
@@ -390,6 +638,10 @@ struct S3UploadLifecycleTest {
 		SECTION("completion transport loss is ambiguous") {
 			RunAmbiguousCompletion(client_implementation, MockS3MultipartCompletionBehavior::COMMIT_THEN_DISCONNECT,
 			                       "unknown outcome");
+		}
+		SECTION("a retryable completion response followed by transport loss is ambiguous") {
+			RunAmbiguousCompletion(client_implementation, MockS3MultipartCompletionBehavior::COMMIT_THEN_DISCONNECT,
+			                       "unknown outcome", true);
 		}
 		SECTION("empty completion success is ambiguous") {
 			RunAmbiguousCompletion(client_implementation, MockS3MultipartCompletionBehavior::EMPTY_SUCCESS,

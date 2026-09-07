@@ -1,14 +1,13 @@
 #include "http/httpfs_client.hpp"
 #include "http/http_state.hpp"
+#include "http/curl_certificate_store_cache.hpp"
 #include "duckdb/logging/logger.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
 #include <curl/curl.h>
-#include <openssl/crypto.h>
+#include <cstdlib>
 #include <openssl/ssl.h>
-#include <chrono>
-#include <cstring>
 #include <new>
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
@@ -45,154 +44,6 @@ static string SelectCURLCertPath() {
 	return string();
 }
 
-struct CurlCertificateStoreCache::Entry {
-	~Entry() {
-		if (store) {
-			X509_STORE_free(store);
-		}
-	}
-
-	annotated_mutex lock;
-	X509_STORE *store DUCKDB_GUARDED_BY(lock) = nullptr;
-	FileIdentity identity DUCKDB_GUARDED_BY(lock);
-	int64_t loaded_at DUCKDB_GUARDED_BY(lock) = 0;
-};
-
-bool CurlCertificateStoreCache::FileIdentity::operator==(const FileIdentity &other) const {
-	return size == other.size && modification_seconds == other.modification_seconds &&
-	       modification_nanoseconds == other.modification_nanoseconds && device == other.device && file == other.file;
-}
-
-static bool ReadCertificateFileIdentity(const string &path, CurlCertificateStoreCache::FileIdentity &result) {
-	struct stat metadata;
-	if (stat(path.c_str(), &metadata) != 0) {
-		return false;
-	}
-	result.size = metadata.st_size;
-	result.modification_seconds = metadata.st_mtime;
-#if defined(__APPLE__)
-	result.modification_nanoseconds = metadata.st_mtimespec.tv_nsec;
-#elif defined(__linux__)
-	result.modification_nanoseconds = metadata.st_mtim.tv_nsec;
-#endif
-	result.device = metadata.st_dev;
-	result.file = metadata.st_ino;
-	return true;
-}
-
-static CURLcode LoadCertificateStore(const string &path, X509_STORE *&result) {
-	result = X509_STORE_new();
-	if (!result) {
-		return CURLE_OUT_OF_MEMORY;
-	}
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-	if (!X509_STORE_load_file(result, path.c_str())) {
-#else
-	if (!X509_STORE_load_locations(result, path.c_str(), nullptr)) {
-#endif
-		X509_STORE_free(result);
-		result = nullptr;
-		return CURLE_SSL_CACERT_BADFILE;
-	}
-	unsigned long flags = X509_V_FLAG_TRUSTED_FIRST;
-#ifdef X509_V_FLAG_PARTIAL_CHAIN
-	flags |= X509_V_FLAG_PARTIAL_CHAIN;
-#endif
-	if (!X509_STORE_set_flags(result, flags)) {
-		X509_STORE_free(result);
-		result = nullptr;
-		return CURLE_SSL_CACERT_BADFILE;
-	}
-	return CURLE_OK;
-}
-
-static int64_t CertificateStoreMonotonicSeconds() {
-	return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
-	    .count();
-}
-
-CurlCertificateStoreCache::CurlCertificateStoreCache()
-    : CurlCertificateStoreCache(ReadCertificateFileIdentity, LoadCertificateStore, CertificateStoreMonotonicSeconds) {
-}
-
-CurlCertificateStoreCache::CurlCertificateStoreCache(MetadataProvider metadata_provider_p, StoreLoader store_loader_p,
-                                                     Clock clock_p, int64_t timeout_seconds_p)
-    : metadata_provider(std::move(metadata_provider_p)), store_loader(std::move(store_loader_p)),
-      clock(std::move(clock_p)), timeout_seconds(timeout_seconds_p) {
-}
-
-CurlCertificateStoreCache::~CurlCertificateStoreCache() = default;
-
-shared_ptr<CurlCertificateStoreCache::Entry> CurlCertificateStoreCache::GetOrCreateEntry(const string &path) {
-	annotated_lock_guard<annotated_mutex> guard(entries_lock);
-	auto entry = entries.find(path);
-	if (entry != entries.end()) {
-		return entry->second;
-	}
-	auto result = make_shared_ptr<Entry>();
-	entries.emplace(path, result);
-	return result;
-}
-
-CURLcode CurlCertificateStoreCache::Acquire(const string &path, X509_STORE *&result) {
-	result = nullptr;
-	auto entry = GetOrCreateEntry(path);
-	annotated_lock_guard<annotated_mutex> guard(entry->lock);
-	FileIdentity current_identity;
-	if (!metadata_provider(path, current_identity)) {
-		return CURLE_SSL_CACERT_BADFILE;
-	}
-	const auto now = clock();
-	const bool expired = entry->store && timeout_seconds >= 0 && now - entry->loaded_at >= timeout_seconds;
-	if (!entry->store || !(entry->identity == current_identity) || expired) {
-		X509_STORE *replacement = nullptr;
-		auto load_result = store_loader(path, replacement);
-		if (load_result != CURLE_OK) {
-			if (replacement) {
-				X509_STORE_free(replacement);
-			}
-			return load_result;
-		}
-		if (!replacement) {
-			return CURLE_SSL_CACERT_BADFILE;
-		}
-		if (entry->store) {
-			X509_STORE_free(entry->store);
-		}
-		entry->store = replacement;
-		entry->identity = current_identity;
-		entry->loaded_at = now;
-	}
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	if (!X509_STORE_up_ref(entry->store)) {
-		return CURLE_OUT_OF_MEMORY;
-	}
-	result = entry->store;
-	return CURLE_OK;
-#else
-	return CURLE_NOT_BUILT_IN;
-#endif
-}
-
-bool CurlCertificateStoreCache::IsSupported() {
-#if !defined(_WIN32) && OPENSSL_VERSION_NUMBER >= 0x10100000L
-	auto version = curl_version_info(CURLVERSION_NOW);
-	if (!version || !version->ssl_version || !StringUtil::StartsWith(version->ssl_version, "OpenSSL/")) {
-		return false;
-	}
-	string linked_version = OpenSSL_version(OPENSSL_VERSION);
-	if (!StringUtil::StartsWith(linked_version, "OpenSSL ")) {
-		return false;
-	}
-	const auto prefix_length = strlen("OpenSSL ");
-	auto version_end = linked_version.find(' ', prefix_length);
-	auto expected = "OpenSSL/" + linked_version.substr(prefix_length, version_end - prefix_length);
-	return StringUtil::StartsWith(version->ssl_version, expected);
-#else
-	return false;
-#endif
-}
-
 static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 	auto total_size = size * nmemb;
 	auto &result = *static_cast<string *>(userp);
@@ -203,7 +54,7 @@ static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, vo
 static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 	auto total_size = size * nmemb;
 	string header(char_ptr_cast(contents), total_size);
-	auto &header_collection = *static_cast<HeaderCollector *>(userp);
+	auto &header_collection = *static_cast<vector<HTTPHeaders> *>(userp);
 
 	// Trim trailing \r\n
 	if (!header.empty() && header.back() == '\n') {
@@ -216,53 +67,59 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	// If header starts with HTTP/... curl has followed a redirect and we have a new Header,
 	// so we push back a new header_collection and store headers from the redirect there.
 	if (header.rfind("HTTP/", 0) == 0) {
-		header_collection.header_collection.emplace_back();
-		header_collection.header_collection.back().Insert("__RESPONSE_STATUS__", header);
+		header_collection.emplace_back();
+		header_collection.back().Insert("__RESPONSE_STATUS__", header);
 	}
 
 	idx_t colon_pos = header.find(':');
 
 	if (colon_pos != string::npos) {
-		// Split the string into two parts
-		string part1 = header.substr(0, colon_pos);
-		string part2 = header.substr(colon_pos + 1);
-		if (part2.at(0) == ' ') {
-			part2.erase(0, 1);
+		if (header_collection.empty()) {
+			header_collection.emplace_back();
 		}
-
-		header_collection.header_collection.back().Insert(part1, part2);
+		auto name = header.substr(0, colon_pos);
+		auto value = header.substr(colon_pos + 1);
+		if (!value.empty() && value.front() == ' ') {
+			value.erase(0, 1);
+		}
+		header_collection.back().Append(std::move(name), std::move(value));
 	}
 	// TODO: log headers that don't follow the header format
 
 	return total_size;
 }
 
-CURLHandle::CURLHandle(const string &token, const string &cert_path_p,
-                       shared_ptr<CurlCertificateStoreCache> certificate_store_cache_p)
-    : certificate_store_cache(std::move(certificate_store_cache_p)), cert_path(cert_path_p) {
+CURLHandle::CURLHandle() {
 	curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize curl");
 	}
+}
+
+CURLHandle::CURLHandle(const string &token, const string &cert_path_p, bool use_native_ca,
+                       shared_ptr<CurlCertificateStoreCache> certificate_store_cache_p)
+    : CURLHandle() {
+	cert_path = cert_path_p;
+	certificate_store_cache = std::move(certificate_store_cache_p);
 	if (!token.empty()) {
-		curl_easy_setopt(curl, CURLOPT_XOAUTH2_BEARER, token.c_str());
-		curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
+		SetOption(CURLOPT_XOAUTH2_BEARER, token.c_str());
+		SetOption(CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
 	}
 	uses_certificate_store_cache =
-	    !cert_path.empty() && certificate_store_cache && CurlCertificateStoreCache::IsSupported();
+	    !cert_path.empty() && certificate_store_cache && CurlCertificateStoreCache::IsSupported(curl);
 	if (!cert_path.empty()) {
+		SetOption(CURLOPT_CAINFO, cert_path.c_str());
 		if (uses_certificate_store_cache) {
-			curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, ConfigureSSLContext);
-			curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, this);
-		} else {
-			curl_easy_setopt(curl, CURLOPT_CAINFO, cert_path.c_str());
+			SetOption(CURLOPT_SSL_CTX_FUNCTION, ConfigureSSLContext);
+			SetOption(CURLOPT_SSL_CTX_DATA, this);
 		}
 	}
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
-	if (!uses_certificate_store_cache) {
+	if (use_native_ca && !uses_certificate_store_cache) {
 		ssl_options |= CURLSSLOPT_NATIVE_CA;
 	}
-	curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, ssl_options);
+	SetOption(CURLOPT_SSL_OPTIONS, ssl_options);
+	SetOption(CURLOPT_PATH_AS_IS, 1L);
 }
 
 CURLHandle::~CURLHandle() {
@@ -271,12 +128,10 @@ CURLHandle::~CURLHandle() {
 
 void CURLHandle::SetVerifySSL(bool verify_ssl_p) {
 	verify_ssl = verify_ssl_p;
-	// libcurl populates its X509 store before invoking CURLOPT_SSL_CTX_FUNCTION. On the cached OpenSSL path, tell
-	// libcurl not to populate that redundant store; ConfigureSSLContext installs the shared store and enables peer
-	// verification directly on the SSL_CTX instead.
+	// The cached path verifies the chain in OpenSSL to avoid curl loading a second store before our callback.
 	const bool curl_verifies_peer = verify_ssl && !uses_certificate_store_cache;
-	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, curl_verifies_peer ? 1L : 0L);
-	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
+	SetOption(CURLOPT_SSL_VERIFYPEER, curl_verifies_peer ? 1L : 0L);
+	SetOption(CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
 }
 
 CURLcode CURLHandle::ConfigureSSLContext(CURL *, void *ssl_context, void *user_data) {
@@ -299,6 +154,15 @@ CURLcode CURLHandle::ConfigureSSLContext(CURL *, void *ssl_context, void *user_d
 	} catch (...) {
 		return CURLE_SSL_CACERT_BADFILE;
 	}
+}
+
+uint16_t CURLHandle::GetResponseCode() {
+	long response_code = 0; // NOLINT(google-runtime-int): required by curl_easy_getinfo
+	auto result = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+	if (result != CURLE_OK) {
+		throw IOException("Failed to read curl response status: %s", curl_easy_strerror(result));
+	}
+	return NumericCast<uint16_t>(response_code);
 }
 
 CURLURLHandle::CURLURLHandle() : CURLURLHandle(curl_url()) {
@@ -347,10 +211,26 @@ private:
 		}
 
 	private:
+		static bool HasProxyConfiguration(const HTTPFSParams &params) {
+			if (!params.http_proxy.empty()) {
+				return true;
+			}
+			// Curl also discovers proxies outside HTTPParams, including for redirected requests.
+			for (auto name : {"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "ftp_proxy", "FTP_PROXY",
+			                  "ftps_proxy", "FTPS_PROXY", "all_proxy", "ALL_PROXY"}) {
+				auto value = std::getenv(name);
+				if (value && value[0]) {
+					return true;
+				}
+			}
+			return false;
+		}
+
 		static void InitializeHandle(HTTPFSCurlClient &client, const HTTPFSParams &params) {
 			auto cert_file_path = params.ca_cert_file;
+			const bool has_proxy = HasProxyConfiguration(params);
 			if (client.curl && client.stored_bearer_token == params.bearer_token &&
-			    client.stored_cert_file_path == cert_file_path) {
+			    client.stored_cert_file_path == cert_file_path && client.stored_has_proxy == has_proxy) {
 				return;
 			}
 			HTTPFSCurlClient::InitCurlGlobal();
@@ -358,42 +238,45 @@ private:
 			if (cert_file_path.empty()) {
 				cert_file_path = SelectCURLCertPath();
 			}
-			client.curl = make_uniq<CURLHandle>(params.bearer_token, cert_file_path, client.certificate_store_cache);
+			client.curl = make_uniq<CURLHandle>(params.bearer_token, cert_file_path, params.ca_cert_file.empty(),
+			                                    has_proxy ? nullptr : client.certificate_store_cache);
 			client.stored_bearer_token = params.bearer_token;
+			client.stored_has_proxy = has_proxy;
 		}
 
 		static void ConfigureConnection(HTTPFSCurlClient &client, const HTTPFSParams &params) {
-			curl_easy_setopt(*client.curl, CURLOPT_FORBID_REUSE, params.keep_alive ? 0L : 1L);
+			client.curl->SetOption(CURLOPT_FORBID_REUSE, params.keep_alive ? 0L : 1L);
 			const bool verify_ssl =
 			    params.override_verify_ssl ? params.verify_ssl : params.enable_curl_server_cert_verification;
 			client.curl->SetVerifySSL(verify_ssl);
 		}
 
 		static void ConfigureTimeoutsAndCallbacks(HTTPFSCurlClient &client, const HTTPFSParams &params) {
-			curl_easy_setopt(*client.curl, CURLOPT_CONNECTTIMEOUT, params.timeout);
-			curl_easy_setopt(*client.curl, CURLOPT_TIMEOUT, 0L);
-			curl_easy_setopt(*client.curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
-			curl_easy_setopt(*client.curl, CURLOPT_LOW_SPEED_TIME, params.timeout);
-			curl_easy_setopt(*client.curl, CURLOPT_ACCEPT_ENCODING, nullptr);
-			curl_easy_setopt(*client.curl, CURLOPT_FOLLOWLOCATION, params.follow_location ? 1L : 0L);
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERDATA, &client.request_info->header_collection);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEDATA, &client.request_info->body);
+			client.curl->SetOption(CURLOPT_CONNECTTIMEOUT, params.timeout);
+			client.curl->SetOption(CURLOPT_TIMEOUT, 0L);
+			client.curl->SetOption(CURLOPT_LOW_SPEED_LIMIT, 1024L);
+			client.curl->SetOption(CURLOPT_LOW_SPEED_TIME, params.timeout);
+			client.curl->SetOption(CURLOPT_ACCEPT_ENCODING, nullptr);
+			client.curl->SetOption(CURLOPT_FOLLOWLOCATION, params.follow_location ? 1L : 0L);
+			client.curl->SetOption(CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
+			client.curl->SetOption(CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
+			client.curl->SetOption(CURLOPT_HEADERDATA, &client.request_info->header_collection);
+			client.curl->SetOption(CURLOPT_WRITEFUNCTION, RequestWriteCallback);
+			client.curl->SetOption(CURLOPT_WRITEDATA, &client.request_info->body);
 		}
 
 		static void ConfigureProxy(HTTPFSCurlClient &client, const HTTPFSParams &params) {
-			curl_easy_setopt(*client.curl, CURLOPT_PROXY, nullptr);
-			curl_easy_setopt(*client.curl, CURLOPT_PROXYUSERNAME, nullptr);
-			curl_easy_setopt(*client.curl, CURLOPT_PROXYPASSWORD, nullptr);
+			client.curl->SetOption(CURLOPT_PROXY, nullptr);
+			client.curl->SetOption(CURLOPT_PROXYUSERNAME, nullptr);
+			client.curl->SetOption(CURLOPT_PROXYPASSWORD, nullptr);
 			if (params.http_proxy.empty()) {
 				return;
 			}
-			curl_easy_setopt(*client.curl, CURLOPT_PROXY,
-			                 StringUtil::Format("%s:%d", params.http_proxy, params.http_proxy_port).c_str());
+			client.curl->SetOption(CURLOPT_PROXY,
+			                       StringUtil::Format("%s:%d", params.http_proxy, params.http_proxy_port).c_str());
 			if (!params.http_proxy_username.empty()) {
-				curl_easy_setopt(*client.curl, CURLOPT_PROXYUSERNAME, params.http_proxy_username.c_str());
-				curl_easy_setopt(*client.curl, CURLOPT_PROXYPASSWORD, params.http_proxy_password.c_str());
+				client.curl->SetOption(CURLOPT_PROXYUSERNAME, params.http_proxy_username.c_str());
+				client.curl->SetOption(CURLOPT_PROXYPASSWORD, params.http_proxy_password.c_str());
 			}
 		}
 	};
@@ -402,22 +285,33 @@ private:
 	public:
 		GetTransferState(HTTPFSCurlClient &client_p, GetRequestInfo &request_p)
 		    : client(client_p), request(request_p), stream_content(bool(request.content_handler)) {
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERDATA, this);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEDATA, this);
+			try {
+				client.curl->SetOption(CURLOPT_HEADERFUNCTION, HeaderCallback);
+				client.curl->SetOption(CURLOPT_HEADERDATA, this);
+				client.curl->SetOption(CURLOPT_WRITEFUNCTION, WriteCallback);
+				client.curl->SetOption(CURLOPT_WRITEDATA, this);
+			} catch (...) {
+				// Discard a handle that may retain callbacks to this incomplete transfer.
+				client.curl.reset();
+				throw;
+			}
 		}
 
 		~GetTransferState() {
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_HEADERDATA, &client.request_info->header_collection);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEFUNCTION, RequestWriteCallback);
-			curl_easy_setopt(*client.curl, CURLOPT_WRITEDATA, &client.request_info->body);
+			try {
+				client.curl->SetOption(CURLOPT_HEADERFUNCTION, RequestHeaderCallback);
+				client.curl->SetOption(CURLOPT_HEADERDATA, &client.request_info->header_collection);
+				client.curl->SetOption(CURLOPT_WRITEFUNCTION, RequestWriteCallback);
+				client.curl->SetOption(CURLOPT_WRITEDATA, &client.request_info->body);
+			} catch (...) {
+				// Cleanup must not throw or leave callbacks pointing to this destroyed transfer.
+				client.curl.reset();
+			}
 		}
 
 	public:
 		unique_ptr<HTTPResponse> Finish(CURLcode result) {
-			curl_easy_getinfo(*client.curl, CURLINFO_RESPONSE_CODE, &client.request_info->response_code);
+			client.request_info->response_code = client.curl->GetResponseCode();
 			const bool include_body = !stream_content || client.request_info->response_code >= 400;
 			unique_ptr<HTTPResponse> response;
 			try {
@@ -451,7 +345,7 @@ private:
 			auto &state = *static_cast<GetTransferState *>(userp);
 			const auto total_size = RequestHeaderCallback(
 			    contents, size, nmemb, static_cast<void *>(&state.client.request_info->header_collection));
-			if (total_size == 0 || !state.IsEndOfHeaders(contents, total_size) || state.IsProxyConnectResponse()) {
+			if (total_size == 0 || !state.IsEndOfHeaders(contents, total_size)) {
 				return total_size;
 			}
 			try {
@@ -481,18 +375,6 @@ private:
 			return (size == 2 && header[0] == '\r' && header[1] == '\n') || (size == 1 && header[0] == '\n');
 		}
 
-		bool IsProxyConnectResponse() const {
-			if (client.request_info->header_collection.empty()) {
-				return false;
-			}
-			auto &headers = client.request_info->header_collection.back();
-			if (!headers.HasHeader("__RESPONSE_STATUS__")) {
-				return false;
-			}
-			auto status = StringUtil::Lower(headers.GetHeaderValue("__RESPONSE_STATUS__"));
-			return status.find("connection established") != string::npos;
-		}
-
 		size_t Write(void *contents, idx_t size) {
 			if (!response_started && !StartResponse()) {
 				return stopped ? 0 : size;
@@ -508,11 +390,8 @@ private:
 		}
 
 		bool StartResponse() {
-			long response_code; // NOLINT(google-runtime-int): required by curl_easy_getinfo
-			if (curl_easy_getinfo(*client.curl, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_OK) {
-				throw IOException("Failed to read the HTTP response status");
-			}
-			client.request_info->response_code = NumericCast<uint16_t>(response_code);
+			auto response_code = client.curl->GetResponseCode();
+			client.request_info->response_code = response_code;
 			if (response_code < 200 || (response_code >= 300 && response_code < 400)) {
 				return false;
 			}
@@ -541,7 +420,7 @@ private:
 			}
 
 			if (client.state) {
-				client.state->total_bytes_received += bytes_received;
+				client.state->RecordBytesReceived(bytes_received);
 			}
 		}
 
@@ -560,8 +439,10 @@ public:
 	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port,
 	                 shared_ptr<CurlCertificateStoreCache> certificate_store_cache_p)
 	    : HTTPClient(proto_host_port), certificate_store_cache(std::move(certificate_store_cache_p)) {
-		string normalized_path = NormalizePathToBeAdded(proto_host_port);
-		curl_url_set(curl_base_url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+		auto result = curl_url_set(curl_base_url.Get(), CURLUPART_URL, proto_host_port.c_str(), 0);
+		if (result != CURLUE_OK) {
+			throw IOException("Failed to initialize curl URL: %s", curl_url_strerror(result));
+		}
 		stored_bearer_token = "";
 		stored_cert_file_path = "";
 		Initialize(http_params);
@@ -571,19 +452,6 @@ public:
 	}
 
 public:
-	static string NormalizePathToBeAdded(string added_path) {
-		while (added_path.size() > 2) {
-			if (StringUtil::StartsWith(added_path, "//")) {
-				added_path = added_path.substr(1);
-			} else if (StringUtil::StartsWith(added_path, "./")) {
-				added_path = added_path.substr(1);
-			} else {
-				break;
-			}
-		}
-
-		return added_path;
-	}
 	void Initialize(HTTPParams &http_p) override {
 		auto &http_params = http_p.Cast<HTTPFSParams>();
 		ClientConfigurator::Configure(*this, http_params);
@@ -598,7 +466,7 @@ public:
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
 		if (state) {
-			state->get_count++;
+			state->RecordRequest(RequestType::GET_REQUEST);
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
@@ -606,16 +474,14 @@ public:
 
 		CURLcode res;
 		{
-			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
-			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
+			curl->SetOption(CURLOPT_NOBODY, 0L);
+			curl->SetOption(CURLOPT_HTTPGET, 1L);
 			CURLURLHandle url(curl_base_url);
+			SetRequestURL(url, info.url, info.path);
 
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
-
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 			GetTransferState transfer(*this, info);
 			res = curl->Execute();
 			return transfer.Finish(res);
@@ -626,51 +492,50 @@ public:
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
 		if (state) {
-			state->put_count++;
-			state->total_bytes_sent += info.buffer_in_len;
+			state->RecordRequest(RequestType::PUT_REQUEST);
+			state->RecordBytesSent(info.buffer_in_len);
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
-		// Add content type header from info
-		curl_headers.Add("Content-Type: " + info.content_type);
+		if (!info.headers.HasHeader("Content-Type")) {
+			curl_headers.Add("Content-Type: " + info.content_type);
+		}
 		// transform parameters
 		request_info->url = info.url;
 
 		CURLcode res;
 		{
 			CURLURLHandle url(curl_base_url);
+			SetRequestURL(url, info.url, info.path);
 
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
-
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 
 			// Perform PUT
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "PUT");
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, "PUT");
 			// Include PUT body
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE_LARGE, NumericCast<curl_off_t>(info.buffer_in_len));
+			curl->SetOption(CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
+			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, NumericCast<curl_off_t>(info.buffer_in_len));
 
 			// Apply headers
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
+			curl->SetOption(CURLOPT_POSTFIELDS, nullptr);
+			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
 		}
 
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		request_info->response_code = curl->GetResponseCode();
 
-		return TransformResponseCurl(res);
+		return TransformBufferedResponseCurl(res);
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
 		if (state) {
-			state->head_count++;
+			state->RecordRequest(RequestType::HEAD_REQUEST);
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
@@ -680,35 +545,33 @@ public:
 		CURLcode res;
 		{
 			// Perform HEAD request instead of GET
-			curl_easy_setopt(*curl, CURLOPT_NOBODY, 1L);
-			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 0L);
+			curl->SetOption(CURLOPT_NOBODY, 1L);
+			curl->SetOption(CURLOPT_HTTPGET, 0L);
 
 			CURLURLHandle url(curl_base_url);
+			SetRequestURL(url, info.url, info.path);
 
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
-
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 
 			// Add headers if any
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute HEAD request
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
-			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
+			curl->SetOption(CURLOPT_NOBODY, 0L);
+			curl->SetOption(CURLOPT_HTTPGET, 1L);
 		}
 
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
-		return TransformResponseCurl(res);
+		request_info->response_code = curl->GetResponseCode();
+		return TransformBufferedResponseCurl(res);
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
 		if (state) {
-			state->delete_count++;
+			state->RecordRequest(RequestType::DELETE_REQUEST);
 		}
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		// transform parameters
@@ -717,62 +580,61 @@ public:
 		CURLcode res;
 		{
 			CURLURLHandle url(curl_base_url);
+			SetRequestURL(url, info.url, info.path);
 
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
-
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 
 			// Set DELETE request method
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, "DELETE");
 
 			// Add headers if any
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute DELETE request
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
 		}
 
 		// Get HTTP response status code
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
-		return TransformResponseCurl(res);
+		request_info->response_code = curl->GetResponseCode();
+		return TransformBufferedResponseCurl(res);
 	}
 
 	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
 		ResetRequestInfo();
+		if (state) {
+			state->RecordRequest(RequestType::OPTIONS_REQUEST);
+		}
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
 		request_info->url = info.url;
 
 		CURLcode res;
 		{
 			CURLURLHandle url(curl_base_url);
+			SetRequestURL(url, info.url, info.path);
 
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, "OPTIONS");
 
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "OPTIONS");
-
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
 		}
 
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
-		return TransformResponseCurl(res);
+		request_info->response_code = curl->GetResponseCode();
+		return TransformBufferedResponseCurl(res);
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
 		if (state) {
-			state->post_count++;
-			state->total_bytes_sent += info.buffer_in_len;
+			state->RecordRequest(RequestType::POST_REQUEST);
+			state->RecordBytesSent(info.buffer_in_len);
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
@@ -786,42 +648,34 @@ public:
 		CURLcode res;
 		{
 			CURLURLHandle url(curl_base_url);
+			SetRequestURL(url, info.url, info.path);
 
-			string normalized_path = NormalizePathToBeAdded(info.path);
-			curl_url_set(url.Get(), CURLUPART_URL, normalized_path.c_str(), 0);
-
-			curl_easy_setopt(*curl, CURLOPT_URL, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_CURLU, url.Get());
+			curl->SetOption(CURLOPT_URL, nullptr);
+			curl->SetOption(CURLOPT_CURLU, url.Get());
 			if (info.send_post_as_get_request) {
-				curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, "GET");
+				curl->SetOption(CURLOPT_CUSTOMREQUEST, "GET");
 			} else {
-				curl_easy_setopt(*curl, CURLOPT_POST, 1L);
+				curl->SetOption(CURLOPT_POST, 1L);
 			}
 			// Set POST body
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, info.buffer_in_len);
+			curl->SetOption(CURLOPT_POSTFIELDS, const_char_ptr_cast(info.buffer_in));
+			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, NumericCast<curl_off_t>(info.buffer_in_len));
 
 			// Add headers if any
-			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
+			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute POST request
 			res = curl->Execute();
-			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
-			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, 0);
-			curl_easy_setopt(*curl, CURLOPT_POST, 0L);
+			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
+			curl->SetOption(CURLOPT_POSTFIELDS, nullptr);
+			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
+			curl->SetOption(CURLOPT_POST, 0L);
 		}
 
-		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		request_info->response_code = curl->GetResponseCode();
 		info.buffer_out = request_info->body;
 
-		const idx_t bytes_received = request_info->body.size();
-		if (state) {
-			state->total_bytes_received += bytes_received;
-		}
-
-		// Construct HTTPResponse
-		return TransformResponseCurl(res);
+		return TransformBufferedResponseCurl(res);
 	}
 
 	void Cleanup() override {
@@ -830,22 +684,30 @@ public:
 	}
 
 private:
-	static CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
-		auto &httpfs_params = params.Cast<HTTPFSParams>();
+	static void SetRequestURL(CURLURLHandle &url, const string &request_url, const string &request_path) {
+		// A leading '//' is a network-path reference to the URL API, so set the complete URL in that case.
+		const auto &url_part = StringUtil::StartsWith(request_path, "//") ? request_url : request_path;
+		auto result = curl_url_set(url.Get(), CURLUPART_URL, url_part.c_str(), CURLU_PATH_AS_IS);
+		if (result != CURLUE_OK) {
+			throw IOException("Failed to construct curl request URL: %s", curl_url_strerror(result));
+		}
+	}
 
+	static CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
 		CURLRequestHeaders curl_headers;
 		for (auto &entry : header_map) {
-			curl_headers.Add(entry.first + ": " + entry.second);
+			curl_headers.Add(entry.first, entry.second);
 		}
-		if (!httpfs_params.pre_merged_headers) {
-			for (auto &entry : params.extra_headers) {
-				curl_headers.Add(entry.first + ": " + entry.second);
-			}
+		for (auto &entry : params.extra_headers) {
+			curl_headers.Add(entry.first, entry.second);
 		}
 		return curl_headers;
 	}
 
 	void ResetRequestInfo() {
+		if (!curl) {
+			throw IOException("Curl client must be reinitialized after failed callback configuration");
+		}
 		// clear headers after transform
 		request_info->header_collection.clear();
 		// reset request info.
@@ -867,15 +729,26 @@ private:
 		response->url = request_info->url;
 		response->reason = HTTPUtil::GetStatusMessage(HTTPUtil::ToStatusCode(request_info->response_code));
 		if (!request_info->header_collection.empty()) {
-			for (auto &header : request_info->header_collection.back()) {
+			auto &response_headers = request_info->header_collection.back();
+			for (auto &header : response_headers) {
 				// We should not return __RESPONSE_STATUS__ to the user. It's only there for debugging.
 				if (header.first == "__RESPONSE_STATUS__") {
 					continue;
 				}
-				response->headers.Insert(header.first, header.second);
+				for (auto &value : response_headers.GetHeaderValues(header.first)) {
+					response->headers.Append(header.first, std::move(value));
+				}
 			}
 		}
 		// ResetRequestInfo();
+		return response;
+	}
+
+	unique_ptr<HTTPResponse> TransformBufferedResponseCurl(CURLcode res) {
+		auto response = TransformResponseCurl(res);
+		if (state) {
+			state->RecordBytesReceived(request_info->body.size());
+		}
 		return response;
 	}
 
@@ -883,7 +756,10 @@ private:
 		auto &state = GetCURLGlobalState();
 		annotated_lock_guard<annotated_mutex> lock(state.lock);
 		if (state.client_count == 0) {
-			curl_global_init(CURL_GLOBAL_DEFAULT);
+			auto result = curl_global_init(CURL_GLOBAL_DEFAULT);
+			if (result != CURLE_OK) {
+				throw IOException("Failed to initialize curl: %s", curl_easy_strerror(result));
+			}
 		}
 		++state.client_count;
 	}
@@ -907,12 +783,13 @@ private:
 	CURLURLHandle curl_base_url;
 	string stored_bearer_token;
 	string stored_cert_file_path;
+	bool stored_has_proxy = false;
 	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 };
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
-	if (connection_caching_enabled) {
-		auto client = connection_cache.Find(proto_host_port);
+	if (ConnectionCachingEnabled()) {
+		auto client = FindCachedClient(proto_host_port);
 		if (client) {
 			if (http_params.logger &&
 			    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
@@ -932,6 +809,14 @@ unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params,
 	auto client =
 	    make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port, certificate_store_cache);
 	return std::move(client);
+}
+
+unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClientExtended(HTTPParams &http_params, const string &proto_host_port,
+                                                                const HTTPClientInitializationOptions &options) {
+	if (options.cache_policy == HTTPClientCachePolicy::BYPASS_CACHE) {
+		return make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port, certificate_store_cache);
+	}
+	return InitializeClient(http_params, proto_host_port);
 }
 
 string HTTPFSCurlUtil::GetName() const {

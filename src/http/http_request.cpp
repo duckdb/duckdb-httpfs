@@ -93,6 +93,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRequest(HTTPFileHandle &hfh, cons
                                                        const HTTPSendCallback &send_request) {
 	auto request_headers = PrepareFullGetHeaders(header_map, read_config);
 	http_params.extra_headers.erase("Range");
+	const auto request_time = Timestamp::GetCurrentTimestamp();
 	GetRequestInfo get_request(
 	    url, request_headers, http_params,
 	    [&](const HTTPResponse &response) {
@@ -105,6 +106,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRequest(HTTPFileHandle &hfh, cons
 		    }
 		    if (static_cast<int>(response.status) < 300) {
 			    ValidateResponseETag(hfh, read_config, response);
+			    hfh.ApplyCachePolicy(response, request_time, Timestamp::GetCurrentTimestamp());
 		    }
 		    download.Reset();
 		    optional_idx content_length;
@@ -276,9 +278,12 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
 		return response;
 	}
 
-	HTTPRangeRequestContext context(
-	    hfh, read_config, url, range_expr, buffer_out, buffer_out_len, std::move(range_request), get_error,
-	    [&](const HTTPResponse &response) { ValidateResponseETag(hfh, read_config, response); });
+	const auto request_time = Timestamp::GetCurrentTimestamp();
+	HTTPRangeRequestContext context(hfh, read_config, url, range_expr, buffer_out, buffer_out_len,
+	                                std::move(range_request), get_error, [&](const HTTPResponse &response) {
+		                                ValidateResponseETag(hfh, read_config, response);
+		                                hfh.ApplyCachePolicy(response, request_time, Timestamp::GetCurrentTimestamp());
+	                                });
 	GetRequestInfo get_request(
 	    url, request_headers, http_params,
 	    [&](const HTTPResponse &response) { return context.HandleResponse(response); },
@@ -291,20 +296,18 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
 unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, const string &url, HTTPHeaders header_map) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto captured = hfh.request_session->Capture();
-	captured.snapshot->AddConfiguredHeaders(header_map);
-	auto request_params = captured.snapshot->CreateRequestParams();
-	return RunHeadRequest(url, header_map, *request_params, [&](BaseRequest &request) {
-		return SendSessionRequest(*hfh.request_session, captured, *request_params, request);
+	auto session_request = captured.snapshot->CreateRequest(std::move(header_map));
+	return RunHeadRequest(url, session_request.headers, *session_request.params, [&](BaseRequest &request) {
+		return SendSessionRequest(*hfh.request_session, captured, *session_request.params, request);
 	});
 }
 
 unique_ptr<HTTPResponse> HTTPFileSystem::DeleteRequest(FileHandle &handle, const string &url, HTTPHeaders header_map) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto captured = hfh.request_session->Capture();
-	captured.snapshot->AddConfiguredHeaders(header_map);
-	auto request_params = captured.snapshot->CreateRequestParams();
-	return RunDeleteRequest(url, header_map, *request_params, [&](BaseRequest &request) {
-		return SendSessionRequest(*hfh.request_session, captured, *request_params, request);
+	auto session_request = captured.snapshot->CreateRequest(std::move(header_map));
+	return RunDeleteRequest(url, session_request.headers, *session_request.params, [&](BaseRequest &request) {
+		return SendSessionRequest(*hfh.request_session, captured, *session_request.params, request);
 	});
 }
 
@@ -377,13 +380,12 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
                                                     const HTTPReadConfig &read_config, CachedFileDownload &download) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto captured = hfh.request_session->Capture();
-	captured.snapshot->AddConfiguredHeaders(header_map);
-	auto request_params = captured.snapshot->CreateRequestParams();
+	auto session_request = captured.snapshot->CreateRequest(std::move(header_map));
 	return RunGetRequest(
-	    hfh, url, header_map, *request_params, read_config, download,
+	    hfh, url, session_request.headers, *session_request.params, read_config, download,
 	    [&](const HTTPResponse &response) { return GetHTTPError(handle, response, RequestType::GET_REQUEST, url); },
 	    [&](BaseRequest &request) {
-		    return SendSessionRequest(*hfh.request_session, captured, *request_params, request);
+		    return SendSessionRequest(*hfh.request_session, captured, *session_request.params, request);
 	    });
 }
 
@@ -392,13 +394,13 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
                                                          data_ptr_t buffer_out, idx_t buffer_out_len) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto captured = hfh.request_session->Capture();
-	captured.snapshot->AddConfiguredHeaders(header_map);
-	auto request_params = captured.snapshot->CreateRequestParams();
+	auto session_request = captured.snapshot->CreateRequest(std::move(header_map));
 	return RunGetRangeRequest(
-	    hfh, url, header_map, *request_params, read_config, file_offset, buffer_out, buffer_out_len,
+	    hfh, url, session_request.headers, *session_request.params, read_config, file_offset, buffer_out,
+	    buffer_out_len,
 	    [&](const HTTPResponse &response) { return GetHTTPError(handle, response, RequestType::GET_REQUEST, url); },
 	    [&](BaseRequest &request) {
-		    return SendSessionRequest(*hfh.request_session, captured, *request_params, request);
+		    return SendSessionRequest(*hfh.request_session, captured, *session_request.params, request);
 	    });
 }
 

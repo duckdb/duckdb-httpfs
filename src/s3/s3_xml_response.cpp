@@ -131,9 +131,6 @@ private:
 	static constexpr const char *UTF8_BOM = "\xEF\xBB\xBF";
 	static constexpr const char *XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace";
 	static constexpr const char *XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/";
-	static constexpr const char *S3_NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/";
-	static constexpr const char *GCS_S3_NAMESPACE = "http://doc.s3.amazonaws.com/2006-03-01";
-	static constexpr const char *GCS_STORAGE_NAMESPACE = "http://doc.storage.googleapis.com/2010-03-01";
 	static constexpr idx_t MAX_NESTING_DEPTH = 256;
 
 	bool HasPrefix(const char *prefix) const {
@@ -622,13 +619,6 @@ private:
 
 	enum class ChildTextResult : uint8_t { MISSING, FOUND, INVALID };
 
-	bool HasSupportedNamespace() const {
-		const auto &namespace_uri = root.namespace_uri;
-		return namespace_uri.empty() || namespace_uri == S3_NAMESPACE || namespace_uri == GCS_S3_NAMESPACE ||
-		       namespace_uri == string(GCS_S3_NAMESPACE) + "/" || namespace_uri == GCS_STORAGE_NAMESPACE ||
-		       namespace_uri == string(GCS_STORAGE_NAMESPACE) + "/";
-	}
-
 	static ChildTextResult GetChildText(const S3XMLNode &parent, const string &namespace_uri, const string &local_name,
 	                                    string &result) {
 		idx_t matches = 0;
@@ -654,9 +644,6 @@ private:
 	}
 
 	void InterpretResponse(S3XMLResponse &response) const {
-		if (!HasSupportedNamespace()) {
-			return;
-		}
 		if (root.local_name == "InitiateMultipartUploadResult") {
 			if (GetChildText(root, root.namespace_uri, "UploadId", response.upload_id) == ChildTextResult::FOUND &&
 			    !response.upload_id.empty()) {
@@ -688,7 +675,7 @@ private:
 	}
 
 	bool InterpretListObjectsV2(S3ListObjectsV2Result &result) const {
-		if (!HasSupportedNamespace() || root.local_name != "ListBucketResult") {
+		if (root.local_name != "ListBucketResult") {
 			return false;
 		}
 		if (!GetOptionalChildText(root, root.namespace_uri, "NextContinuationToken", result.continuation_token)) {
@@ -727,7 +714,7 @@ private:
 	}
 
 	bool InterpretDeleteObjects(S3DeleteObjectsResult &result) const {
-		if (!HasSupportedNamespace() || root.local_name != "DeleteResult") {
+		if (root.local_name != "DeleteResult") {
 			return false;
 		}
 		for (const auto &child : root.children) {

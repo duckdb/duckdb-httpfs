@@ -1,159 +1,15 @@
 #include "catch.hpp"
 
 #include "http/http_test_helper.hpp"
-#include "http/httpfs_curl_client.hpp"
-#include "test_helpers.hpp"
-
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httplib.hpp"
-
-#include <openssl/pem.h>
-#include <openssl/rsa.h>
-#include <openssl/x509v3.h>
-
-#include <atomic>
-#include <memory>
-#include <thread>
+#include "http/http_metadata_cache.hpp"
+#include "http/http_state.hpp"
+#include "http/httpfs_client.hpp"
 
 namespace duckdb {
 
 namespace {
 
-using TestPrivateKey = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
-using TestCertificate = std::unique_ptr<X509, decltype(&X509_free)>;
-
-static TestPrivateKey GenerateTestPrivateKey() {
-	std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> context(EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr),
-	                                                                    EVP_PKEY_CTX_free);
-	if (!context || EVP_PKEY_keygen_init(context.get()) <= 0 ||
-	    EVP_PKEY_CTX_set_rsa_keygen_bits(context.get(), 2048) <= 0) {
-		throw InternalException("Failed to initialize test certificate key generation");
-	}
-	EVP_PKEY *key = nullptr;
-	if (EVP_PKEY_keygen(context.get(), &key) <= 0) {
-		throw InternalException("Failed to generate test certificate key");
-	}
-	return TestPrivateKey(key, EVP_PKEY_free);
-}
-
-static void AddTestCertificateExtension(X509 &certificate, X509 &issuer, int nid, const char *value) {
-	X509V3_CTX context;
-	X509V3_set_ctx(&context, &issuer, &certificate, nullptr, nullptr, 0);
-	std::unique_ptr<X509_EXTENSION, decltype(&X509_EXTENSION_free)> extension(
-	    X509V3_EXT_conf_nid(nullptr, &context, nid, const_cast<char *>(value)), X509_EXTENSION_free);
-	if (!extension || !X509_add_ext(&certificate, extension.get(), -1)) {
-		throw InternalException("Failed to add test certificate extension");
-	}
-}
-
-static TestCertificate GenerateTestCertificate(EVP_PKEY &key, optional_ptr<X509> issuer, EVP_PKEY &issuer_key,
-                                               idx_t serial, bool is_ca) {
-	TestCertificate certificate(X509_new(), X509_free);
-	if (!certificate || !X509_set_version(certificate.get(), 2) ||
-	    !ASN1_INTEGER_set(X509_get_serialNumber(certificate.get()), NumericCast<long>(serial)) ||
-	    !X509_gmtime_adj(X509_get_notBefore(certificate.get()), -60) ||
-	    !X509_gmtime_adj(X509_get_notAfter(certificate.get()), 60 * 60) || !X509_set_pubkey(certificate.get(), &key)) {
-		throw InternalException("Failed to initialize test certificate");
-	}
-	auto subject = X509_get_subject_name(certificate.get());
-	auto common_name = is_ca ? "HTTPFS Test CA" : "localhost";
-	if (!X509_NAME_add_entry_by_txt(subject, "CN", MBSTRING_ASC, const_uchar_ptr_cast(common_name), -1, -1, 0) ||
-	    !X509_set_issuer_name(certificate.get(), issuer ? X509_get_subject_name(issuer.get()) : subject)) {
-		throw InternalException("Failed to name test certificate");
-	}
-	auto issuer_certificate = issuer ? issuer.get() : certificate.get();
-	AddTestCertificateExtension(*certificate, *issuer_certificate, NID_basic_constraints,
-	                            is_ca ? "critical,CA:TRUE" : "critical,CA:FALSE");
-	AddTestCertificateExtension(*certificate, *issuer_certificate, NID_key_usage,
-	                            is_ca ? "critical,keyCertSign,cRLSign" : "critical,digitalSignature,keyEncipherment");
-	if (!is_ca) {
-		AddTestCertificateExtension(*certificate, *issuer_certificate, NID_subject_alt_name, "DNS:localhost");
-	}
-	if (!X509_sign(certificate.get(), &issuer_key, EVP_sha256())) {
-		throw InternalException("Failed to sign test certificate");
-	}
-	return certificate;
-}
-
-class CurlTLSTestServer {
-public:
-	CurlTLSTestServer()
-	    : ca_key(GenerateTestPrivateKey()), server_key(GenerateTestPrivateKey()),
-	      ca_certificate(GenerateTestCertificate(*ca_key, nullptr, *ca_key, 1, true)),
-	      server_certificate(GenerateTestCertificate(*server_key, ca_certificate.get(), *ca_key, 2, false)),
-	      ca_path(TestCreatePath("httpfs-curl-ca-cache.pem")),
-	      server(make_uniq<duckdb_httplib_openssl::SSLServer>(server_certificate.get(), server_key.get(), nullptr)) {
-		std::unique_ptr<BIO, decltype(&BIO_free)> output(BIO_new_file(ca_path.c_str(), "w"), BIO_free);
-		if (!output || !PEM_write_bio_X509(output.get(), ca_certificate.get())) {
-			throw InternalException("Failed to write test CA certificate");
-		}
-		server->Get("/object",
-		            [](const duckdb_httplib_openssl::Request &request, duckdb_httplib_openssl::Response &response) {
-			            if (request.get_header_value("Range") == "bytes=0-1") {
-				            response.status = 206;
-				            response.set_header("Content-Range", "bytes 0-1/2");
-				            response.set_content("ab", "application/octet-stream");
-				            return;
-			            }
-			            response.set_content("ab", "application/octet-stream");
-		            });
-		port = server->bind_to_any_port("127.0.0.1");
-		if (port <= 0) {
-			throw InternalException("Failed to bind test HTTPS server");
-		}
-		server_thread = std::thread([this]() { server->listen_after_bind(); });
-		server->wait_until_ready();
-	}
-
-	~CurlTLSTestServer() {
-		server->stop();
-		if (server_thread.joinable()) {
-			server_thread.join();
-		}
-		TestDeleteFile(ca_path);
-	}
-
-	string URL(const string &host = "localhost") const {
-		return StringUtil::Format("https://%s:%d/object", host, port);
-	}
-
-	const string &CAPath() const {
-		return ca_path;
-	}
-
-private:
-	TestPrivateKey ca_key;
-	TestPrivateKey server_key;
-	TestCertificate ca_certificate;
-	TestCertificate server_certificate;
-	string ca_path;
-	unique_ptr<duckdb_httplib_openssl::SSLServer> server;
-	int port = 0;
-	std::thread server_thread;
-};
-
-static size_t DiscardCurlBody(void *, size_t size, size_t count, void *) {
-	return size * count;
-}
-
-static CURLcode LoadTestCertificateStore(const string &path, X509_STORE *&result) {
-	result = X509_STORE_new();
-	if (!result) {
-		return CURLE_OUT_OF_MEMORY;
-	}
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-	if (X509_STORE_load_file(result, path.c_str())) {
-#else
-	if (X509_STORE_load_locations(result, path.c_str(), nullptr)) {
-#endif
-		return CURLE_OK;
-	}
-	X509_STORE_free(result);
-	result = nullptr;
-	return CURLE_SSL_CACERT_BADFILE;
-}
-
-static void RunCompletedErrorConnectionReuse(const string &client_implementation) {
+static void RunCompletedErrorFollowup(const string &client_implementation) {
 	MockS3ServerConfig config;
 	config.failures.transient_head_failures = 1;
 	config.failures.failure_is_request_timeout = false;
@@ -171,271 +27,319 @@ static void RunCompletedErrorConnectionReuse(const string &client_implementation
 
 	auto observations = server.Observations();
 	INFO(MockS3DescribeObservations(observations));
-	auto error_ports = HTTPTestHelper::RequestPorts(observations, "HEAD", 400);
-	auto success_ports = HTTPTestHelper::RequestPorts(observations, "GET", 206, "bytes=0-1");
-	REQUIRE(error_ports.size() == 1);
-	REQUIRE(success_ports.size() == 1);
-	REQUIRE(error_ports[0] != 0);
-	REQUIRE(error_ports[0] == success_ports[0]);
+	REQUIRE(HTTPTestHelper::CountRequests(observations, "HEAD", 400) == 1);
+	REQUIRE(HTTPTestHelper::CountRequests(observations, "GET", 206, "bytes=0-1") == 1);
 }
 
-static void RunSharedConnectionNotFoundReuse() {
+static void RunCurlRetryClientBypassesSharedCache() {
+	MockS3Server server {MockS3ServerConfig()};
+	HTTPFSCurlUtil http_util;
+	HTTPFSParams params(http_util);
+	params.client_reuse_mode = HTTPClientReuseMode::SHARED;
+	params.httpfs_util = http_util;
+
+	auto first_client = http_util.InitializeClient(params, "http://" + server.Endpoint());
+	HeadRequestInfo first_request(server.HTTPPath(), HTTPHeaders(), params);
+	auto first_response = http_util.Request(first_request, first_client);
+	REQUIRE(first_response);
+	REQUIRE(first_response->Success());
+	http_util.CloseClient(std::move(first_client));
+
+	HTTPClientInitializationOptions options;
+	options.cache_policy = HTTPClientCachePolicy::BYPASS_CACHE;
+	auto retry_client = http_util.InitializeClientExtended(params, "http://" + server.Endpoint(), options);
+	HeadRequestInfo retry_request(server.HTTPPath(), HTTPHeaders(), params);
+	auto retry_response = http_util.Request(retry_request, retry_client);
+	REQUIRE(retry_response);
+	REQUIRE(retry_response->Success());
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	auto ports = HTTPTestHelper::RequestPorts(observations, "HEAD", 200);
+	REQUIRE(ports.size() == 2);
+	REQUIRE(ports[0] != 0);
+	REQUIRE(ports[1] != 0);
+	REQUIRE(ports[0] != ports[1]);
+}
+
+static void RunCurlTerminalTransportErrorIsNotCached() {
 	MockS3ServerConfig config;
+	config.range.behavior = MockS3RangeBehavior::TRUNCATE_TRANSFER;
+	config.range.behavior_requests = 1;
 	config.failures.head_not_found_requests = 2;
 	MockS3Server server(std::move(config));
 
 	DuckDB db(nullptr);
 	Connection con(db);
 	HTTPTestHelper::Configure(db, con, 0, "curl", true);
-
+	HTTPTestHelper::RequireQueryOk(con, "CALL enable_logging('HTTPFSInfo')");
 	HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-	auto &fs = FileSystem::GetFileSystem(*con.context);
-	REQUIRE_FALSE(fs.FileExists(server.HTTPPath()));
-	REQUIRE_FALSE(fs.FileExists(server.HTTPPath()));
+
+	auto &http_util = HTTPUtil::Get(*db.instance);
+	auto params = http_util.InitializeParameters(*con.context, server.HTTPPath());
+	HTTPHeaders headers;
+	headers.Insert("Range", "bytes=0-3");
+	GetRequestInfo failed_request(server.HTTPPath(), headers, *params, nullptr, nullptr);
+	failed_request.try_request = true;
+	auto failed_response = http_util.Request(failed_request);
+	REQUIRE(failed_response);
+	REQUIRE(failed_response->HasRequestError());
+
+	HeadRequestInfo completed_error_request(server.HTTPPath(), HTTPHeaders(), *params);
+	auto completed_error_response = http_util.Request(completed_error_request);
+	REQUIRE(completed_error_response);
+	REQUIRE_FALSE(completed_error_response->HasRequestError());
+	REQUIRE(completed_error_response->status == HTTPStatusCode::NotFound_404);
+
+	auto hits = con.Query("SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%'");
+	REQUIRE(hits);
+	REQUIRE_FALSE(hits->HasError());
+	REQUIRE(hits->GetValue(0, 0).GetValue<idx_t>() == 0);
+
+	HeadRequestInfo reused_error_request(server.HTTPPath(), HTTPHeaders(), *params);
+	auto reused_error_response = http_util.Request(reused_error_request);
+	REQUIRE(reused_error_response);
+	REQUIRE_FALSE(reused_error_response->HasRequestError());
+	REQUIRE(reused_error_response->status == HTTPStatusCode::NotFound_404);
+
+	hits = con.Query("SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%'");
+	REQUIRE(hits);
+	REQUIRE_FALSE(hits->HasError());
+	REQUIRE(hits->GetValue(0, 0).GetValue<idx_t>() == 1);
 	HTTPTestHelper::RequireQueryOk(con, "COMMIT");
+}
+
+static void RunCurlExactEmptyResponseHeaderScenario() {
+	MockS3ServerConfig config;
+	config.metadata.exact_empty_response_headers = true;
+	config.metadata.response_headers.emplace_back("X-Empty", "");
+	MockS3Server server(std::move(config));
+
+	HTTPFSCurlUtil http_util;
+	HTTPFSParams params(http_util);
+	auto client = http_util.InitializeClient(params, "http://" + server.Endpoint());
+	HeadRequestInfo request(server.HTTPPath(), HTTPHeaders(), params);
+	auto response = http_util.Request(request, client);
+	REQUIRE(response);
+	REQUIRE(response->Success());
+	REQUIRE(response->headers.HasHeader("X-Empty"));
+	REQUIRE(response->headers.GetHeaderValue("X-Empty").empty());
+}
+
+static void RunCurlRedirectedResponseHeaderScenario() {
+	MockS3ServerConfig config;
+	config.metadata.redirect_head = true;
+	config.metadata.redirect_response_headers.emplace_back("X-Redirect-Only", "redirect");
+	config.metadata.response_headers.emplace_back("X-Repeated", "first");
+	config.metadata.response_headers.emplace_back("X-Repeated", "second");
+	MockS3Server server(std::move(config));
+
+	HTTPFSCurlUtil http_util;
+	HTTPFSParams params(http_util);
+	params.follow_location = true;
+	auto client = http_util.InitializeClient(params, "http://" + server.Endpoint());
+	HeadRequestInfo request(server.HTTPPath(), HTTPHeaders(), params);
+	auto response = http_util.Request(request, client);
+	REQUIRE(response);
+	REQUIRE(response->Success());
+	REQUIRE(response->headers.GetHeaderValues("X-Repeated") == vector<string> {"first", "second"});
+	REQUIRE_FALSE(response->headers.HasHeader("X-Redirect-Only"));
+}
+
+static void RunCurlRequestHeaderScenario() {
+	MockS3Server server {MockS3ServerConfig()};
+	HTTPFSCurlUtil http_util;
+	HTTPFSParams params(http_util);
+	auto client = http_util.InitializeClient(params, "http://" + server.Endpoint());
+	HTTPHeaders headers;
+	headers["X-Empty"] = "";
+	headers["X-Whitespace"] = " \t ";
+	headers["X-Value"] = "value";
+	HeadRequestInfo request(server.HTTPPath(), headers, params);
+	auto response = http_util.Request(request, client);
+	REQUIRE(response);
+	REQUIRE(response->Success());
 
 	auto observations = server.Observations();
-	INFO(MockS3DescribeObservations(observations));
-	auto not_found_ports = HTTPTestHelper::RequestPorts(observations, "HEAD", 404);
-	REQUIRE(not_found_ports.size() == 2);
-	REQUIRE(not_found_ports[0] != 0);
-	REQUIRE(not_found_ports[0] == not_found_ports[1]);
+	REQUIRE(observations.size() == 1);
+	REQUIRE(MockS3HeaderValues(observations[0], "X-Empty") == vector<string> {""});
+	REQUIRE(MockS3HeaderValues(observations[0], "X-Whitespace") == vector<string> {""});
+	REQUIRE(MockS3HeaderValues(observations[0], "X-Value") == vector<string> {"value"});
+}
+
+static void RunHTTPStateCounterScenario(HTTPFSUtil &http_util) {
+	MockS3ServerConfig config;
+	config.http_response.object_put_body = "put response";
+	config.http_response.object_delete_body = "delete response";
+	config.http_response.options_body = "options response";
+	MockS3Server server(std::move(config));
+	auto state = make_shared_ptr<HTTPState>();
+	HTTPFSParams params(http_util);
+	params.state = state;
+	auto client = http_util.InitializeClient(params, "http://" + server.Endpoint());
+	const string put_body = "put";
+	const string post_body = "post";
+
+	HeadRequestInfo head(server.HTTPPath(), HTTPHeaders(), params);
+	auto head_response = http_util.Request(head, client);
+	REQUIRE(head_response);
+
+	GetRequestInfo get(server.HTTPPath(), HTTPHeaders(), params, nullptr, nullptr);
+	auto get_response = http_util.Request(get, client);
+	REQUIRE(get_response);
+
+	PutRequestInfo put(server.HTTPPath(), HTTPHeaders(), params, const_data_ptr_cast(put_body.data()), put_body.size(),
+	                   "application/octet-stream");
+	auto put_response = http_util.Request(put, client);
+	REQUIRE(put_response);
+
+	PostRequestInfo post(server.HTTPPath() + "?uploads=", HTTPHeaders(), params, const_data_ptr_cast(post_body.data()),
+	                     post_body.size());
+	auto post_response = http_util.Request(post, client);
+	REQUIRE(post_response);
+
+	DeleteRequestInfo delete_request(server.HTTPPath(), HTTPHeaders(), params);
+	auto delete_response = http_util.Request(delete_request, client);
+	REQUIRE(delete_response);
+
+	OptionsRequestInfo options(server.HTTPPath(), HTTPHeaders(), params);
+	auto options_response = http_util.Request(options, client);
+	REQUIRE(options_response);
+
+	auto counters = state->GetCounters();
+	REQUIRE(counters.head_count == 1);
+	REQUIRE(counters.get_count == 1);
+	REQUIRE(counters.put_count == 1);
+	REQUIRE(counters.post_count == 1);
+	REQUIRE(counters.delete_count == 1);
+	REQUIRE(counters.options_count == 1);
+	REQUIRE(counters.total_bytes_sent == put_body.size() + post_body.size());
+	REQUIRE(counters.total_bytes_received == head_response->body.size() + get_response->body.size() +
+	                                             put_response->body.size() + post_response->body.size() +
+	                                             delete_response->body.size() + options_response->body.size());
+	REQUIRE_FALSE(state->IsEmpty());
+	state->Reset();
+	REQUIRE(state->IsEmpty());
+}
+
+static void RunCurlConnectionCachingTransitionScenario() {
+	MockS3Server server {MockS3ServerConfig()};
+	HTTPFSCurlUtil http_util;
+	HTTPFSParams params(http_util);
+
+	auto first_client = http_util.InitializeClient(params, "http://" + server.Endpoint());
+	HeadRequestInfo first_request(server.HTTPPath(), HTTPHeaders(), params);
+	REQUIRE(http_util.Request(first_request, first_client));
+	http_util.CloseClient(std::move(first_client));
+
+	http_util.SetConnectionCachingEnabled(false);
+	REQUIRE(http_util.GetClientReuseMode() == HTTPClientReuseMode::SESSION_LOCAL);
+	http_util.SetConnectionCachingEnabled(true);
+	REQUIRE(http_util.GetClientReuseMode() == HTTPClientReuseMode::SHARED);
+
+	auto second_client = http_util.InitializeClient(params, "http://" + server.Endpoint());
+	HeadRequestInfo second_request(server.HTTPPath(), HTTPHeaders(), params);
+	REQUIRE(http_util.Request(second_request, second_client));
+
+	auto ports = HTTPTestHelper::RequestPorts(server.Observations(), "HEAD", 200);
+	REQUIRE(ports.size() == 2);
+	REQUIRE(ports[0] != ports[1]);
 }
 
 } // namespace
 
-TEST_CASE("Curl certificate stores are shared across concurrent handles", "[httpfs][curl][certificate-store]") {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	CurlCertificateStoreCache::FileIdentity identity;
-	identity.size = 42;
-	std::atomic<idx_t> load_count {0};
-	CurlCertificateStoreCache cache(
-	    [&](const string &, CurlCertificateStoreCache::FileIdentity &result) {
-		    result = identity;
-		    return true;
-	    },
-	    [&](const string &, X509_STORE *&result) {
-		    load_count++;
-		    result = X509_STORE_new();
-		    return result ? CURLE_OK : CURLE_OUT_OF_MEMORY;
-	    },
-	    []() { return 0; });
-
-	static constexpr idx_t THREAD_COUNT = 16;
-	vector<X509_STORE *> stores(THREAD_COUNT, nullptr);
-	vector<CURLcode> results(THREAD_COUNT, CURLE_FAILED_INIT);
-	vector<std::thread> threads;
-	for (idx_t thread_idx = 0; thread_idx < THREAD_COUNT; thread_idx++) {
-		threads.emplace_back([&, thread_idx]() { results[thread_idx] = cache.Acquire("ca.pem", stores[thread_idx]); });
+TEST_CASE("HTTP request sessions allow follow-up requests after completed errors", "[httpfs][request-session]") {
+	SECTION("httplib allows a follow-up request") {
+		RunCompletedErrorFollowup("httplib");
 	}
-	for (auto &thread : threads) {
-		thread.join();
+	SECTION("curl allows a follow-up request") {
+		RunCompletedErrorFollowup("curl");
 	}
-
-	REQUIRE(load_count == 1);
-	for (idx_t thread_idx = 0; thread_idx < THREAD_COUNT; thread_idx++) {
-		REQUIRE(results[thread_idx] == CURLE_OK);
-		REQUIRE(stores[thread_idx] == stores[0]);
-		X509_STORE_free(stores[thread_idx]);
-	}
-#endif
 }
 
-TEST_CASE("Curl certificate stores reload after changes and expiry", "[httpfs][curl][certificate-store]") {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	CurlCertificateStoreCache::FileIdentity identity;
-	identity.size = 42;
-	idx_t now = 0;
-	idx_t load_count = 0;
-	bool fail_load = false;
-	bool metadata_available = true;
-	CurlCertificateStoreCache cache(
-	    [&](const string &, CurlCertificateStoreCache::FileIdentity &result) {
-		    if (!metadata_available) {
-			    return false;
-		    }
-		    result = identity;
-		    return true;
-	    },
-	    [&](const string &, X509_STORE *&result) {
-		    load_count++;
-		    if (fail_load) {
-			    return CURLE_SSL_CACERT_BADFILE;
-		    }
-		    result = X509_STORE_new();
-		    return result ? CURLE_OK : CURLE_OUT_OF_MEMORY;
-	    },
-	    [&]() { return NumericCast<int64_t>(now); }, 10);
-
-	X509_STORE *first = nullptr;
-	REQUIRE(cache.Acquire("ca.pem", first) == CURLE_OK);
-	X509_STORE *cached = nullptr;
-	REQUIRE(cache.Acquire("ca.pem", cached) == CURLE_OK);
-	REQUIRE(first == cached);
-	REQUIRE(load_count == 1);
-
-	identity.size++;
-	X509_STORE *changed = nullptr;
-	REQUIRE(cache.Acquire("ca.pem", changed) == CURLE_OK);
-	REQUIRE(changed != first);
-	REQUIRE(load_count == 2);
-
-	now = 10;
-	fail_load = true;
-	X509_STORE *failed = nullptr;
-	REQUIRE(cache.Acquire("ca.pem", failed) == CURLE_SSL_CACERT_BADFILE);
-	REQUIRE(failed == nullptr);
-	REQUIRE(load_count == 3);
-
-	fail_load = false;
-	X509_STORE *refreshed = nullptr;
-	REQUIRE(cache.Acquire("ca.pem", refreshed) == CURLE_OK);
-	REQUIRE(refreshed != changed);
-	REQUIRE(load_count == 4);
-	metadata_available = false;
-	X509_STORE *missing = nullptr;
-	REQUIRE(cache.Acquire("ca.pem", missing) == CURLE_SSL_CACERT_BADFILE);
-	REQUIRE(missing == nullptr);
-	REQUIRE(load_count == 4);
-	metadata_available = true;
-
-	X509_STORE *other_path = nullptr;
-	REQUIRE(cache.Acquire("other-ca.pem", other_path) == CURLE_OK);
-	REQUIRE(load_count == 5);
-
-	X509_STORE_free(first);
-	X509_STORE_free(cached);
-	X509_STORE_free(changed);
-	X509_STORE_free(refreshed);
-	X509_STORE_free(other_path);
-#endif
+TEST_CASE("Curl retries bypass the shared connection cache", "[httpfs][request-session]") {
+	RunCurlRetryClientBypassesSharedCache();
 }
 
-TEST_CASE("Parallel HTTPS range requests share the Curl certificate store", "[httpfs][curl][certificate-store]") {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	REQUIRE(curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK);
-	if (!CurlCertificateStoreCache::IsSupported()) {
-		SUCCEED("Curl does not use the compatible OpenSSL backend");
-		return;
-	}
-	CurlTLSTestServer server;
-	CurlCertificateStoreCache::FileIdentity identity;
-	identity.size = 42;
-	std::atomic<idx_t> load_count {0};
-	auto cache = make_shared_ptr<CurlCertificateStoreCache>(
-	    [&](const string &, CurlCertificateStoreCache::FileIdentity &result) {
-		    result = identity;
-		    return true;
-	    },
-	    [&](const string &path, X509_STORE *&result) {
-		    load_count++;
-		    return LoadTestCertificateStore(path, result);
-	    },
-	    []() { return 0; });
-
-	static constexpr idx_t THREAD_COUNT = 8;
-	vector<CURLcode> results(THREAD_COUNT, CURLE_FAILED_INIT);
-	vector<std::thread> threads;
-	for (idx_t thread_idx = 0; thread_idx < THREAD_COUNT; thread_idx++) {
-		threads.emplace_back([&, thread_idx]() {
-			CURLHandle handle("", server.CAPath(), cache);
-			handle.SetVerifySSL(true);
-			CURL *curl = handle;
-			auto url = server.URL();
-			CURLRequestHeaders headers;
-			headers.Add("Range: bytes=0-1");
-			curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-			curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers.headers);
-			curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
-			results[thread_idx] = handle.Execute();
-		});
-	}
-	for (auto &thread : threads) {
-		thread.join();
-	}
-	for (auto result : results) {
-		REQUIRE(result == CURLE_OK);
-	}
-	REQUIRE(load_count == 1);
-
-	std::atomic<idx_t> disabled_load_count {0};
-	auto disabled_cache = make_shared_ptr<CurlCertificateStoreCache>(
-	    [&](const string &, CurlCertificateStoreCache::FileIdentity &result) {
-		    result = identity;
-		    return true;
-	    },
-	    [&](const string &path, X509_STORE *&result) {
-		    disabled_load_count++;
-		    return LoadTestCertificateStore(path, result);
-	    },
-	    []() { return 0; });
-	CURLHandle disabled_handle("", server.CAPath(), disabled_cache);
-	disabled_handle.SetVerifySSL(false);
-	CURL *disabled_curl = disabled_handle;
-	auto url = server.URL();
-	curl_easy_setopt(disabled_curl, CURLOPT_URL, url.c_str());
-	curl_easy_setopt(disabled_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
-	REQUIRE(disabled_handle.Execute() == CURLE_OK);
-	REQUIRE(disabled_load_count == 0);
-
-	auto empty_cache = make_shared_ptr<CurlCertificateStoreCache>(
-	    [&](const string &, CurlCertificateStoreCache::FileIdentity &result) {
-		    result = identity;
-		    return true;
-	    },
-	    [&](const string &, X509_STORE *&result) {
-		    result = X509_STORE_new();
-		    return result ? CURLE_OK : CURLE_OUT_OF_MEMORY;
-	    },
-	    []() { return 0; });
-	CURLHandle untrusted_handle("", server.CAPath(), empty_cache);
-	untrusted_handle.SetVerifySSL(true);
-	CURL *untrusted_curl = untrusted_handle;
-	curl_easy_setopt(untrusted_curl, CURLOPT_URL, url.c_str());
-	curl_easy_setopt(untrusted_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
-	REQUIRE(untrusted_handle.Execute() == CURLE_PEER_FAILED_VERIFICATION);
-
-	CURLHandle wrong_host_handle("", server.CAPath(), cache);
-	wrong_host_handle.SetVerifySSL(true);
-	CURL *wrong_host_curl = wrong_host_handle;
-	auto wrong_host_url = server.URL("127.0.0.1");
-	curl_easy_setopt(wrong_host_curl, CURLOPT_URL, wrong_host_url.c_str());
-	curl_easy_setopt(wrong_host_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
-	REQUIRE(wrong_host_handle.Execute() == CURLE_PEER_FAILED_VERIFICATION);
-
-	CURLHandle fallback_handle("", server.CAPath(), nullptr);
-	fallback_handle.SetVerifySSL(true);
-	CURL *fallback_curl = fallback_handle;
-	curl_easy_setopt(fallback_curl, CURLOPT_URL, url.c_str());
-	curl_easy_setopt(fallback_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
-	REQUIRE(fallback_handle.Execute() == CURLE_OK);
-
-	auto failing_cache = make_shared_ptr<CurlCertificateStoreCache>(
-	    [&](const string &, CurlCertificateStoreCache::FileIdentity &result) {
-		    result = identity;
-		    return true;
-	    },
-	    [&](const string &, X509_STORE *&) { return CURLE_SSL_CACERT_BADFILE; }, []() { return 0; });
-	CURLHandle failing_handle("", server.CAPath(), failing_cache);
-	failing_handle.SetVerifySSL(true);
-	CURL *failing_curl = failing_handle;
-	curl_easy_setopt(failing_curl, CURLOPT_URL, url.c_str());
-	curl_easy_setopt(failing_curl, CURLOPT_WRITEFUNCTION, DiscardCurlBody);
-	REQUIRE(failing_handle.Execute() == CURLE_SSL_CACERT_BADFILE);
-#endif
+TEST_CASE("Curl terminal transport errors are not cached", "[httpfs][request-session]") {
+	RunCurlTerminalTransportErrorIsNotCached();
 }
 
-TEST_CASE("HTTP request sessions reuse connections after completed errors", "[httpfs][request-session]") {
-	SECTION("httplib reuses a session-local connection") {
-		RunCompletedErrorConnectionReuse("httplib");
+TEST_CASE("Curl response headers accept exact empty fields", "[httpfs][curl][headers]") {
+	RunCurlExactEmptyResponseHeaderScenario();
+}
+
+TEST_CASE("Curl response headers preserve repeated fields from the final redirect", "[httpfs][curl][headers]") {
+	RunCurlRedirectedResponseHeaderScenario();
+}
+
+TEST_CASE("Curl request headers preserve empty field values", "[httpfs][curl][headers]") {
+	RunCurlRequestHeaderScenario();
+}
+
+TEST_CASE("HTTP PUT respects explicit Content-Type and retains the fallback", "[httpfs][headers][content-type]") {
+	HTTPFSUtil httplib_util;
+	HTTPFSCurlUtil curl_util;
+	for (auto &http_util : {reference<HTTPFSUtil>(httplib_util), reference<HTTPFSUtil>(curl_util)}) {
+		for (bool explicit_header : {false, true}) {
+			DYNAMIC_SECTION(http_util.get().GetName() << " explicit=" << explicit_header) {
+				MockS3Server server {MockS3ServerConfig()};
+				HTTPFSParams params(http_util);
+				auto client = http_util.get().InitializeClient(params, "http://" + server.Endpoint());
+				const string fallback_type = "application/octet-stream";
+				HTTPHeaders headers;
+				if (explicit_header) {
+					headers.Insert("cOnTeNt-TyPe", "application/xml");
+				}
+				const string body = "payload";
+				PutRequestInfo request(server.HTTPPath(), headers, params, const_data_ptr_cast(body.data()),
+				                       body.size(), fallback_type);
+				auto response = http_util.get().Request(request, client);
+				REQUIRE(response);
+				REQUIRE(response->Success());
+				auto observations = server.Observations();
+				REQUIRE(observations.size() == 1);
+				REQUIRE(MockS3HeaderValues(observations[0], "Content-Type") ==
+				        vector<string> {explicit_header ? "application/xml" : fallback_type});
+			}
+		}
 	}
-	SECTION("curl reuses a session-local connection") {
-		RunCompletedErrorConnectionReuse("curl");
+}
+
+TEST_CASE("HTTP clients record request and byte counters", "[httpfs][http-state]") {
+	SECTION("httplib") {
+		HTTPFSUtil http_util;
+		RunHTTPStateCounterScenario(http_util);
 	}
-	SECTION("curl reuses a shared connection across missing-file probes") {
-		RunSharedConnectionNotFoundReuse();
+	SECTION("curl") {
+		HTTPFSCurlUtil http_util;
+		RunHTTPStateCounterScenario(http_util);
 	}
+}
+
+TEST_CASE("Disabling curl connection caching clears pooled clients", "[httpfs][connection-cache]") {
+	RunCurlConnectionCachingTransitionScenario();
+}
+
+TEST_CASE("HTTP metadata cache mode controls query-end clearing", "[httpfs][metadata-cache]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	HTTPMetadataCacheEntry entry;
+	entry.length = 42;
+	entry.last_modified = timestamp_t(0);
+	HTTPMetadataCacheEntry result;
+
+	HTTPMetadataCache global_cache(HTTPMetadataCacheMode::GLOBAL);
+	global_cache.Insert("global", entry);
+	global_cache.QueryEnd(*con.context);
+	REQUIRE(global_cache.Find("global", result));
+	global_cache.Clear();
+	REQUIRE_FALSE(global_cache.Find("global", result));
+
+	HTTPMetadataCache query_cache(HTTPMetadataCacheMode::QUERY_LOCAL);
+	query_cache.Insert("query", entry);
+	query_cache.QueryEnd(*con.context);
+	REQUIRE_FALSE(query_cache.Find("query", result));
 }
 
 } // namespace duckdb

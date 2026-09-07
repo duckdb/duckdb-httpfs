@@ -2,6 +2,7 @@
 
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/optional.hpp"
 #include "http/http_state.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -67,6 +68,10 @@ public:
 	    DUCKDB_EXCLUDES(network_estimator_lock);
 	//! Expose the network estimate to the prefetch cost model
 	bool GetNetworkThroughputEstimate(NetworkThroughputEstimate &result) DUCKDB_EXCLUDES(network_estimator_lock);
+	void ApplyCachePolicy(const HTTPResponse &response, timestamp_t request_time, timestamp_t response_time)
+	    DUCKDB_EXCLUDES(cache_policy_lock);
+	optional<timestamp_t> GetCacheValidUntil() const DUCKDB_EXCLUDES(cache_policy_lock);
+	bool CanReuseCachedData() const DUCKDB_EXCLUDES(cache_policy_lock);
 	void Close() override;
 
 protected:
@@ -76,20 +81,28 @@ protected:
 	void LoadFileInfo();
 	void InitializeLogger(FileOpener &opener);
 
-	virtual void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry);
+	virtual void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) DUCKDB_EXCLUDES(cache_policy_lock);
 	virtual HTTPMetadataCacheEntry GetCacheEntry() const;
 
 private:
 	void FinalizeReadConfig();
 	bool TryLoadFileInfoWithoutRequest();
-	unique_ptr<HTTPResponse> RequestFileInfo(HTTPFileSystem &file_system);
-	unique_ptr<HTTPResponse> RetryFileInfoWithRange(HTTPFileSystem &file_system);
-	void ApplyFileInfo(const HTTPResponse &response);
+	unique_ptr<HTTPResponse> RequestFileInfo(HTTPFileSystem &file_system, timestamp_t &request_time,
+	                                         timestamp_t &response_time);
+	unique_ptr<HTTPResponse> RetryFileInfoWithRange(HTTPFileSystem &file_system, timestamp_t &request_time,
+	                                                timestamp_t &response_time);
+	void ApplyFileInfo(const HTTPResponse &response, timestamp_t request_time, timestamp_t response_time);
 	void InitializeRequestState(optional_ptr<FileOpener> opener);
 	bool TryInitializeRead(HTTPFileSystem &file_system, optional_ptr<HTTPMetadataCache> cache,
 	                       bool &should_write_cache);
 	void InitializeFileInfo(HTTPFileSystem &file_system, optional_ptr<HTTPMetadataCache> cache,
 	                        bool should_write_cache);
+
+	mutable annotated_mutex cache_policy_lock;
+	//! Freshness deadline (inclusive) derived from HTTP caching headers (Cache-Control/Expires).
+	//! Unset means no freshness information; positive/negative infinity mean always valid/invalid.
+	//! Used to bound how long cached file data may be served.
+	optional<timestamp_t> cache_valid_until DUCKDB_GUARDED_BY(cache_policy_lock);
 
 public:
 	shared_ptr<HTTPRequestSession> request_session;
@@ -128,6 +141,11 @@ private:
 class HTTPFileSystem : public FileSystem {
 public:
 	static bool TryParseLastModifiedTime(const string &timestamp, timestamp_t &result);
+	//! Compute the freshness deadline (inclusive) from HTTP caching headers (RFC 9111): Cache-Control max-age,
+	//! falling back to Expires relative to Date (or receipt time when Date is absent), adjusted by the response's age.
+	//! Unset if no freshness lifetime is provided.
+	static optional<timestamp_t> ComputeCacheValidUntil(const HTTPHeaders &headers, timestamp_t request_time,
+	                                                    timestamp_t response_time);
 
 	//! FileSystem overrides.
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
@@ -140,6 +158,8 @@ public:
 	int64_t GetFileSize(FileHandle &handle) override;
 	timestamp_t GetLastModifiedTime(FileHandle &handle) override;
 	string GetVersionTag(FileHandle &handle) override;
+	optional<timestamp_t> GetCacheValidUntil(FileHandle &handle) override;
+	FileMetadata Stats(FileHandle &handle) override;
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener) override;
 	void Seek(FileHandle &handle, idx_t location) override;
 	idx_t SeekPosition(FileHandle &handle) override;
@@ -150,7 +170,6 @@ public:
 	bool IsPipe(const string &filename, optional_ptr<FileOpener> opener) override;
 	string GetName() const override;
 	string PathSeparator(const string &path) override;
-	static void Verify();
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, RequestType request_type,

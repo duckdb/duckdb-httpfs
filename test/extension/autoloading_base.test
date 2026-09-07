@@ -33,12 +33,12 @@ set autoinstall_known_extensions=false
 statement error
 SET s3_region='eu-west-1';
 ----
-<REGEX>:.*Catalog Error.*Setting with name "s3_region" is not in the catalog.*
+<REGEX>:.*Catalog Error.*Setting with name s3_region is not in the catalog.*
 
 statement error
 select * from read_json_auto('data/json/example_n.ndjson');
 ----
-<REGEX>:.*Catalog Error.*Table Function with name "read_json_auto" is not in the catalog.*
+<REGEX>:.*Catalog Error.*Table Function with name read_json_auto is not in the catalog.*
 
 statement error
 select * from thistablefunctionwillnotexistfosho();

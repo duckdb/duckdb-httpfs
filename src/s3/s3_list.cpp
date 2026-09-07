@@ -75,7 +75,7 @@ private:
 	mutable bool finished = false;
 	shared_ptr<HTTPRequestSession> request_session;
 	string shared_path;
-	ParsedS3Url parsed_s3_url;
+	optional<ParsedS3Url> parsed_s3_url;
 	mutable string main_continuation_token;
 	mutable string current_common_prefix;
 	mutable string common_prefix_continuation_token;
@@ -92,17 +92,17 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 	FileOpenerInfo info = {glob_pattern};
 
 	// Trim any query parameters from the string
-	auto s3_auth_params = S3AuthParams::ReadFrom(opener, info);
+	auto s3_auth_params = S3AuthResolver::Resolve(opener, info);
 
 	// In url compatibility mode, we ignore globs allowing users to query files with the glob chars
-	if (s3_auth_params.s3_url_compatibility_mode) {
+	if (s3_auth_params.GetURLParams().compatibility_mode) {
 		expanded_files.emplace_back(glob_pattern);
 		finished = true;
 		return;
 	}
 
-	parsed_s3_url = S3Url::Resolve(glob_pattern, s3_auth_params);
-	auto parsed_glob_url = parsed_s3_url.trimmed_s3_url;
+	parsed_s3_url = S3Url::Parse(glob_pattern, s3_auth_params);
+	auto parsed_glob_url = S3Url::GetDisplayUrl(glob_pattern, s3_auth_params);
 
 	// AWS matches on prefix, not glob pattern, so we take a substring until the first wildcard char for the aws calls
 	auto first_wildcard_pos = parsed_glob_url.find_first_of("*[\\");
@@ -110,6 +110,9 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 		expanded_files.emplace_back(glob_pattern);
 		finished = true;
 		return;
+	}
+	if (!parsed_s3_url->GetVersionId().empty()) {
+		throw NotImplementedException("The s3_version_id parameter cannot be used with glob patterns");
 	}
 
 	shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
@@ -137,10 +140,10 @@ bool S3GlobResult::ExpandNextPath() const {
 }
 
 void S3GlobResult::ScanCurrentCommonPrefix(vector<OpenFileInfo> &s3_keys) const {
-	auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + current_common_prefix;
+	auto prefix_path = parsed_s3_url->GetPrefix() + parsed_s3_url->GetBucket() + '/' + current_common_prefix;
 	current_common_prefix = S3Url::Decode(current_common_prefix);
 	auto key_splits = StringUtil::Split(current_common_prefix, "/");
-	auto pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
+	auto pattern_splits = StringUtil::Split(parsed_s3_url->GetKey(), "/");
 	if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
 	          S3GlobMatchMode::PREFIX)) {
 		prefix_path = S3Url::Decode(prefix_path);
@@ -173,7 +176,7 @@ void S3GlobResult::ScanTopLevel(vector<OpenFileInfo> &s3_keys) const {
 }
 
 bool S3GlobResult::ShouldInvestigateRecursiveGlob() const {
-	if (glob_type != GlobType::UNKNOWN || StringUtil::Contains(parsed_s3_url.key, "**")) {
+	if (glob_type != GlobType::UNKNOWN || StringUtil::Contains(parsed_s3_url->GetKey(), "**")) {
 		return false;
 	}
 	Value value;
@@ -220,20 +223,21 @@ void S3GlobResult::SelectNextCommonPrefix() const {
 }
 
 void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
-	auto pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
+	auto pattern_splits = StringUtil::Split(parsed_s3_url->GetKey(), "/");
 	for (auto &s3_key : s3_keys) {
 		auto key_splits = StringUtil::Split(s3_key.path, "/");
 		if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
 		          S3GlobMatchMode::COMPLETE)) {
-			auto result_full_url = parsed_s3_url.prefix + parsed_s3_url.bucket + "/" + s3_key.path;
-			if (!parsed_s3_url.query_param.empty()) {
-				result_full_url += '?' + parsed_s3_url.query_param;
+			auto result_full_url = parsed_s3_url->GetPrefix() + parsed_s3_url->GetBucket() + "/" + s3_key.path;
+			if (!parsed_s3_url->GetQueryString().empty()) {
+				result_full_url += '?' + parsed_s3_url->GetQueryString();
 			}
 			s3_key.path = std::move(result_full_url);
 			auto captured = request_session->Capture();
 			auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-			if (!snapshot.auth_params.region.empty()) {
-				s3_key.extended_info->options["s3_region"] = snapshot.auth_params.region;
+			if (snapshot.region_redirected) {
+				D_ASSERT(!snapshot.auth_params.GetCredentials().region.empty());
+				s3_key.extended_info->options["s3_region"] = snapshot.auth_params.GetCredentials().region;
 			}
 			expanded_files.push_back(std::move(s3_key));
 		}
@@ -271,21 +275,20 @@ bool S3FileSystem::ListFilesExtended(const string &directory, const std::functio
 }
 
 struct S3ListRequest {
-	static S3ListObjectsV2Result Finish(const S3RequestContext &request_context, unique_ptr<HTTPResponse> response) {
+	static S3ListObjectsV2Result Finish(const S3RequestContext &request_context, unique_ptr<HTTPResponse> response,
+	                                    optional<S3ListObjectsV2Result> result) {
 		if (response->HasRequestError() || response->status != HTTPStatusCode::OK_200) {
 			auto display_url = request_context.display_url;
 			StringUtil::RTrim(display_url, "/");
 			if (response->HasRequestError()) {
 				throw IOException("%s error for HTTP GET to '%s'", response->GetRequestError(), display_url);
 			}
-			throw S3RequestUtil::GetError(request_context.auth_params, *response, request_context.request_type,
-			                              "listing", display_url);
+			throw S3RequestUtil::GetRequestError(request_context, *response);
 		}
-		S3ListObjectsV2Result result;
-		if (!S3XMLResponseParser::TryParseListObjectsV2(response->body, result)) {
+		if (!result) {
 			throw IOException("Malformed S3 list response for \"%s\"", request_context.display_url);
 		}
-		return result;
+		return std::move(*result);
 	}
 
 	static S3RequestQuery BuildQuery(const ParsedS3Url &parsed_url, const string &continuation_token, S3ListMode mode,
@@ -302,7 +305,7 @@ struct S3ListRequest {
 		if (max_keys.IsValid()) {
 			request_params.emplace_back("max-keys", to_string(max_keys.GetIndex()));
 		}
-		request_params.emplace_back("prefix", parsed_url.key);
+		request_params.emplace_back("prefix", parsed_url.GetKey());
 		return S3RequestQuery(std::move(request_params));
 	}
 };
@@ -310,13 +313,14 @@ struct S3ListRequest {
 S3ListObjectsV2Result AWSListObjectV2::Request(EncryptionUtil &encryption_util, HTTPRequestSession &session,
                                                const string &path, const string &continuation_token, S3ListMode mode,
                                                optional_idx max_keys) {
-	S3RequestContext request_context;
-	auto response = S3RequestExecutor::RunSession(
-	    encryption_util, session, path, RequestType::GET_REQUEST, S3RequestTarget::BUCKET,
-	    [&](const ParsedS3Url &parsed_url) {
-		    return S3ListRequest::BuildQuery(parsed_url, continuation_token, mode, max_keys);
-	    },
-	    "", "", "",
+	optional<S3ListObjectsV2Result> parsed_result;
+	auto request_result = S3RequestExecutor::RunSession(
+	    encryption_util, session,
+	    S3RequestSpec {path, S3RequestOperation::LIST_OBJECTS,
+	                   [&](const ParsedS3Url &parsed_url) {
+		                   return S3ListRequest::BuildQuery(parsed_url, continuation_token, mode, max_keys);
+	                   },
+	                   "", "", ""},
 	    [&](S3RequestData &request_data) {
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    GetRequestInfo get_request(request_data.http_url, request_data.headers, params, nullptr, nullptr);
@@ -330,8 +334,19 @@ S3ListObjectsV2Result AWSListObjectV2::Request(EncryptionUtil &encryption_util, 
 		        "Consider setting the S3 region to this explicitly to avoid extra round-trips.",
 		        request_data.display_url, previous_region, correct_region);
 	    },
-	    request_context);
-	return S3ListRequest::Finish(request_context, std::move(response));
+	    [&](const S3RequestData &, const HTTPResponse &response) {
+		    parsed_result.reset();
+		    if (response.HasRequestError() || response.status != HTTPStatusCode::OK_200) {
+			    return S3ReceivedResponseAction::ACCEPT;
+		    }
+		    S3ListObjectsV2Result attempt_result;
+		    if (!S3XMLResponseParser::TryParseListObjectsV2(response.body, attempt_result)) {
+			    return S3ReceivedResponseAction::RETRY_FRESH_CONNECTION;
+		    }
+		    parsed_result = std::move(attempt_result);
+		    return S3ReceivedResponseAction::ACCEPT;
+	    });
+	return S3ListRequest::Finish(request_result.context, std::move(request_result.response), std::move(parsed_result));
 }
 
 void AWSListObjectV2::AppendFileList(const S3ListObjectsV2Result &response, vector<OpenFileInfo> &result) {

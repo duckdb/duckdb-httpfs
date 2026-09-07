@@ -21,7 +21,7 @@ set autoinstall_known_extensions=false
 statement error
 select current_setting('s3_region');
 ----
-<REGEX>:.*Catalog Error.*Setting with name "s3_region" is not in the catalog.*
+<REGEX>:.*Catalog Error.*Setting with name s3_region is not in the catalog.*
 
 ### Autoloading, but but not autoinstall
 statement ok

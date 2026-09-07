@@ -34,15 +34,8 @@ set http_retries=6;
 statement ok
 SET enable_http_metadata_cache=true;
 
-foreach urlstyle path vhost
-
-statement ok
-SET s3_url_style='{urlstyle}'
-
-## For both formats we generate 2000 files which we will glob to test the paging mechanism of aws ListObjectV2 call is handled properly
+# Generate 1001 files per format so ListObjectsV2 must return a second page.
 foreach format parquet csv
-
-foreach i 0 1
 
 foreach j 0 1 2 3 4 5 6 7 8 9
 
@@ -51,7 +44,7 @@ foreach k 0 1 2 3 4 5 6 7 8 9
 foreach l 0 1 2 3 4 5 6 7 8 9
 
 statement ok
-COPY (select ({i}{j}{k}{l})::INT as column0) to 's3://test-bucket/parquet_glob_s3_paging/paging/t{i}{j}{k}{l}-{urlstyle}-urls.{format}';
+COPY (select ({j}{k}{l})::INT as column0) to 's3://test-bucket/parquet_glob_s3_paging/paging/t{j}{k}{l}.{format}';
 
 endloop
 
@@ -59,13 +52,23 @@ endloop
 
 endloop
 
+statement ok
+COPY (select 1000 as column0) to 's3://test-bucket/parquet_glob_s3_paging/paging/t1000.{format}';
+
 endloop
+
+foreach urlstyle path vhost
+
+statement ok
+SET s3_url_style='{urlstyle}'
+
+foreach format parquet csv
 
 # Begin tests
 query I
-select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*-{urlstyle}-urls.{format}'
+select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*.{format}'
 ----
-1999000
+500500
 
 endloop
 
@@ -83,9 +86,9 @@ loop i 0 2
 
 # Begin tests
 query I
-select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*-{urlstyle}-urls.{format}'
+select sum(column0) from 's3://test-bucket/parquet_glob_s3_paging/paging/t*.{format}'
 ----
-1999000
+500500
 
 endloop
 
@@ -109,7 +112,7 @@ SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/some-non-existent-fold
 query I
 SELECT count(*) FROM glob('s3://test-bucket/parquet_glob*/paging/*');
 ----
-8000
+2002
 
 endloop
 
@@ -122,7 +125,7 @@ WHERE request.headers['User-Agent'] IS NULL
 0
 
 # FIXME: SKIP — the per-context HTTP request counts below changed on bump_to_main.
-# The glob results still pass (0 and 8000 above); only the ListObjectsV2 GET counts
+# The glob results still pass (0 and 2002 above); only the ListObjectsV2 GET counts
 # moved: expected 5 rows (3,11,11,11,11), CI now sees 4 rows (3,11,9,9). This is
 # consistent with the glob-result caching on this branch reusing/skipping list calls
 # (see cache_globs work + worker memory on glob cache transaction semantics). Skipping

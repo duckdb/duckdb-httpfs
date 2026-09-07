@@ -101,13 +101,14 @@ SELECT i FROM "http://test-bucket-public.{DUCKDB_S3_ENDPOINT}/root-dir/test_defa
 1
 2
 
-# Incorrect path style throws error
-statement ok
-SET s3_url_style='handwritten';
-
+# Incorrect path style is rejected by the setting
 statement error
-COPY test TO 's3://test-bucket-public/root-dir/test2.parquet';
+SET s3_url_style='handwritten';
 ----
+Invalid Input Error: Invalid S3 URL style 'handwritten': expected 'vhost', 'virtual', 'path', or an empty string
+
+statement ok
+SET s3_url_style='path';
 
 # 404
 statement error
