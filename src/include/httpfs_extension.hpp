@@ -7,8 +7,8 @@ namespace duckdb {
 class HttpfsExtension : public Extension {
 public:
 	void Load(ExtensionLoader &loader) override;
-	std::string Name() override;
-	std::string Version() const override;
+	string Name() override;
+	string Version() const override;
 };
 
 } // namespace duckdb

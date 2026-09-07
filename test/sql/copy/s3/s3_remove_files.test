@@ -21,10 +21,13 @@ require-env DUCKDB_S3_USE_SSL
 # override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
 set ignore_error_messages
 
+statement ok
+CALL enable_logging('HTTP');
+
 foreach url_style path vhost
 
 statement ok
-SET s3_url_style='${url_style}'
+SET s3_url_style='{url_style}'
 
 # Step 1: Clean up any leftover files from previous test runs (OVERWRITE clears the directory)
 # and create initial partitioned file (part_col=1)
@@ -74,3 +77,11 @@ SELECT part_col, value FROM 's3://test-bucket/remove_files_test/**/*.parquet'
 99	new_data
 
 endloop
+
+# every logged request must carry a User-Agent that identifies duckdb
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['User-Agent'] IS NULL
+   OR NOT starts_with(request.headers['User-Agent'], 'duckdb')
+----
+0

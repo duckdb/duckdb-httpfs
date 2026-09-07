@@ -1,0 +1,21 @@
+{
+  "description": "Run HTTPFS tests with statically loaded extensions and the httplib client.",
+  "on_init": "SET httpfs_client_implementation='httplib';",
+  "skip_error_messages": [],
+  "statically_loaded_extensions": [
+    "httpfs",
+    "parquet",
+    "core_functions"
+  ],
+  "skip_tests": [
+    {
+      "reason": "Connection caching is only implemented by the curl client.",
+      "paths": [
+        "test/sql/connection_caching.test",
+        "test/sql/connection_caching_default.test",
+        "test/sql/connection_caching_disable.test",
+        "test/sql/s3/connection_caching_s3.test"
+      ]
+    }
+  ]
+}

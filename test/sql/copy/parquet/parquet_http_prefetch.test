@@ -24,6 +24,9 @@ require-env DUCKDB_S3_USE_SSL
 set ignore_error_messages
 
 statement ok
+CALL enable_logging('HTTP');
+
+statement ok
 CREATE TABLE test_fetch_delay (a INT, b INT);
 
 statement ok
@@ -37,5 +40,13 @@ CREATE TABLE test as SELECT * from 's3://test-bucket/skip_delay.parquet' where a
 
 query I
 SELECT COUNT(*) FROM test;
+----
+0
+
+# every logged request must carry a User-Agent that identifies duckdb
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['User-Agent'] IS NULL
+   OR NOT starts_with(request.headers['User-Agent'], 'duckdb')
 ----
 0

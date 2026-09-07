@@ -23,13 +23,13 @@ require-env DUCKDB_S3_USE_SSL
 foreach part_count 2 2000
 
 statement ok
-CREATE OR REPLACE TABLE vals AS SELECT i part_key, concat('this is a value for part key ', i) v FROM range(${part_count}) t(i);
+CREATE OR REPLACE TABLE vals AS SELECT i part_key, concat('this is a value for part key ', i) v FROM range({part_count}) t(i);
 
 statement ok
 COPY vals to 's3://test-bucket/parquet_glob_s3_many_files' (FORMAT PARQUET, PARTITION_BY (part_key), OVERWRITE 1);
 
 query I
-SELECT case when COUNT(*) = ${part_count} then NULL else {'expected': ${part_count}, 'got': COUNT(*)} end FROM glob('s3://test-bucket/parquet_glob_s3_many_files/**/*.parquet')
+SELECT case when COUNT(*) = {part_count} then NULL else {'expected': {part_count}, 'got': COUNT(*)} end FROM glob('s3://test-bucket/parquet_glob_s3_many_files/**/*.parquet')
 ----
 NULL
 

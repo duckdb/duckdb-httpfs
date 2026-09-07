@@ -5,24 +5,11 @@
 #include "duckdb/common/helper.hpp"
 
 #include <openssl/rand.h>
-#include <stddef.h>
-#include <string>
 
 typedef struct evp_cipher_ctx_st EVP_CIPHER_CTX;
 typedef struct evp_cipher_st EVP_CIPHER;
 
 namespace duckdb {
-
-typedef unsigned char hash_bytes[32];
-typedef unsigned char hash_str[64];
-
-void sha256(const char *in, size_t in_len, hash_bytes &out);
-
-void hmac256(const std::string &message, const char *secret, size_t secret_len, hash_bytes &out);
-
-void hmac256(std::string message, hash_bytes secret, hash_bytes &out);
-
-void hex256(hash_bytes &in, hash_str &out);
 
 class DUCKDB_EXTENSION_API AESStateSSL : public EncryptionState {
 
@@ -55,20 +42,18 @@ extern "C" {
 
 class DUCKDB_EXTENSION_API AESStateSSLFactory : public duckdb::EncryptionUtil {
 public:
-	explicit AESStateSSLFactory() {
-		// Force OpenSSL's DRBG to initialize single-threadedly. In OpenSSL 3.0/3.1,
-		// the first RAND_bytes call lazily initializes internal provider state via ossl_ht.
-		// Concurrent first calls (e.g. parallel ATTACH) race on that hash table.
-		unsigned char dummy;
-		RAND_bytes(&dummy, 1);
-	}
+	explicit AESStateSSLFactory();
+	~AESStateSSLFactory() override;
 
+public:
 	duckdb::shared_ptr<duckdb::EncryptionState>
-	CreateEncryptionState(duckdb::unique_ptr<duckdb::EncryptionStateMetadata> metadata) const override {
-		return duckdb::make_shared_ptr<duckdb::AESStateSSL>(std::move(metadata));
-	}
-
-	~AESStateSSLFactory() override {
-	}
+	CreateEncryptionState(duckdb::unique_ptr<duckdb::EncryptionStateMetadata> metadata) const override;
+	duckdb::unique_ptr<duckdb::CryptoHashState> CreateHashState(duckdb::CryptoHashFunction function) const override;
+	void Hash(duckdb::CryptoHashFunction function, duckdb::const_data_ptr_t input, duckdb::idx_t input_len,
+	          duckdb::data_ptr_t output) const override;
+	void Hmac(duckdb::CryptoHashFunction function, duckdb::const_data_ptr_t key, duckdb::idx_t key_len,
+	          duckdb::const_data_ptr_t input, duckdb::idx_t input_len, duckdb::data_ptr_t output) const override;
+	bool SupportsHash(duckdb::CryptoHashFunction function) const override;
+	bool SupportsHmac(duckdb::CryptoHashFunction function) const override;
 };
 }
