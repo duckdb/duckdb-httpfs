@@ -376,6 +376,34 @@ static void RunTransientDeleteRetryScenario(const string &client_implementation)
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 400) == 2);
 	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 204) == 1);
+	REQUIRE(observations.size() == 3);
+}
+
+static void RunDisconnectedDeleteRetryScenario(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+	config.auth.refresh_target = MockS3RefreshTarget::PUT;
+	config.failures.transient_delete_disconnects = 2;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::ConfigureRefresh(db, con, server, client_implementation, false);
+
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=2");
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=1");
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	fs.RemoveFile(S3TestHelper::S3_PATH);
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(observations.size() == 3);
+	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 200) == 2);
+	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 204) == 1);
 }
 
 // HEAD responses carry no body, so a RequestTimeout 400 cannot be classified as transient:
@@ -841,6 +869,15 @@ TEST_CASE("HTTPFS retries transient S3 RequestTimeout across request types", "[h
 	}
 	SECTION("shared curl retries RequestTimeout on a fresh connection") {
 		RunFreshConnectionRetryScenario("curl", true);
+	}
+}
+
+TEST_CASE("HTTPFS retries disconnected S3 DELETE responses", "[httpfs][s3][delete][retry]") {
+	SECTION("httplib") {
+		RunDisconnectedDeleteRetryScenario("httplib");
+	}
+	SECTION("curl") {
+		RunDisconnectedDeleteRetryScenario("curl");
 	}
 }
 

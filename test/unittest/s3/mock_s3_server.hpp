@@ -105,6 +105,8 @@ struct MockS3FailureConfig {
 	idx_t head_not_found_requests = 0;
 	//! Number of object DELETEs to fail with a 400 before succeeding
 	idx_t transient_delete_failures = 0;
+	//! Number of object DELETE responses to disconnect before succeeding
+	idx_t transient_delete_disconnects = 0;
 	//! Number of multipart-init POSTs (uploads=) to fail before succeeding
 	idx_t transient_post_failures = 0;
 	//! HTTP status used for injected multipart-init failures
@@ -157,6 +159,8 @@ struct MockS3PutResponseConfig {
 struct MockS3HTTPResponseConfig {
 	string object_put_body;
 	string object_delete_body;
+	//! Zero retains the default 204/200 selection based on whether a body is configured
+	int object_delete_status = 0;
 	string options_body;
 };
 

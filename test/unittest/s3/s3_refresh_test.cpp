@@ -242,8 +242,11 @@ static void RunDeleteRefreshScenario(const string &client_implementation, bool c
 		                                       auto &fs = FileSystem::GetFileSystem(*con.context);
 		                                       fs.RemoveFile(S3TestHelper::S3_PATH);
 	                                       });
-	REQUIRE(MockS3HasObservation(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 403));
-	REQUIRE(MockS3HasObservation(observations, "DELETE", S3TestHelper::FRESH_KEY_ID, 204));
+	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 403) == 1);
+	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::FRESH_KEY_ID, 204) == 1);
+	for (const auto &observation : observations) {
+		REQUIRE(observation.method == "DELETE");
+	}
 }
 
 static void RunListGlobRefreshScenario(const string &client_implementation, bool connection_caching) {
