@@ -2,6 +2,8 @@
 # description: Test globbing of a large number of parquet files to test the paging mechanism
 # group: [s3]
 
+mode skip See https://github.com/duckdb/duckdb/pull/24687
+
 require parquet
 
 require httpfs
