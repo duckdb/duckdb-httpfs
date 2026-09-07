@@ -33,7 +33,11 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
                            unique_ptr<HTTPParams> http_params_p, const S3AuthParams &auth_params_p,
                            const S3UploadConfig &upload_config,
                            optional<S3MultipartUploadPolicy> multipart_upload_policy)
-    : HTTPFileHandle(fs, file, flags, std::move(http_params_p)) {
+    : HTTPFileHandle(fs, file, flags, std::move(http_params_p)),
+      requested_version_id(S3Url::Parse(file.path, auth_params_p).GetVersionId()) {
+	if (flags.OpenForWriting() && !requested_version_id.empty()) {
+		throw NotImplementedException("s3_version_id is only supported for reading");
+	}
 	auto captured = request_session->Capture();
 	request_session->TryPublish(captured.snapshot,
 	                            make_shared_ptr<S3RequestSnapshot>(captured.snapshot->Params(), auth_params_p,
@@ -58,6 +62,11 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 
 HTTPReadConfig S3FileHandle::BuildReadConfig() const {
 	auto result = HTTPFileHandle::BuildReadConfig();
+	if (!requested_version_id.empty()) {
+		result.condition.type = HTTPReadConditionType::S3_VERSION_ID;
+		result.condition.value = requested_version_id;
+		return result;
+	}
 	if (!request_session->Capture().snapshot->Params().s3_version_id_pinning) {
 		return result;
 	}

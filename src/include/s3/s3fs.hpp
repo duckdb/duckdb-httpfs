@@ -81,6 +81,10 @@ private:
 	void ReleaseUpload();
 
 private:
+	//! Immutable object selection; response metadata cannot replace an explicit version
+	const string requested_version_id;
+
+	//! Upload lifetime and concurrent callers
 	annotated_mutex upload_lock;
 	std::condition_variable upload_state_changed;
 	unique_ptr<S3UploadSession> upload_session;

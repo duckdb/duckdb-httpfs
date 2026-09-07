@@ -16,6 +16,7 @@ public:
 	const string &GetBucket() const;
 	const string &GetKey() const;
 	const string &GetQueryString() const;
+	const string &GetVersionId() const;
 
 	//! HTTP request target
 	string GetHTTPUrl(const string &http_query_string = "") const;
@@ -33,6 +34,9 @@ private:
 	string bucket;
 	string key;
 	string query_string;
+
+	//! Explicit object version, independent of credentials and endpoint routing
+	string version_id;
 
 	//! HTTP request target
 	string host;

@@ -1,0 +1,120 @@
+# name: test/sql/copy/s3/s3_version_id_param.test
+# description: Test reading a specific S3 object version with the s3_version_id query parameter
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
+set ignore_error_messages
+
+# Different versions must remain separate in both caches.
+statement ok
+SET enable_external_file_cache=true;
+
+statement ok
+SET enable_http_metadata_cache=true;
+
+statement ok
+SET s3_version_id_pinning=false;
+
+# Create two differing tables so we can distinguish them
+statement ok
+CREATE TABLE T1 AS SELECT i FROM range(100) tbl(i);
+
+statement ok
+CREATE TABLE T2 AS SELECT i*i AS i FROM range(200) tbl(i);
+
+statement ok
+CALL enable_logging('HTTP');
+
+# Write T1 to S3 (must have versioning enabled) and capture the version header
+statement ok
+COPY T1 TO 's3://test-bucket/root-dir/version_id_param/test.parquet';
+
+statement ok
+SET VARIABLE v1 = (SELECT response.headers['x-amz-version-id'] FROM duckdb_logs_parsed('HTTP') WHERE request.type='PUT' AND request.url LIKE '%version_id_param%' LIMIT 1);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# Overwrite the file with T2 and hence also the latest version
+statement ok
+COPY T2 TO 's3://test-bucket/root-dir/version_id_param/test.parquet';
+
+statement ok
+SET VARIABLE v2 = (SELECT response.headers['x-amz-version-id'] FROM duckdb_logs_parsed('HTTP') WHERE request.type='PUT' AND request.url LIKE '%version_id_param%' LIMIT 1);
+
+# A plain read returns the latest version
+query I
+SELECT COUNT(*) FROM 's3://test-bucket/root-dir/version_id_param/test.parquet';
+----
+200
+
+# A read with s3_version_id returns the original version, directing the HEAD and the GETs
+query I
+SELECT COUNT(*) FROM read_parquet('s3://test-bucket/root-dir/version_id_param/test.parquet?s3_version_id=' || getvariable('v1'));
+----
+100
+
+query I
+SELECT DISTINCT request.type FROM duckdb_logs_parsed('HTTP') WHERE request.url ILIKE '%versionId=%' ORDER BY 1;
+----
+GET
+HEAD
+
+# Make both explicit versions historical, then alternate cached reads.
+statement ok
+COPY (SELECT 42 AS i) TO 's3://test-bucket/root-dir/version_id_param/test.parquet';
+
+loop pass 0 2
+
+query II
+SELECT COUNT(*), SUM(i) FROM read_parquet('s3://test-bucket/root-dir/version_id_param/test.parquet?s3_version_id=' || getvariable('v2'));
+----
+200	2646700
+
+query II
+SELECT COUNT(*), SUM(i) FROM read_parquet('s3://test-bucket/root-dir/version_id_param/test.parquet?s3_version_id=' || getvariable('v1'));
+----
+100	4950
+
+query II
+SELECT COUNT(*), SUM(i) FROM 's3://test-bucket/root-dir/version_id_param/test.parquet';
+----
+1	42
+
+endloop
+
+statement ok
+SET s3_version_id_pinning=true;
+
+query I
+SELECT COUNT(*) FROM read_parquet('s3://test-bucket/root-dir/version_id_param/test.parquet?s3_version_id=' || getvariable('v1'));
+----
+100
+
+# Writing to a specific version_id is not possible, they are generated on the server
+statement error
+COPY T1 TO 's3://test-bucket/root-dir/version_id_param/test.parquet?s3_version_id=abc';
+----
+<REGEX>:.*s3_version_id is only supported for reading.*
+
+# A version_id disambiguates a single object, so it cannot be used with glob patterns
+statement error
+SELECT * FROM 's3://test-bucket/root-dir/version_id_param/*.parquet?s3_version_id=abc';
+----
+<REGEX>:.*s3_version_id parameter cannot be used with glob patterns.*

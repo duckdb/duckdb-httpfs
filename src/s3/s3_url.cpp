@@ -94,10 +94,12 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthConfig &config)
 	if (config.route.type == S3ProviderType::GCS) {
 		GetQueryParam("gcs_user_project", request_options.user_project, query_params);
 	}
+	// Object selection is parsed by Parse, not stored in authentication parameters.
+	query_params.erase("s3_version_id");
 	if (!query_params.empty()) {
 		auto supported_parameters =
 		    string("'s3_region', 's3_access_key_id', 's3_secret_access_key', 's3_session_token',\n's3_endpoint', "
-		           "'s3_url_style', 's3_use_ssl', 's3_requester_pays'");
+		           "'s3_url_style', 's3_use_ssl', 's3_requester_pays', 's3_version_id'");
 		if (config.route.type == S3ProviderType::GCS) {
 			supported_parameters += ", 'gcs_user_project'";
 		}
@@ -197,6 +199,12 @@ ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 	key = key.substr(1);
 
 	ParsedS3Url result;
+	if (!query_string.empty()) {
+		auto query_params = ParseQueryParameters(query_string);
+		if (GetQueryParam("s3_version_id", result.version_id, query_params) && result.version_id.empty()) {
+			throw InvalidInputException("s3_version_id cannot be empty");
+		}
+	}
 	result.prefix = std::move(prefix);
 	result.bucket = std::move(bucket);
 	result.key = std::move(key);
@@ -222,6 +230,10 @@ const string &ParsedS3Url::GetKey() const {
 
 const string &ParsedS3Url::GetQueryString() const {
 	return query_string;
+}
+
+const string &ParsedS3Url::GetVersionId() const {
+	return version_id;
 }
 
 string ParsedS3Url::GetHTTPUrl(const string &http_query_string) const {

@@ -303,6 +303,9 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 		FileOpenerInfo info = {path};
 		auto auth_params = S3AuthResolver::Resolve(opener, info);
 		auto parsed_url = S3Url::Parse(path, auth_params);
+		if (!parsed_url.GetVersionId().empty()) {
+			throw NotImplementedException("s3_version_id is only supported for reading");
+		}
 
 		S3DeleteBatchUrlInfo url_info = {parsed_url.GetPrefix(), parsed_url.GetBucketHTTPUrl(), auth_params};
 		auto refreshable_http_params = S3RequestExecutor::ReadRefreshableHTTPParams(opener, path);

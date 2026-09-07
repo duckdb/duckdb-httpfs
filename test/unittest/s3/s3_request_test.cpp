@@ -1522,6 +1522,42 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		REQUIRE_THROWS(ResolveTestAuth(TestAuthConfig(), "s3://bucket/key?S3_region=one"));
 	}
 
+	SECTION("s3_version_id is captured for reads") {
+		const string path = "s3://bucket/key?s3_version_id=abc%2F123%2B%3D%26%3F";
+		auto auth_params = ResolveTestAuth(TestAuthConfig(), path);
+		auto parsed_url = S3Url::Parse(path, auth_params);
+		REQUIRE(parsed_url.GetVersionId() == "abc/123+=&?");
+		REQUIRE(parsed_url.GetKey() == "key");
+		REQUIRE(S3Url::GetDisplayUrl(path, auth_params) == "s3://bucket/key");
+		REQUIRE(auth_params == ResolveTestAuth(TestAuthConfig(), "s3://bucket/key"));
+		REQUIRE(S3Url::Parse("s3://bucket/key?s3_version_id=null", auth_params).GetVersionId() == "null");
+	}
+
+	SECTION("empty and duplicate versions are rejected") {
+		auto auth_params = ResolveTestAuth(TestAuthConfig());
+		REQUIRE_THROWS(S3Url::Parse("s3://bucket/key?s3_version_id=", auth_params));
+		REQUIRE_THROWS(S3Url::Parse("s3://bucket/key?s3_version_id=a&s3_version_id=b", auth_params));
+	}
+
+	SECTION("compatibility mode treats the version parameter as key bytes") {
+		auto config = TestAuthConfig();
+		config.compatibility_mode = true;
+		const string path = "s3://bucket/key?s3_version_id=abc";
+		auto auth_params = ResolveTestAuth(std::move(config), path);
+		auto parsed_url = S3Url::Parse(path, auth_params);
+		REQUIRE(parsed_url.GetVersionId().empty());
+		REQUIRE(parsed_url.GetKey() == "key?s3_version_id=abc");
+	}
+
+	SECTION("unknown query parameters report the known set") {
+		try {
+			ResolveTestAuth(TestAuthConfig(), "s3://bucket/key?bla=bla");
+			FAIL("Unknown query parameter should fail");
+		} catch (std::exception &ex) {
+			REQUIRE(string(ex.what()).find("'s3_version_id'") != string::npos);
+		}
+	}
+
 	SECTION("display URLs redact parameters unless compatibility mode treats them as key bytes") {
 		auto auth_params = ResolveTestAuth(TestAuthConfig());
 		REQUIRE(S3Url::GetDisplayUrl("s3://bucket/key?s3_secret_access_key=secret", auth_params) == "s3://bucket/key");

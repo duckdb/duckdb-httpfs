@@ -672,6 +672,41 @@ CREATE SECRET refresh_s3_headers (
 
 } // namespace
 
+TEST_CASE("Explicit S3 versions survive credential refresh", "[httpfs][s3][refresh][s3-version]") {
+	for (const auto &client : {"curl", "httplib"}) {
+		for (auto target : {MockS3RefreshTarget::HEAD, MockS3RefreshTarget::RANGE_GET, MockS3RefreshTarget::FULL_GET}) {
+			DYNAMIC_SECTION(client << " " << MockS3RefreshTargetName(target)) {
+				auto observations =
+				    RunRefreshScenario(target, client, false, [&](Connection &con, const string &object_data) {
+					    const bool full_download = target == MockS3RefreshTarget::FULL_GET;
+					    S3TestHelper::RequireQueryOk(con, "SET s3_version_id_pinning=false");
+					    S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
+					    if (full_download) {
+						    S3TestHelper::RequireQueryOk(con, "SET force_download=true");
+					    }
+					    auto &fs = FileSystem::GetFileSystem(*con.context);
+					    auto handle =
+					        fs.OpenFile(string(S3TestHelper::S3_PATH) + "?s3_version_id=chosen%2Fversion",
+					                    full_download ? FileFlags::FILE_FLAGS_READ
+					                                  : FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+					    string buffer(8, '\0');
+					    handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 0);
+					    REQUIRE(buffer == object_data.substr(0, buffer.size()));
+				    });
+				REQUIRE(observations.size() >= 2);
+				for (const auto &observation : observations) {
+					REQUIRE(observation.version_id == "chosen/version");
+				}
+				const auto method = target == MockS3RefreshTarget::HEAD ? "HEAD" : "GET";
+				const auto range = target == MockS3RefreshTarget::RANGE_GET ? "bytes=0-7" : "";
+				const auto status = target == MockS3RefreshTarget::RANGE_GET ? 206 : 200;
+				REQUIRE(MockS3HasObservation(observations, method, S3TestHelper::STALE_KEY_ID, 403, range));
+				REQUIRE(MockS3HasObservation(observations, method, S3TestHelper::FRESH_KEY_ID, status, range));
+			}
+		}
+	}
+}
+
 TEST_CASE("HTTPFS refreshes S3 credentials across request methods", "[httpfs][s3][refresh]") {
 	SECTION("httplib without connection caching") {
 		RunAllRequestRefreshScenarios("httplib", false);

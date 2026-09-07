@@ -9,6 +9,7 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include <atomic>
@@ -367,6 +368,43 @@ static void RunImmutableS3ReadCondition(const string &client_implementation, boo
 	RequireQueryOk(con, "COMMIT");
 }
 
+static void RunUserSpecifiedVersionRead(const string &client_implementation, bool pinning_enabled, bool full_download) {
+	MockS3ServerConfig config;
+	config.metadata.version_id = "response-version";
+	config.metadata.version_on_get = true;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureS3ReadTest(db, con, server, client_implementation);
+	RequireQueryOk(con, string("SET s3_version_id_pinning=") + (pinning_enabled ? "true" : "false"));
+	RequireQueryOk(con, string("SET force_download=") + (full_download ? "true" : "false"));
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	auto handle = fs.OpenFile(server.S3Path() + "?s3_version_id=user%2Fversion%2B%3D%26%3F",
+	                          full_download ? FileFlags::FILE_FLAGS_READ
+	                                        : FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	auto outcome = TryReadHandle(con, *handle, 0, 5);
+	INFO(outcome.error);
+	REQUIRE_FALSE(outcome.failed);
+	REQUIRE(outcome.data == server.ObjectData().substr(0, 5));
+	auto second = TryReadHandle(con, *handle, 5, 5);
+	INFO(second.error);
+	REQUIRE_FALSE(second.failed);
+	REQUIRE(second.data == server.ObjectData().substr(5, 5));
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(observations.size() == (full_download ? 1 : 3));
+	for (auto &observation : observations) {
+		REQUIRE(observation.version_id == "user/version+=&?");
+		REQUIRE(observation.if_match.empty());
+	}
+	REQUIRE(observations.front().method == (full_download ? "GET" : "HEAD"));
+	RequireQueryOk(con, "COMMIT");
+}
+
 static void RunConditionalFullDownload(const string &client_implementation) {
 	MockS3ServerConfig config;
 	config.range.behavior = MockS3RangeBehavior::IGNORE_RANGE;
@@ -528,6 +566,79 @@ TEST_CASE("S3 GET responses do not change the handle's read condition", "[httpfs
 	RunImmutableS3ReadCondition("httplib", false);
 	RunImmutableS3ReadCondition("curl", true);
 	RunImmutableS3ReadCondition("httplib", true);
+}
+
+TEST_CASE("explicit s3_version_id is carried by every request when reading", "[httpfs][positional-read][s3-version]") {
+	for (const auto &client : {"curl", "httplib"}) {
+		for (bool pinning : {false, true}) {
+			for (bool full_download : {false, true}) {
+				DYNAMIC_SECTION(client << " pinning=" << pinning << " full_download=" << full_download) {
+					RunUserSpecifiedVersionRead(client, pinning, full_download);
+				}
+			}
+		}
+	}
+}
+
+TEST_CASE("explicit S3 versions reject writes deletes and wildcard globs before dispatch", "[httpfs][s3-version]") {
+	MockS3Server server {MockS3ServerConfig()};
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureS3ReadTest(db, con, server, "httplib");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	const auto path = server.S3Path() + "?s3_version_id=user-version";
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+	REQUIRE_THROWS_WITH(fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW),
+	                    Catch::Contains("s3_version_id is only supported for reading"));
+	REQUIRE_THROWS_WITH(fs.RemoveFile(path), Catch::Contains("s3_version_id is only supported for reading"));
+	REQUIRE_THROWS_WITH(fs.RemoveFiles({server.S3Path(), path}),
+	                    Catch::Contains("s3_version_id is only supported for reading"));
+	REQUIRE_THROWS_WITH(
+	    fs.Glob("s3://refresh-bucket/*.bin?s3_version_id=user-version", FileGlobOptions::ALLOW_EMPTY, nullptr),
+	    Catch::Contains("s3_version_id parameter cannot be used with glob patterns"));
+	REQUIRE(server.Observations().empty());
+	auto files = fs.Glob(path, FileGlobOptions::ALLOW_EMPTY, nullptr)->GetAllFiles();
+	REQUIRE(files.size() == 1);
+	REQUIRE(files[0].path == path);
+	REQUIRE(server.Observations().empty());
+	RequireQueryOk(con, "COMMIT");
+}
+
+TEST_CASE("Explicit S3 versions survive region redirects and cached metadata", "[httpfs][s3-version]") {
+	for (const auto &client : {"curl", "httplib"}) {
+		DYNAMIC_SECTION(client) {
+			MockS3ServerConfig config;
+			config.auth.required_region = "eu-west-1";
+			MockS3Server server(std::move(config));
+			DuckDB db(nullptr);
+			Connection con(db);
+			ConfigureS3ReadTest(db, con, server, client);
+			RequireQueryOk(con, "SET enable_http_metadata_cache=true");
+			RequireQueryOk(con, "SET s3_version_id_pinning=false");
+			auto &fs = FileSystem::GetFileSystem(*con.context);
+			for (idx_t i = 0; i < 2; i++) {
+				RequireQueryOk(con, "BEGIN TRANSACTION");
+				auto handle = fs.OpenFile(server.S3Path() + "?s3_version_id=chosen-version",
+				                          FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+				auto outcome = TryReadHandle(con, *handle, 0, 5);
+				INFO(outcome.error);
+				REQUIRE_FALSE(outcome.failed);
+				REQUIRE(outcome.data == server.ObjectData().substr(0, 5));
+				RequireQueryOk(con, "COMMIT");
+			}
+			auto observations = server.Observations();
+			INFO(MockS3DescribeObservations(observations));
+			REQUIRE(observations.size() == 4);
+			REQUIRE(observations[0].status == 301);
+			REQUIRE(observations[1].method == "HEAD");
+			REQUIRE(observations[2].method == "GET");
+			REQUIRE(observations[3].method == "GET");
+			for (idx_t i = 0; i < observations.size(); i++) {
+				REQUIRE(observations[i].version_id == "chosen-version");
+				REQUIRE(observations[i].region == (i == 0 ? "us-east-1" : "eu-west-1"));
+			}
+		}
+	}
 }
 
 TEST_CASE("HTTP full downloads retain their read condition", "[httpfs][positional-read][full-download]") {

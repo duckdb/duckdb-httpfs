@@ -535,6 +535,10 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	auto session_request = snapshot.CreateRequest();
 	result.http_params = std::move(session_request.params);
 	auto parsed_s3_url = S3Url::Parse(spec.url, result.auth_params);
+	if (!parsed_s3_url.GetVersionId().empty() && spec.operation != S3RequestOperation::HEAD_OBJECT &&
+	    spec.operation != S3RequestOperation::GET_OBJECT) {
+		throw NotImplementedException("s3_version_id is only supported for reading");
+	}
 	result.display_url = S3Url::GetDisplayUrl(spec.url, result.auth_params);
 	auto query = spec.create_query ? spec.create_query(parsed_s3_url) : S3RequestQuery();
 	result.http_url = operation_info.target == S3RequestTarget::BUCKET
@@ -948,7 +952,14 @@ S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestO
 unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	return S3RequestExecutor::RunHandle(
-	           GetEncryptionUtil(), s3_handle, S3RequestSpec {s3_url, S3RequestOperation::HEAD_OBJECT, {}, "", "", ""},
+	           GetEncryptionUtil(), s3_handle,
+	           S3RequestSpec {s3_url, S3RequestOperation::HEAD_OBJECT,
+	                          [&](const ParsedS3Url &) {
+		                          return s3_handle.requested_version_id.empty()
+		                                     ? S3RequestQuery()
+		                                     : S3RequestQuery({{"versionId", s3_handle.requested_version_id}});
+	                          },
+	                          "", "", ""},
 	           [&](S3RequestData &request_data) {
 		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		           return RunHeadRequest(request_data.http_url, request_data.headers, params,
