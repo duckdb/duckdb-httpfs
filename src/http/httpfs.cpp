@@ -109,6 +109,9 @@ private:
 		    context->TryGetCurrentUserSetting(EnableExternalFileCacheSetting::SettingIndex, external_cache_enabled) &&
 		    external_cache_enabled.GetValue<bool>()) {
 			result->override_response_cache_policy = true;
+		} else if (context &&
+		    Settings::Get<ValidateExternalFileCacheSetting>(*context) == CacheValidationMode::NO_VALIDATION) {
+			result->override_response_cache_policy = true;
 		}
 
 		// The base set of headers for every request - a matching secret merges over these per key
@@ -250,6 +253,13 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		auto force_full_download_entry = info.find("force_full_download");
 		if (force_full_download_entry != info.end()) {
 			force_full_download = force_full_download_entry->second.GetValue<bool>();
+		}
+		auto validate_cache_entry = info.find("validate_external_file_cache");
+		if (validate_cache_entry != info.end() && !validate_cache_entry->second.GetValue<bool>()) {
+			auto captured = request_session->Capture();
+			auto snapshot_params = captured.snapshot->Params();
+			snapshot_params.override_response_cache_policy = true;
+			request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
 		}
 		if (lm_entry != info.end() && etag_entry != info.end() && fs_entry != info.end()) {
 			// we found all relevant entries (last_modified, etag and file size)

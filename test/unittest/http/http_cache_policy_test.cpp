@@ -34,7 +34,6 @@ TEST_CASE("HTTP metadata cache lifetime is controlled by its setting", "[httpfs]
 	entry.length = 42;
 	entry.cache_valid_until = timestamp_t::ninfinity();
 	for (const auto mode : {HTTPMetadataCacheMode::QUERY_LOCAL, HTTPMetadataCacheMode::GLOBAL}) {
-		INFO(mode == HTTPMetadataCacheMode::GLOBAL);
 		HTTPMetadataCache cache(mode);
 		cache.Insert("expired", entry);
 		HTTPMetadataCacheEntry result;
@@ -66,6 +65,24 @@ TEST_CASE("Explicit cache settings preserve legacy reuse", "[httpfs][cache]") {
 	auto observations = server.Observations();
 	REQUIRE(HTTPTestHelper::CountRequests(observations, "HEAD", 200) == 1);
 	REQUIRE(HTTPTestHelper::CountRangeRequests(observations, 206) == 1);
+}
+
+TEST_CASE("Per-file cache validation option overrides response policy", "[httpfs][cache]") {
+	MockS3ServerConfig config;
+	config.metadata.response_headers = {{"Cache-Control", "no-store, max-age=0"}, {"Vary", "*"}};
+	MockS3Server server(std::move(config));
+	DuckDB db(nullptr);
+	Connection con(db);
+	HTTPTestHelper::Configure(db, con, 0);
+	HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	OpenFileInfo file(server.HTTPPath());
+	file.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+	file.extended_info->options["validate_external_file_cache"] = Value::BOOLEAN(false);
+	auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	REQUIRE(handle->Cast<HTTPFileHandle>().CanReuseCachedData());
+	handle.reset();
+	HTTPTestHelper::RequireQueryOk(con, "ROLLBACK");
 }
 
 } // namespace duckdb
