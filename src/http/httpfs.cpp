@@ -43,25 +43,8 @@ void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> res
 		HTTPUtil::LogRequest(request, response);
 		return;
 	}
-	HTTPHeaders sanitized_headers;
-	for (const auto &header : request.headers) {
-		auto value = StringUtil::CIEquals(header.first, "x-amz-server-side-encryption-customer-key")
-		                 ? string("redacted")
-		                 : header.second;
-		sanitized_headers.Insert(header.first, std::move(value));
-	}
-	auto sanitized_params = request.params.Cast<HTTPFSParams>().Clone();
-	sanitized_params->extra_headers.clear();
-	BaseRequest sanitized_request(request.type, request.url, sanitized_headers, *sanitized_params);
-	sanitized_request.try_request = request.try_request;
-	sanitized_request.have_request_timing = request.have_request_timing;
-	sanitized_request.request_system_start = request.request_system_start;
-	sanitized_request.request_monotonic_start = request.request_monotonic_start;
-	sanitized_request.request_monotonic_end = request.request_monotonic_end;
-	sanitized_request.request_body_length = request.request_body_length;
-	sanitized_request.have_time_to_fst_byte = request.have_time_to_fst_byte;
-	sanitized_request.time_to_fst_byte_sec = request.time_to_fst_byte_sec;
-	sanitized_request.bytes_received = request.bytes_received;
+	auto sanitized_request = request;
+	sanitized_request.headers["x-amz-server-side-encryption-customer-key"] = "redacted";
 	HTTPUtil::LogRequest(sanitized_request, response);
 }
 
