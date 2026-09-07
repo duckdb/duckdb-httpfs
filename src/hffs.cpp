@@ -225,6 +225,8 @@ void HuggingFaceFileSystem::ParseListResult(const string &input, vector<string> 
 // - hf://datasets/lhoestq/demo1/default/train/*.parquet
 // - hf://datasets/lhoestq/demo1/*/train/file_[abc].parquet
 // - hf://datasets/lhoestq/demo1/**/train/*.parquet
+// - hf://buckets/my-user/my-bucket/train-00000-of-00002.parquet
+// - hf://buckets/my-user/my-bucket/train-*.parquet
 vector<OpenFileInfo> HuggingFaceFileSystem::Glob(const string &path, FileOpener *opener) {
 	// Ensure the glob pattern is a valid HF url
 	auto parsed_glob_url = HFUrlParse(path);
@@ -367,10 +369,10 @@ ParsedHFUrl HuggingFaceFileSystem::HFUrlParse(const string &url) {
 		ThrowParseError(url);
 	}
 	result.repo_type = url.substr(last_delim, curr_delim - last_delim);
-	if (result.repo_type != "datasets" && result.repo_type != "spaces") {
+	if (result.repo_type != "datasets" && result.repo_type != "spaces" && !result.IsBucket()) {
 		throw IOException(
-		    "Failed to parse: '%s'. Currently DuckDB only supports querying datasets or spaces, so the url should "
-		    "start with 'hf://datasets' or 'hf://spaces'",
+		    "Failed to parse: '%s'. Currently DuckDB only supports querying datasets, spaces, or buckets, so the "
+		    "url should start with 'hf://datasets', 'hf://spaces', or 'hf://buckets'",
 		    url);
 	}
 
@@ -390,10 +392,16 @@ ParsedHFUrl HuggingFaceFileSystem::HFUrlParse(const string &url) {
 	}
 
 	if (next_at != string::npos && next_at < next_slash) {
+		if (result.IsBucket()) {
+			throw IOException("Hugging Face buckets do not support revisions: '%s'", url);
+		}
 		result.repository = url.substr(last_delim + 1, next_at - last_delim - 1);
 		result.revision = url.substr(next_at + 1, next_slash - next_at - 1);
 	} else {
 		result.repository = url.substr(last_delim + 1, next_slash - last_delim - 1);
+	}
+	if (result.IsBucket()) {
+		result.revision.clear();
 	}
 	last_delim = next_slash;
 
@@ -404,7 +412,7 @@ ParsedHFUrl HuggingFaceFileSystem::HFUrlParse(const string &url) {
 }
 
 string HuggingFaceFileSystem::GetHFUrl(const ParsedHFUrl &url) {
-	if (url.revision == "main") {
+	if (url.IsBucket() || url.revision == "main") {
 		return "hf://" + url.repo_type + "/" + url.repository + url.path;
 	} else {
 		return "hf://" + url.repo_type + "/" + url.repository + "@" + url.revision + url.path;
@@ -414,28 +422,37 @@ string HuggingFaceFileSystem::GetHFUrl(const ParsedHFUrl &url) {
 string HuggingFaceFileSystem::GetTreeUrl(const ParsedHFUrl &url, idx_t limit) {
 	//! Url format {endpoint}/api/{repo_type}/{repository}/tree/{revision}{encoded_path_in_repo}
 	string http_url = url.endpoint;
-
 	http_url = JoinHFPath(http_url, "api");
 	http_url = JoinHFPath(http_url, url.repo_type);
 	http_url = JoinHFPath(http_url, url.repository);
 	http_url = JoinHFPath(http_url, "tree");
-	http_url = JoinHFPath(http_url, url.revision);
+	if (!url.IsBucket()) {
+		http_url = JoinHFPath(http_url, url.revision);
+	}
 	http_url += url.path;
 
+	if (url.IsBucket()) {
+		// Bucket /tree defaults to recursive listings; force directory listings for glob traversal.
+		http_url += "?recursive=false";
+	}
+
 	if (limit > 0) {
-		http_url += "?limit=" + to_string(limit);
+		http_url += url.IsBucket() ? "&limit=" : "?limit=";
+		http_url += to_string(limit);
 	}
 
 	return http_url;
 }
 
 string HuggingFaceFileSystem::GetFileUrl(const ParsedHFUrl &url) {
-	//! Url format {endpoint}/{repo_type}[/{repository}/{revision}{encoded_path_in_repo}
+	//! Url format {endpoint}/{repo_type}/{repository}/resolve/{revision}{encoded_path_in_repo}
 	string http_url = url.endpoint;
 	http_url = JoinHFPath(http_url, url.repo_type);
 	http_url = JoinHFPath(http_url, url.repository);
 	http_url = JoinHFPath(http_url, "resolve");
-	http_url = JoinHFPath(http_url, url.revision);
+	if (!url.IsBucket()) {
+		http_url = JoinHFPath(http_url, url.revision);
+	}
 	http_url += url.path;
 
 	return http_url;

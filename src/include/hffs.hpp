@@ -13,6 +13,11 @@ struct ParsedHFUrl {
 	//! Request routing
 	string endpoint = "https://huggingface.co";
 	string path;
+
+public:
+	bool IsBucket() const {
+		return repo_type == "buckets";
+	}
 };
 
 class HuggingFaceFileSystem : public HTTPFileSystem {
