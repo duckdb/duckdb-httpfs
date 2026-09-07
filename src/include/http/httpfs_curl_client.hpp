@@ -64,12 +64,11 @@ private:
 private:
 	//! Curl transport and the immutable CA bundle selection.
 	CURL *curl = nullptr;
-	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 	string cert_path;
 
-	//! Verification is performed by the callback only on the cached path.
-	bool uses_certificate_store_cache = false;
-	bool verify_ssl = true;
+	//! A non-null cache selects callback-based verification; otherwise curl handles it.
+	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
+	bool verify_server_certificate = true;
 };
 
 class CURLRequestHeaders {

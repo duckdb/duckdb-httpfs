@@ -100,22 +100,22 @@ CURLHandle::CURLHandle(const string &token, const string &cert_path_p, bool use_
                        shared_ptr<CurlCertificateStoreCache> certificate_store_cache_p)
     : CURLHandle() {
 	cert_path = cert_path_p;
-	certificate_store_cache = std::move(certificate_store_cache_p);
+	if (!cert_path.empty() && certificate_store_cache_p && CurlCertificateStoreCache::IsSupported(curl)) {
+		certificate_store_cache = std::move(certificate_store_cache_p);
+	}
 	if (!token.empty()) {
 		SetOption(CURLOPT_XOAUTH2_BEARER, token.c_str());
 		SetOption(CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
 	}
-	uses_certificate_store_cache =
-	    !cert_path.empty() && certificate_store_cache && CurlCertificateStoreCache::IsSupported(curl);
 	if (!cert_path.empty()) {
 		SetOption(CURLOPT_CAINFO, cert_path.c_str());
-		if (uses_certificate_store_cache) {
+		if (certificate_store_cache) {
 			SetOption(CURLOPT_SSL_CTX_FUNCTION, ConfigureSSLContext);
 			SetOption(CURLOPT_SSL_CTX_DATA, this);
 		}
 	}
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
-	if (use_native_ca && !uses_certificate_store_cache) {
+	if (use_native_ca && !certificate_store_cache) {
 		ssl_options |= CURLSSLOPT_NATIVE_CA;
 	}
 	SetOption(CURLOPT_SSL_OPTIONS, ssl_options);
@@ -127,16 +127,16 @@ CURLHandle::~CURLHandle() {
 }
 
 void CURLHandle::SetVerifySSL(bool verify_ssl_p) {
-	verify_ssl = verify_ssl_p;
+	verify_server_certificate = verify_ssl_p;
 	// The cached path verifies the chain in OpenSSL to avoid curl loading a second store before our callback.
-	const bool curl_verifies_peer = verify_ssl && !uses_certificate_store_cache;
+	const bool curl_verifies_peer = verify_server_certificate && !certificate_store_cache;
 	SetOption(CURLOPT_SSL_VERIFYPEER, curl_verifies_peer ? 1L : 0L);
-	SetOption(CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
+	SetOption(CURLOPT_SSL_VERIFYHOST, verify_server_certificate ? 2L : 0L);
 }
 
 CURLcode CURLHandle::ConfigureSSLContext(CURL *, void *ssl_context, void *user_data) {
 	auto &handle = *static_cast<CURLHandle *>(user_data);
-	if (!handle.verify_ssl) {
+	if (!handle.verify_server_certificate) {
 		return CURLE_OK;
 	}
 	try {
@@ -200,6 +200,12 @@ static CURLGlobalState &GetCURLGlobalState() {
 
 class HTTPFSCurlClient : public HTTPClient {
 private:
+	struct HandleConfig {
+		string bearer_token;
+		string ca_cert_file;
+		bool proxy_configured = false;
+	};
+
 	struct ClientConfigurator {
 		static void Configure(HTTPFSCurlClient &client, HTTPFSParams &params) {
 			client.state = params.state;
@@ -227,21 +233,24 @@ private:
 		}
 
 		static void InitializeHandle(HTTPFSCurlClient &client, const HTTPFSParams &params) {
-			auto cert_file_path = params.ca_cert_file;
 			const bool has_proxy = HasProxyConfiguration(params);
-			if (client.curl && client.stored_bearer_token == params.bearer_token &&
-			    client.stored_cert_file_path == cert_file_path && client.stored_has_proxy == has_proxy) {
+			if (client.curl && client.handle_config.bearer_token == params.bearer_token &&
+			    client.handle_config.ca_cert_file == params.ca_cert_file &&
+			    client.handle_config.proxy_configured == has_proxy) {
 				return;
 			}
+			HandleConfig config;
+			config.bearer_token = params.bearer_token;
+			config.ca_cert_file = params.ca_cert_file;
+			config.proxy_configured = has_proxy;
 			HTTPFSCurlClient::InitCurlGlobal();
-			client.stored_cert_file_path = cert_file_path;
+			auto cert_file_path = config.ca_cert_file;
 			if (cert_file_path.empty()) {
 				cert_file_path = SelectCURLCertPath();
 			}
 			client.curl = make_uniq<CURLHandle>(params.bearer_token, cert_file_path, params.ca_cert_file.empty(),
 			                                    has_proxy ? nullptr : client.certificate_store_cache);
-			client.stored_bearer_token = params.bearer_token;
-			client.stored_has_proxy = has_proxy;
+			client.handle_config = std::move(config);
 		}
 
 		static void ConfigureConnection(HTTPFSCurlClient &client, const HTTPFSParams &params) {
@@ -443,8 +452,6 @@ public:
 		if (result != CURLUE_OK) {
 			throw IOException("Failed to initialize curl URL: %s", curl_url_strerror(result));
 		}
-		stored_bearer_token = "";
-		stored_cert_file_path = "";
 		Initialize(http_params);
 	}
 	~HTTPFSCurlClient() override {
@@ -777,13 +784,16 @@ private:
 	}
 
 private:
+	//! Transport and the settings that require reconstructing its handle.
 	unique_ptr<CURLHandle> curl;
+	CURLURLHandle curl_base_url;
+	HandleConfig handle_config;
+
+	//! Per-request state and callbacks.
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
-	CURLURLHandle curl_base_url;
-	string stored_bearer_token;
-	string stored_cert_file_path;
-	bool stored_has_proxy = false;
+
+	//! Shared cache retained across handle reconstruction.
 	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 };
 
