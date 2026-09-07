@@ -30,19 +30,22 @@ TEST_CASE("HTTP cache policy preserves repeated response headers", "[httpfs][cac
 }
 
 TEST_CASE("HTTP metadata cache lifetime is controlled by its setting", "[httpfs][cache]") {
-	HTTPMetadataCache cache(HTTPMetadataCacheMode::GLOBAL);
 	HTTPMetadataCacheEntry entry;
 	entry.length = 42;
 	entry.cache_valid_until = timestamp_t::ninfinity();
-	cache.Insert("expired", entry);
-	HTTPMetadataCacheEntry result;
-	const auto &lookup = cache;
-	REQUIRE(lookup.Find("expired", result));
-	REQUIRE(result.length == 42);
-	entry.cache_valid_until = timestamp_t::infinity();
-	cache.Insert("fresh", entry);
-	REQUIRE(lookup.Find("fresh", result));
-	REQUIRE(result.length == 42);
+	for (const auto mode : {HTTPMetadataCacheMode::QUERY_LOCAL, HTTPMetadataCacheMode::GLOBAL}) {
+		INFO(mode == HTTPMetadataCacheMode::GLOBAL);
+		HTTPMetadataCache cache(mode);
+		cache.Insert("expired", entry);
+		HTTPMetadataCacheEntry result;
+		const auto &lookup = cache;
+		REQUIRE(lookup.Find("expired", result) == (mode == HTTPMetadataCacheMode::GLOBAL));
+		entry.cache_valid_until = timestamp_t::infinity();
+		cache.Insert("fresh", entry);
+		REQUIRE(lookup.Find("fresh", result));
+		REQUIRE(result.length == 42);
+		entry.cache_valid_until = timestamp_t::ninfinity();
+	}
 }
 
 TEST_CASE("Explicit cache settings preserve legacy reuse", "[httpfs][cache]") {

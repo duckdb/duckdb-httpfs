@@ -55,6 +55,11 @@ public:
 		if (lookup == map.end()) {
 			return false;
 		}
+		if (!OverridesResponseCachePolicy() && lookup->second.cache_valid_until &&
+		    Timestamp::GetCurrentTimestamp() > *lookup->second.cache_valid_until) {
+			map.erase(lookup);
+			return false;
+		}
 		ret_val = lookup->second;
 		return true;
 	}
@@ -77,7 +82,7 @@ private:
 
 	//! Cached metadata
 	mutable annotated_mutex lock;
-	unordered_map<string, HTTPMetadataCacheEntry> map DUCKDB_GUARDED_BY(lock);
+	mutable unordered_map<string, HTTPMetadataCacheEntry> map DUCKDB_GUARDED_BY(lock);
 };
 
 } // namespace duckdb
