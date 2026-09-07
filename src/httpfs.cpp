@@ -248,7 +248,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRequest(HTTPFileHandle &hfh, stri
 	    url, header_map, http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
-			    throw get_error(response);
+			    return true;
 		    }
 		    if (http_params.s3_version_id_pinning && response.HasHeader("x-amz-version-id")) {
 			    lock_guard<mutex> lck(hfh.mu);
@@ -279,7 +279,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRequest(HTTPFileHandle &hfh, stri
 		    return true;
 	    });
 
-	return send_request(get_request);
+	auto response = send_request(get_request);
+	if (response && !response->HasRequestError() && static_cast<int>(response->status) >= 400) {
+		throw get_error(*response);
+	}
+	return response;
 }
 
 unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh, string url, HTTPHeaders header_map,
@@ -297,7 +301,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
 	    url, header_map, http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
-			    throw get_error(response);
+			    return true;
 		    }
 		    if (static_cast<int>(response.status) < 300) { // done redirecting
 			    out_offset = 0;
@@ -358,6 +362,9 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
 
 	get_request.try_request = auto_fallback_to_full_file_download;
 	auto response = send_request(get_request);
+	if (response && !response->HasRequestError() && static_cast<int>(response->status) >= 400) {
+		throw get_error(*response);
+	}
 	if (response && !response->HasRequestError() && response->Success() && buffer_out != nullptr &&
 	    out_offset != buffer_out_len) {
 		throw IOException("Short read for HTTP GET to '%s': requested range %s (%llu bytes), but received %llu bytes",

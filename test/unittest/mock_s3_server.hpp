@@ -7,6 +7,7 @@ namespace duckdb {
 
 enum class MockS3RefreshTarget : uint8_t {
 	HEAD,
+	HEAD_AND_RANGE_GET,
 	FULL_GET,
 	RANGE_GET,
 	PUT,
@@ -17,6 +18,8 @@ enum class MockS3RefreshTarget : uint8_t {
 	LIST_OBJECTS_GET
 };
 
+enum class MockS3AuthFailure : uint8_t { ACCESS_DENIED_403, EXPIRED_TOKEN_400 };
+
 enum class MockS3RangeBehavior : uint8_t { NORMAL, IGNORE_RANGE, TRUNCATE_TRANSFER, SHORT_SUCCESS };
 
 struct MockS3ServerConfig {
@@ -24,8 +27,11 @@ struct MockS3ServerConfig {
 	string object_key = "object.bin";
 	string object_data = "abcdefghijklmnopqrstuvwxyz0123456789";
 	string stale_key_id = "STALE_KEY";
+	string fresh_key_id = "FRESH_KEY";
+	bool reject_fresh_credentials = false;
 	string etag = "\"httpfs-refresh-test-etag\"";
 	MockS3RefreshTarget refresh_target = MockS3RefreshTarget::HEAD;
+	MockS3AuthFailure auth_failure = MockS3AuthFailure::ACCESS_DENIED_403;
 	//! Answer this many leading ListObjectsV2 requests with HTTP 503 SlowDown
 	idx_t transient_503_lists = 0;
 	//! Answer this many leading ListObjectsV2 requests with HTTP 400
@@ -57,6 +63,10 @@ struct MockS3ServerConfig {
 	bool failure_is_request_timeout = true;
 	//! Whether injected 400 bodies are truncated mid-XML (an open <Code> with no closing tag)
 	bool truncated_failure_body = false;
+	//! Whether injected 400s carry no response body
+	bool bodyless_failure = false;
+	//! Hold stale auth failures until this many matching requests are concurrently waiting
+	idx_t auth_failure_barrier_count = 0;
 };
 
 struct MockS3RequestObservation {

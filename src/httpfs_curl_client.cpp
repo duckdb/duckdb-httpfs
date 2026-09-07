@@ -276,19 +276,17 @@ public:
 			state->total_bytes_received += bytes_received;
 		}
 
-		if (info.response_handler) {
-			auto response = TransformResponseCurl(res);
-			if (!info.response_handler(*response)) {
-				return response;
-			}
+		auto response = TransformResponseCurl(res);
+		if (info.response_handler && !info.response_handler(*response)) {
+			return response;
 		}
 
 		const char *data = request_info->body.c_str();
-		if (info.content_handler && res == CURLcode::CURLE_OK) {
+		if (info.content_handler && res == CURLcode::CURLE_OK && static_cast<int>(response->status) < 400) {
 			info.content_handler(const_data_ptr_cast(data), bytes_received);
 		}
 
-		return TransformResponseCurl(res);
+		return response;
 	}
 
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {

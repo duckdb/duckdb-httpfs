@@ -149,17 +149,35 @@ static bool IsGCSRequest(const string &url) {
 	return StringUtil::StartsWith(url, "gcs://") || StringUtil::StartsWith(url, "gs://");
 }
 
-static bool IsAuthRefreshStatus(const ErrorData &error) {
+static bool IsAuthRefreshFailure(const ErrorData &error) {
 	auto &extra_info = error.ExtraInfo();
 	auto entry = extra_info.find("status_code");
 	if (entry == extra_info.end()) {
 		return false;
 	}
-	return entry->second == "401" || entry->second == "403";
+	if (entry->second == "401" || entry->second == "403") {
+		return true;
+	}
+	if (entry->second != "400") {
+		return false;
+	}
+	auto body_entry = extra_info.find("response_body");
+	if (body_entry == extra_info.end()) {
+		return false;
+	}
+	string code;
+	return S3FileSystem::TryGetS3ErrorCode(body_entry->second, code) && code == "ExpiredToken";
 }
 
-static bool IsAuthRefreshStatus(const HTTPResponse &response) {
-	return response.status == HTTPStatusCode::Unauthorized_401 || response.status == HTTPStatusCode::Forbidden_403;
+static bool IsAuthRefreshFailure(const HTTPResponse &response) {
+	if (response.status == HTTPStatusCode::Unauthorized_401 || response.status == HTTPStatusCode::Forbidden_403) {
+		return true;
+	}
+	if (response.status != HTTPStatusCode::BadRequest_400) {
+		return false;
+	}
+	string code;
+	return S3FileSystem::TryGetS3ErrorCode(response.body, code) && code == "ExpiredToken";
 }
 
 static bool S3AuthParamsMatch(const S3AuthParams &left, const S3AuthParams &right) {
@@ -416,7 +434,7 @@ bool IsS3RequestTimeout(const HTTPResponse &response) {
 		return false;
 	}
 	string code;
-	return TryFindTagContents(response.body, "Code", 0, code).IsValid() && code == "RequestTimeout";
+	return S3FileSystem::TryGetS3ErrorCode(response.body, code) && code == "RequestTimeout";
 }
 
 void S3FileSystem::SleepForS3RequestTimeoutRetry(const HTTPFSParams &http_params, idx_t transient_retries,
@@ -442,7 +460,7 @@ static unique_ptr<HTTPResponse> RunS3RequestWithAuthRefreshInternal(const string
 		auto request_data = create_data();
 		try {
 			auto result = request(request_data);
-			if (result && !retried_auth_refresh && IsAuthRefreshStatus(*result) &&
+			if (result && !retried_auth_refresh && IsAuthRefreshFailure(*result) &&
 			    refresh_auth_params(request_data.auth_params, request_data.refreshable_http_params)) {
 				retried_auth_refresh = true;
 				continue;
@@ -457,7 +475,7 @@ static unique_ptr<HTTPResponse> RunS3RequestWithAuthRefreshInternal(const string
 			return result;
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
-			if (!retried_auth_refresh && IsAuthRefreshStatus(error) &&
+			if (!retried_auth_refresh && IsAuthRefreshFailure(error) &&
 			    refresh_auth_params(request_data.auth_params, request_data.refreshable_http_params)) {
 				retried_auth_refresh = true;
 				continue;
@@ -969,8 +987,13 @@ unique_ptr<HTTPResponse> S3FileSystem::PostRequest(HTTPInput &input, string url,
 	    s3_input, url, "POST", http_params, payload_hash, content_type, [&](S3RequestData &request_data) {
 		    result.clear();
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		    return RunPostRequest(request_data.http_url, request_data.headers, params, result, buffer_in, buffer_in_len,
-		                          [&](BaseRequest &request) { return params.http_util.Request(request); });
+		    auto response =
+		        RunPostRequest(request_data.http_url, request_data.headers, params, result, buffer_in, buffer_in_len,
+		                       [&](BaseRequest &request) { return params.http_util.Request(request); });
+		    if (response) {
+			    response->body = result;
+		    }
+		    return response;
 	    });
 }
 
@@ -1089,40 +1112,32 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		HTTPFileHandle::Initialize(opener);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
-		bool refreshed_secret = false;
-		if (error.Type() == ExceptionType::IO || error.Type() == ExceptionType::HTTP) {
-			refreshed_secret = TryRefreshAuthParams(auth_params, SnapshotRefreshableHTTPParams(http_params));
-		}
 		string correct_region;
-		if (!refreshed_secret) {
-			auto &extra_info = error.ExtraInfo();
-			auto entry = extra_info.find("status_code");
-			if (entry != extra_info.end()) {
-				if (entry->second == "301" || entry->second == "400") {
-					auto new_region = extra_info.find("header_x-amz-bucket-region");
-					if (new_region != extra_info.end()) {
-						correct_region = new_region->second;
-					}
-				}
-				if (entry->second == "403") {
-					// 403: FORBIDDEN
-					string extra_text;
-					if (IsGCSRequest(path)) {
-						extra_text = S3FileSystem::GetGCSAuthError(auth_params);
-					} else {
-						extra_text = S3FileSystem::GetS3AuthError(auth_params);
-					}
-					throw Exception(extra_info, error.Type(), error.RawMessage() + extra_text);
+		auto &extra_info = error.ExtraInfo();
+		auto entry = extra_info.find("status_code");
+		if (entry != extra_info.end()) {
+			if (entry->second == "301" || entry->second == "400") {
+				auto new_region = extra_info.find("header_x-amz-bucket-region");
+				if (new_region != extra_info.end()) {
+					correct_region = new_region->second;
 				}
 			}
-			if (correct_region.empty()) {
-				throw;
+			if (entry->second == "403") {
+				// 403: FORBIDDEN
+				string extra_text;
+				if (IsGCSRequest(path)) {
+					extra_text = S3FileSystem::GetGCSAuthError(auth_params);
+				} else {
+					extra_text = S3FileSystem::GetS3AuthError(auth_params);
+				}
+				throw Exception(extra_info, error.Type(), error.RawMessage() + extra_text);
 			}
 		}
-		if (!refreshed_secret) {
-			FileOpenerInfo info = {path};
-			auth_params = S3AuthParams::ReadFrom(opener, info);
+		if (correct_region.empty()) {
+			throw;
 		}
+		FileOpenerInfo info = {path};
+		auth_params = S3AuthParams::ReadFrom(opener, info);
 		if (!correct_region.empty()) {
 			DUCKDB_LOG_WARNING(
 			    logger,
@@ -1419,7 +1434,10 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 				result.clear();
 				res = HTTPFileSystem::PostRequest(http_input, http_url, headers, result,
 				                                  const_cast<char *>(body.data()), body.length());
-				if (!retried_auth_refresh && res && IsAuthRefreshStatus(*res) &&
+				if (res) {
+					res->body = result;
+				}
+				if (!retried_auth_refresh && res && IsAuthRefreshFailure(*res) &&
 				    TryRefreshS3AuthParams(opener, secret_lookup_url, http_input.http_params, url_info.auth_params,
 				                           request_auth_params, request_http_params)) {
 					retried_auth_refresh = true;
@@ -1841,7 +1859,11 @@ bool S3FileSystem::TryGetS3ErrorCode(const string &body, string &code) {
 	if (body.empty()) {
 		return false;
 	}
-	return TryFindTagContents(body, "Code", 0, code).IsValid();
+	string error_xml;
+	if (!TryFindTagContents(body, "Error", 0, error_xml).IsValid()) {
+		return false;
+	}
+	return TryFindTagContents(error_xml, "Code", 0, code).IsValid();
 }
 
 string S3FileSystem::ParseS3Error(const string &error) {
@@ -1979,6 +2001,12 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 		if (result->HasRequestError()) {
 			throw IOException("%s error for HTTP GET to '%s'", result->GetRequestError(), listobjectv2_url);
 		}
+		if (!retried_auth_refresh && IsAuthRefreshFailure(*result) &&
+		    TryRefreshS3AuthParams(opener, path, http_params, s3_auth_params, request_auth_params, request_http_params,
+		                           retried_region)) {
+			retried_auth_refresh = true;
+			continue;
+		}
 		ErrorData error;
 		if (static_cast<int>(result->status) >= 400) {
 			string trimmed_path = path;
@@ -2005,12 +2033,6 @@ string AWSListObjectV2::Request(const string &path, HTTPParams &http_params, S3A
 			}
 		}
 		if (error.HasError()) {
-			if (!retried_auth_refresh && IsAuthRefreshStatus(error) &&
-			    TryRefreshS3AuthParams(opener, path, http_params, s3_auth_params, request_auth_params,
-			                           request_http_params, retried_region)) {
-				retried_auth_refresh = true;
-				continue;
-			}
 			if (!retried_region && result->HasHeader("x-amz-bucket-region")) {
 				auto response_region = result->GetHeaderValue("x-amz-bucket-region");
 				if (response_region != s3_auth_params.region) {
