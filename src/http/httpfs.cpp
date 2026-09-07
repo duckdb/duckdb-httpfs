@@ -110,7 +110,7 @@ private:
 		    external_cache_enabled.GetValue<bool>()) {
 			result->override_response_cache_policy = true;
 		} else if (context &&
-		    Settings::Get<ValidateExternalFileCacheSetting>(*context) == CacheValidationMode::NO_VALIDATION) {
+		           Settings::Get<ValidateExternalFileCacheSetting>(*context) == CacheValidationMode::NO_VALIDATION) {
 			result->override_response_cache_policy = true;
 		}
 
