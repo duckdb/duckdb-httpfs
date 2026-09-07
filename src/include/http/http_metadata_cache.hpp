@@ -35,6 +35,10 @@ public:
 	}
 
 public:
+	bool OverridesResponseCachePolicy() const {
+		return mode == HTTPMetadataCacheMode::GLOBAL;
+	}
+
 	void Insert(const string &path, HTTPMetadataCacheEntry val) DUCKDB_EXCLUDES(lock) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		map[path] = std::move(val);

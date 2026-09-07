@@ -1127,8 +1127,7 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 		if (should_full_download) {
 			length = hfs.FullDownload(*this, GetReadConfig(), should_write_cache)->GetSize();
 		}
-		// HTTP metadata cache lifetime is controlled by enable_http_metadata_cache and query lifetime.
-		if (should_write_cache) {
+		if (should_write_cache && (cache->OverridesResponseCachePolicy() || CanReuseCachedData())) {
 			cache->Insert(path, GetCacheEntry());
 		}
 	}

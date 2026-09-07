@@ -22,6 +22,9 @@ TEST_CASE("HTTP cache policy preserves repeated response headers", "[httpfs][cac
 		REQUIRE(*deadline == timestamp_t::ninfinity());
 		REQUIRE_FALSE(handle->Cast<HTTPFileHandle>().CanReuseCachedData());
 		handle.reset();
+		handle = fs.OpenFile(server.HTTPPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+		REQUIRE(HTTPTestHelper::CountRequests(server.Observations(), "HEAD", 200) == 2);
+		handle.reset();
 		HTTPTestHelper::RequireQueryOk(con, "ROLLBACK");
 	}
 }
