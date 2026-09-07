@@ -28,6 +28,16 @@ static Value MapToStruct(const Value &map) {
 	return Value::STRUCT(struct_fields);
 }
 
+static bool MapContainsKey(const Value &map, const string &name) {
+	for (const auto &kv_child : MapValue::GetChildren(map)) {
+		auto kv_pair = StructValue::GetChildren(kv_child);
+		if (kv_pair.size() == 2 && StringUtil::CIEquals(kv_pair[0].ToString(), name)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 struct S3SecretBuilder {
 public:
 	explicit S3SecretBuilder(CreateSecretInput &input_p) : input(input_p) {
@@ -88,6 +98,9 @@ private:
 		child_list_t<Value> struct_fields;
 		for (const auto &option : input.options) {
 			struct_fields.emplace_back(StringUtil::Lower(option.first), option.second);
+			if (StringUtil::CIEquals(option.first, "sse_c_key")) {
+				secret->redact_keys.insert("refresh_info");
+			}
 		}
 		secret->secret_map["refresh_info"] = Value::STRUCT(struct_fields);
 	}
@@ -97,6 +110,9 @@ private:
 			throw InvalidInputException("Can not set `refresh` and `refresh_info` at the same time");
 		}
 		refresh = true;
+		if (MapContainsKey(value, "sse_c_key")) {
+			secret->redact_keys.insert("refresh_info");
+		}
 		secret->secret_map["refresh_info"] = MapToStruct(value);
 	}
 

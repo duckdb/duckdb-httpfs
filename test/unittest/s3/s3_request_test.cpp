@@ -312,6 +312,9 @@ CREATE SECRET s3_rejected_headers (
 	    {"X-AMZ-REQUEST-PAYER", "x-amz-request-payer"},
 	    {"X-AMZ-SERVER-SIDE-ENCRYPTION", "x-amz-server-side-encryption"},
 	    {"X-AMZ-SERVER-SIDE-ENCRYPTION-AWS-KMS-KEY-ID", "x-amz-server-side-encryption-aws-kms-key-id"},
+	    {"X-AMZ-SERVER-SIDE-ENCRYPTION-CUSTOMER-ALGORITHM", "x-amz-server-side-encryption-customer-algorithm"},
+	    {"X-AMZ-SERVER-SIDE-ENCRYPTION-CUSTOMER-KEY", "x-amz-server-side-encryption-customer-key"},
+	    {"X-AMZ-SERVER-SIDE-ENCRYPTION-CUSTOMER-KEY-MD5", "x-amz-server-side-encryption-customer-key-md5"},
 	};
 	for (const auto &protected_header : protected_headers) {
 		S3TestHelper::RequireQueryOk(
@@ -1666,21 +1669,25 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 		bool retry_timeout;
 		bool retry_received_response;
 		bool uses_kms_headers;
+		bool uses_sse_customer_headers;
 	};
 	const array<ExpectedOperationInfo, 10> expected {{
-	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true, false, false},
-	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true, false, false},
-	    {S3RequestOperation::PUT_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, true},
-	    {S3RequestOperation::DELETE_OBJECT, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, false, false},
-	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true, false, false},
-	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, false, false},
+	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
+	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
+	    {S3RequestOperation::PUT_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, true, true},
+	    {S3RequestOperation::DELETE_OBJECT, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, false, false,
+	     false},
+	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true, false, false,
+	     false},
+	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, false, false,
+	     false},
 	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, false,
-	     true},
-	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, false},
+	     true, true},
+	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
 	    {S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, true,
-	     false},
+	     false, true},
 	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, false,
-	     false},
+	     false, false},
 	}};
 
 	for (const auto &entry : expected) {
@@ -1690,6 +1697,7 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 		REQUIRE(info.retry_timeout == entry.retry_timeout);
 		REQUIRE(info.retry_received_response == entry.retry_received_response);
 		REQUIRE(info.uses_kms_headers == entry.uses_kms_headers);
+		REQUIRE(info.uses_sse_customer_headers == entry.uses_sse_customer_headers);
 	}
 }
 

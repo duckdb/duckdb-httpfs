@@ -82,20 +82,25 @@ const string &S3RequestQuery::CanonicalQuery() const {
 
 const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation operation) {
 	static const array<S3RequestOperationInfo, 10> OPERATION_INFO = {
-	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true, false, false},
-	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true, false, false},
-	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, true},
-	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "deleting", true, false, false},
-	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true, false, false},
-	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, false,
+	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true, false, false,
+	                            true},
+	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true, false, false, true},
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, true,
+	                            true},
+	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "deleting", true, false, false,
 	                            false},
+	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true, false, false,
+	                            false},
+	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, false,
+	                            false, false},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "initializing multipart upload for",
-	                            false, false, true},
-	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, false},
+	                            false, false, true, true},
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, false,
+	                            true},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "completing multipart upload for",
-	                            false, true, false},
+	                            false, true, false, true},
 	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "aborting multipart upload for",
-	                            true, false, false}};
+	                            true, false, false, false}};
 	auto index = static_cast<idx_t>(operation);
 	if (index >= OPERATION_INFO.size()) {
 		throw InternalException("Unknown S3 request operation");
@@ -144,6 +149,9 @@ private:
 		    {"x-amz-request-payer", "x-amz-request-payer"},
 		    {"x-amz-server-side-encryption", "x-amz-server-side-encryption"},
 		    {"x-amz-server-side-encryption-aws-kms-key-id", "x-amz-server-side-encryption-aws-kms-key-id"},
+		    {"x-amz-server-side-encryption-customer-algorithm", "x-amz-server-side-encryption-customer-algorithm"},
+		    {"x-amz-server-side-encryption-customer-key", "x-amz-server-side-encryption-customer-key"},
+		    {"x-amz-server-side-encryption-customer-key-md5", "x-amz-server-side-encryption-customer-key-md5"},
 		};
 		return headers;
 	}
@@ -168,6 +176,8 @@ public:
 	      content_md5(std::move(content_md5_p)),
 	      use_sse_kms(!auth_params.GetRequestOptions().kms_key_id.empty() &&
 	                  S3RequestUtil::GetOperationInfo(operation_p).uses_kms_headers),
+	      use_sse_customer(auth_params.GetRequestOptions().sse_customer_key.has_value() &&
+	                       S3RequestUtil::GetOperationInfo(operation_p).uses_sse_customer_headers),
 	      headers(headers_p) {
 	}
 
@@ -207,6 +217,12 @@ private:
 		if (use_sse_kms) {
 			headers["x-amz-server-side-encryption"] = "aws:kms";
 			headers["x-amz-server-side-encryption-aws-kms-key-id"] = request_options.kms_key_id;
+		}
+		if (use_sse_customer) {
+			auto &sse_customer_key = *request_options.sse_customer_key;
+			headers["x-amz-server-side-encryption-customer-algorithm"] = "AES256";
+			headers["x-amz-server-side-encryption-customer-key"] = sse_customer_key.GetKey();
+			headers["x-amz-server-side-encryption-customer-key-md5"] = sse_customer_key.GetKeyMD5();
 		}
 		if (request_options.requester_pays && auth_params.GetProvider().GetType() != S3ProviderType::GCS) {
 			headers["x-amz-request-payer"] = "requester";
@@ -312,6 +328,7 @@ private:
 	const string content_type;
 	const string content_md5;
 	const bool use_sse_kms;
+	const bool use_sse_customer;
 	HTTPHeaders &headers;
 };
 

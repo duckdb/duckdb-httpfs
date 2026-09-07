@@ -116,11 +116,11 @@ const array<const char *, 4> &S3SecretConfig::SecretTypes() {
 	return SECRET_TYPES;
 }
 
-const array<const char *, 13> &S3SecretConfig::CredentialMaterialKeys() {
-	static constexpr array<const char *, 13> CREDENTIAL_MATERIAL_KEYS = {
-	    "key_id",    "secret",  "session_token",          "region",         "endpoint",     "kms_key_id",
-	    "url_style", "use_ssl", "url_compatibility_mode", "requester_pays", "bearer_token", "user_project",
-	    "account_id"};
+const array<const char *, 14> &S3SecretConfig::CredentialMaterialKeys() {
+	static constexpr array<const char *, 14> CREDENTIAL_MATERIAL_KEYS = {
+	    "key_id",     "secret",   "session_token",          "region",         "endpoint",     "kms_key_id",
+	    "url_style",  "use_ssl",  "url_compatibility_mode", "requester_pays", "bearer_token", "user_project",
+	    "account_id", "sse_c_key"};
 	return CREDENTIAL_MATERIAL_KEYS;
 }
 
@@ -191,7 +191,9 @@ vector<string> S3SecretConfig::DefaultSecretScope(const string &secret_type) {
 }
 
 void S3SecretConfig::SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function) {
-	if (secret_type == R2_SECRET_TYPE) {
+	if (secret_type == S3_SECRET_TYPE) {
+		function.named_parameters["sse_c_key"] = LogicalType::VARCHAR;
+	} else if (secret_type == R2_SECRET_TYPE) {
 		function.named_parameters["account_id"] = LogicalType::VARCHAR;
 	} else if (secret_type == GCS_SECRET_TYPE) {
 		function.named_parameters["bearer_token"] = LogicalType::VARCHAR;
@@ -213,6 +215,12 @@ void S3SecretConfig::ApplySecretDefaults(const CreateSecretInput &input, KeyValu
 
 bool S3SecretConfig::TryApplySecretOption(const CreateSecretInput &input, const string &name, const Value &value,
                                           KeyValueSecret &secret) {
+	if (name == "sse_c_key" && input.type == S3_SECRET_TYPE) {
+		auto sse_customer_key = S3SSECustomerKey::Create(value.ToString());
+		secret.secret_map["sse_c_key"] = sse_customer_key.GetKey();
+		secret.redact_keys.insert("sse_c_key");
+		return true;
+	}
 	if (name == "account_id" && input.type == R2_SECRET_TYPE) {
 		return true;
 	}
@@ -297,6 +305,10 @@ S3MultipartUploadPolicy S3Provider::GetMultipartUploadPolicy() const {
 
 idx_t S3Provider::GetBulkDeleteMaxBatchSize() const {
 	return profile == S3CompatibilityProfile::R2 ? 700 : 1000;
+}
+
+bool S3Provider::SupportsSSECustomerKey() const {
+	return profile == S3CompatibilityProfile::S3;
 }
 
 string S3Provider::GetBadRequestError(const S3AuthParams &auth_params, const string &correct_region) const {

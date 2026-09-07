@@ -56,6 +56,7 @@ struct S3RequestOperationInfo {
 	bool retry_timeout;
 	bool retry_received_response;
 	bool uses_kms_headers;
+	bool uses_sse_customer_headers;
 };
 
 struct S3RequestQuery {

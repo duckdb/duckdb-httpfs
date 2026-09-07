@@ -11,6 +11,27 @@ namespace duckdb {
 
 enum class S3EndpointMode : uint8_t { AUTOMATIC, EXPLICIT };
 
+class S3SSECustomerKey {
+public:
+	static S3SSECustomerKey Create(const string &key);
+
+public:
+	const string &GetKey() const {
+		return key;
+	}
+	const string &GetKeyMD5() const {
+		return key_md5;
+	}
+	bool operator==(const S3SSECustomerKey &other) const;
+
+private:
+	S3SSECustomerKey(string key_p, string key_md5_p);
+
+private:
+	string key;
+	string key_md5;
+};
+
 struct S3AuthCredentials {
 	string region;
 	string access_key_id;
@@ -33,7 +54,11 @@ struct S3AuthURLParams {
 };
 
 struct S3AuthRequestOptions {
+	//! Server-side encryption
 	string kms_key_id;
+	optional<S3SSECustomerKey> sse_customer_key;
+
+	//! Request billing
 	bool requester_pays = false;
 	string user_project;
 
