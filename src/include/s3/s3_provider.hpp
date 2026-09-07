@@ -67,7 +67,7 @@ struct S3SecretConfig {
 	static constexpr const char *AWS_SECRET_TYPE = "aws";
 
 	static const array<const char *, 4> &SecretTypes();
-	static const array<const char *, 13> &CredentialMaterialKeys();
+	static const array<const char *, 14> &CredentialMaterialKeys();
 
 	static vector<string> DefaultSecretScope(const string &secret_type);
 	static void SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function);
@@ -93,6 +93,7 @@ public:
 	S3AuthType GetAuthType(const S3AuthParams &auth_params) const;
 	S3MultipartUploadPolicy GetMultipartUploadPolicy() const;
 	idx_t GetBulkDeleteMaxBatchSize() const;
+	bool SupportsSSECustomerKey() const;
 	string GetBadRequestError(const S3AuthParams &auth_params, const string &correct_region = "") const;
 	string GetAuthError(const S3AuthParams &auth_params) const;
 

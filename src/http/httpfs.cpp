@@ -35,6 +35,19 @@ HTTPUtil &HTTPFSUtil::GetHTTPUtil(optional_ptr<FileOpener> opener) {
 	throw InternalException("FileOpener not provided, can't get HTTPUtil");
 }
 
+void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) {
+	if (!request.params.logger || !request.params.logger->ShouldLog(HTTPLogType::NAME, HTTPLogType::LEVEL)) {
+		return;
+	}
+	if (!request.headers.HasHeader("x-amz-server-side-encryption-customer-key")) {
+		HTTPUtil::LogRequest(request, response);
+		return;
+	}
+	auto sanitized_request = request;
+	sanitized_request.headers["x-amz-server-side-encryption-customer-key"] = "redacted";
+	HTTPUtil::LogRequest(sanitized_request, response);
+}
+
 struct HTTPParametersInitializer {
 private:
 	HTTPParametersInitializer(HTTPFSUtil &httpfs_util_p, optional_ptr<FileOpener> opener_p,

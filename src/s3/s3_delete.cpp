@@ -54,6 +54,11 @@ static void AddDeleteAuthHash(hash_t &result, const S3AuthParams &auth_params) {
 
 	auto &request_options = auth_params.GetRequestOptions();
 	AddDeleteHash(result, request_options.kms_key_id);
+	AddDeleteHash(result, static_cast<idx_t>(request_options.sse_customer_key.has_value()));
+	if (request_options.sse_customer_key) {
+		AddDeleteHash(result, request_options.sse_customer_key->GetKey());
+		AddDeleteHash(result, request_options.sse_customer_key->GetKeyMD5());
+	}
 	AddDeleteHash(result, static_cast<idx_t>(request_options.requester_pays));
 	AddDeleteHash(result, request_options.user_project);
 }

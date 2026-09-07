@@ -5,6 +5,7 @@
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/string_util.hpp"
 
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
 #include <algorithm>
@@ -15,11 +16,62 @@
 #include <sstream>
 #include <thread>
 
-namespace httplib = duckdb_httplib;
+namespace httplib = duckdb_httplib_openssl;
 
 namespace duckdb {
 
 namespace {
+
+static constexpr const char *MOCK_S3_CERTIFICATE = R"PEM(-----BEGIN CERTIFICATE-----
+MIIDGjCCAgKgAwIBAgIUTWCWMe9mqyP+NK8dRswpg8l39ikwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDkwNDExNTExNVoXDTM2MDkw
+MTExNTExNVowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAsdJ0J+1+qfChJ69UxVidlhNoKcTLIUh5J8NILk/2nV2n
+OFSEFKB1Z2Xsf+6f/1WqRIr+w6Vx+D6/dDJ4fkcSVfjWbSuVM7Jvhw3riBlZMLPW
+LBh0AGiqeQ84oAHdiZzrDDqS3NZH9/GFVPrwCqbhN7jigSeiNVykov/Zd3sHCmWL
+qER+F7aJaSgr2aLiUJKa1dnATS2xLcaW8St6v0i3kuHZQhmpJm+OI9qOUB0JdgRp
+9WT6r7jZJQINDIG13JdKv53XSRFKAMT8uPdIzK0MlXJd/QpnJ5oXqPN2Zgjq4SvP
+H3y9Osk04PyvLwgNsw6scpvEeJSHkgmIO+yZIneUUwIDAQABo2QwYjAdBgNVHQ4E
+FgQU2+5vFidU38L24c5zLZu//7xYTf0wHwYDVR0jBBgwFoAU2+5vFidU38L24c5z
+LZu//7xYTf0wDwYDVR0TAQH/BAUwAwEB/zAPBgNVHREECDAGhwR/AAABMA0GCSqG
+SIb3DQEBCwUAA4IBAQBXIKqqQccLkEuPDfTrJWXRjmk35LY9XxxlMubjeF8rtefJ
+/fvP0PdVslLwtmYMOFD1e+gDs1Gk2rXEYUvL5te2TpfQ1QTPekCAIu7l42scR6Wc
+JwKT0jkQENDXGOv5ERzan9YX3BLT086CX9q0EKQHbrCdiSyMqzEQ1tEc2yQq/Ci2
+td+RzMrYLC8gYCYfLHrqgrMbTYJg9UMxY6co0YbnfvGVjfch4HWps6gu2CoTLP3Y
+lFDLBg7vN8Q+bB/ky1IaUOD2s0NHL6uPuuB/xgHhMEhZqZ386KjtleXQhKzaHSpL
+IQCRTdLYcFvfpO3Vvv+nCD8swRidMXTzwoGBxINq
+-----END CERTIFICATE-----
+)PEM";
+
+static constexpr const char *MOCK_S3_PRIVATE_KEY = R"PEM(-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCx0nQn7X6p8KEn
+r1TFWJ2WE2gpxMshSHknw0guT/adXac4VIQUoHVnZex/7p//VapEiv7DpXH4Pr90
+Mnh+RxJV+NZtK5Uzsm+HDeuIGVkws9YsGHQAaKp5DzigAd2JnOsMOpLc1kf38YVU
++vAKpuE3uOKBJ6I1XKSi/9l3ewcKZYuoRH4XtolpKCvZouJQkprV2cBNLbEtxpbx
+K3q/SLeS4dlCGakmb44j2o5QHQl2BGn1ZPqvuNklAg0MgbXcl0q/nddJEUoAxPy4
+90jMrQyVcl39Cmcnmheo83ZmCOrhK88ffL06yTTg/K8vCA2zDqxym8R4lIeSCYg7
+7Jkid5RTAgMBAAECggEAStb+0SEpCp/+S4QE4wwBQv0G/XFYZrkoWJ5dXjSEYEXe
+z5vufPntf6eLimplh2LIBxIS2Efk+Cx8ioyFXuxNoMZahNbvdDMYslge9Yhpm9BM
+hwGBrPxgJxRLajhuw3C6EksCrZQ39Pf+/D2i0nDa4AdduSrzn47OsdWJcrpiQ7K1
+/I54L8q3L9FpW7NH1co0HUH3Knhed7BwCL8+bWI/8r5rCdlsq2auuzygGmhy7Ztx
+Lnb2K+/9vCdthRAGm1tMGwikkNuHLB7N1FzEHFizsV9PeuAZE7TQdn3FD4ZVCl7e
+G9HpeSBJVS4TAAc1/2aGGg1JU3j/haJ8p5TuApzLjQKBgQDoZDJXmssLkZDZIy2y
+InUPDUebcyvl/fne1L/tX9Nxmtq7DQqPLv7RMCPpMwKIAHvzaRhtZMDYaay/us97
+aV3Zu7U00uy9+Nx0A/98J6+uKk+Q61W60FRFzspDNZzg6X7Md8EgyTBYHS8POasY
+veneZcQj+oh5Ta1LTAZTKNho1QKBgQDD4xKvt9MA0ZzyJkumT6qxBSwKqkcibN3U
+7EVlOcUbhpkpErf9+wdpzCO5bOYJIvHxGAbhh8cp0FldmAihaabTcchPzq4rRvOQ
+s3758ymq+DObKrQ9+Fq7w76b5u8hnT194p4W4bBgdO/KxZrATKWsy3T6STl5O2+x
+iDopOd0chwKBgCQk2VOYxrXA6SdsekH3a/9wUE/UJOK7kq5epo8z1T4ZGKX5DEhi
+xc0hUKSHg4BFmwGrudnhzsCaBv02/+gw5iDkOfXCTIHrf9YnfQgBYCiVehSPFaFd
+n43P8NNtNj4g8tC4W3hO8k7yEwyqKntJpmMprsztvWYod6h7ZYxvkOEVAoGBAJ/9
+W6rHMgBuM4iXfJwWX2x7s+/2CWl1j20zmK5Hk9Sah4fDcSFwoSppABiXd/6oWwE2
+RZB4jFN7hzHpVcs39nimaxu7zAcuyQo7gI73auXoGIY4R8SBjuHiy1CcOl2zBqFF
+sScxKBRwDdYItQ8wyvQprJ4rplR9FgnjINXBG/YLAoGBAI5RE5/d9aE5MWFica+4
+R5PhVuehUuFW1r/Bk4wPNc3/kl3sithuZK4UDyYMB6vtWXrBujP0Ay2Q8uvyiwU2
+/fnxG36kuDL67cFGDSJVTSmt3S9OuD49hzZtX4Kqk/ccPglD5YYQBrupVuy81TUJ
+sQvWtXkxKsNfOUe42TX0hn78
+-----END PRIVATE KEY-----
+)PEM";
 
 static ssize_t WriteMockResponseHeaders(httplib::Stream &stream, httplib::Headers &headers) {
 	ssize_t total_size = 0;
@@ -265,7 +317,26 @@ public:
 	};
 
 public:
-	explicit Impl(MockS3ServerConfig config_p) : config(std::move(config_p)) {
+	static unique_ptr<httplib::Server> CreateServer(bool use_ssl) {
+		if (!use_ssl) {
+			return make_uniq<httplib::Server>();
+		}
+		httplib::SSLServer::PemMemory pem {MOCK_S3_CERTIFICATE,
+		                                   strlen(MOCK_S3_CERTIFICATE),
+		                                   MOCK_S3_PRIVATE_KEY,
+		                                   strlen(MOCK_S3_PRIVATE_KEY),
+		                                   nullptr,
+		                                   0,
+		                                   nullptr};
+		auto result = make_uniq<httplib::SSLServer>(pem);
+		if (!result->is_valid()) {
+			throw IOException("Failed to initialize mock S3 TLS server");
+		}
+		return result;
+	}
+
+	explicit Impl(MockS3ServerConfig config_p)
+	    : config(std::move(config_p)), server_owner(CreateServer(config.use_ssl)), server(*server_owner) {
 		uploaded_object = config.upload.initial_published_object;
 		remaining_put_failures = config.failures.transient_put_failures;
 		remaining_get_failures = config.failures.transient_get_failures;
@@ -310,8 +381,8 @@ public:
 	}
 
 	string HTTPPath() const {
-		return StringUtil::Format("http://%s%s/%s/%s", Endpoint(), config.endpoint_base_path, config.object.bucket,
-		                          config.object.key);
+		return StringUtil::Format("%s://%s%s/%s/%s", config.use_ssl ? "https" : "http", Endpoint(),
+		                          config.endpoint_base_path, config.object.bucket, config.object.key);
 	}
 
 	vector<MockS3RequestObservation> Observations() const DUCKDB_EXCLUDES(observation_lock) {
@@ -429,7 +500,10 @@ public:
 	void Record(const httplib::Request &request, int status) const DUCKDB_EXCLUDES(observation_lock, upload_lock) {
 		MockS3RequestObservation observation;
 		for (const auto &header : request.headers) {
-			observation.headers.emplace_back(header.first, header.second);
+			auto value = StringUtil::CIEquals(header.first, "x-amz-server-side-encryption-customer-key")
+			                 ? string("redacted")
+			                 : header.second;
+			observation.headers.emplace_back(header.first, std::move(value));
 		}
 		observation.method = request.method;
 		observation.path = request.path;
@@ -445,6 +519,15 @@ public:
 		observation.upload_id = GetParameter(request, "uploadId");
 		observation.server_side_encryption = GetHeader(request, "x-amz-server-side-encryption");
 		observation.kms_key_id = GetHeader(request, "x-amz-server-side-encryption-aws-kms-key-id");
+		observation.sse_customer_algorithm = GetHeader(request, "x-amz-server-side-encryption-customer-algorithm");
+		observation.sse_customer_key_md5 = GetHeader(request, "x-amz-server-side-encryption-customer-key-md5");
+		observation.has_sse_customer_key = request.has_header("x-amz-server-side-encryption-customer-key");
+		if (observation.has_sse_customer_key) {
+			auto raw_key = GetHeader(request, "x-amz-server-side-encryption-customer-key");
+			observation.sse_customer_key_matches =
+			    std::find(config.sse_customer.accepted_keys.begin(), config.sse_customer.accepted_keys.end(),
+			              raw_key) != config.sse_customer.accepted_keys.end();
+		}
 		observation.part_number = GetPartNumber(request);
 		observation.body_size = request.body.size();
 		observation.body_digest = MockS3BodyDigest::Compute(request.body);
@@ -1214,7 +1297,8 @@ public:
 public:
 	//! Server configuration and lifetime
 	MockS3ServerConfig config;
-	httplib::Server server;
+	unique_ptr<httplib::Server> server_owner;
+	httplib::Server &server;
 	std::thread server_thread;
 	int port = 0;
 
@@ -1395,14 +1479,18 @@ string MockS3DescribeObservations(const vector<MockS3RequestObservation> &observ
 		result += StringUtil::Format(
 		    "%s %s status=%d key=%s region=%s range=%s if_match=%s version_id=%s target=%s upload_id=%s "
 		    "part_number=%s body_size=%llu delete_key_count=%llu body_digest=%s published=%s sse=%s "
-		    "kms_key_id=%s user_agent=%s "
+		    "kms_key_id=%s sse_customer_algorithm=%s sse_customer_key_md5=%s sse_customer_key=%s "
+		    "sse_customer_key_matches=%s user_agent=%s "
 		    "session_header=%s",
 		    observation.method, observation.path, observation.status, observation.key_id, observation.region,
 		    observation.range, observation.if_match, observation.version_id, observation.target, observation.upload_id,
 		    observation.part_number.IsValid() ? std::to_string(observation.part_number.GetIndex()) : string(),
 		    observation.body_size, observation.delete_key_count, observation.body_digest,
 		    observation.multipart_upload_published ? "true" : "false", observation.server_side_encryption,
-		    observation.kms_key_id, observation.user_agent, observation.session_header);
+		    observation.kms_key_id, observation.sse_customer_algorithm, observation.sse_customer_key_md5,
+		    observation.has_sse_customer_key ? "redacted" : "absent",
+		    observation.sse_customer_key_matches ? "true" : "false", observation.user_agent,
+		    observation.session_header);
 	}
 	return result;
 }

@@ -2,11 +2,40 @@
 
 #include "s3/s3_url.hpp"
 
+#include "duckdb/common/crypto/md5.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/blob.hpp"
 
 #include <cstdlib>
 
 namespace duckdb {
+
+S3SSECustomerKey::S3SSECustomerKey(string key_p, string key_md5_p)
+    : key(std::move(key_p)), key_md5(std::move(key_md5_p)) {
+}
+
+S3SSECustomerKey S3SSECustomerKey::Create(const string &key) {
+	string decoded_key;
+	try {
+		decoded_key = Blob::FromBase64(key);
+	} catch (std::exception &) {
+		throw InvalidInputException("SSE_C_KEY must be a valid base64-encoded 256-bit key");
+	}
+	if (decoded_key.size() != 32 || Blob::ToBase64(decoded_key) != key) {
+		throw InvalidInputException("SSE_C_KEY must be a valid base64-encoded 256-bit key");
+	}
+
+	MD5Context md5_context;
+	md5_context.Add(decoded_key);
+	data_t md5_hash[MD5Context::MD5_HASH_LENGTH_BINARY];
+	md5_context.Finish(md5_hash);
+	string_t md5_blob(const_char_ptr_cast(md5_hash), MD5Context::MD5_HASH_LENGTH_BINARY);
+	return S3SSECustomerKey(key, Blob::ToBase64(md5_blob));
+}
+
+bool S3SSECustomerKey::operator==(const S3SSECustomerKey &other) const {
+	return key == other.key && key_md5 == other.key_md5;
+}
 
 void AWSEnvironmentCredentialsProvider::SetExtensionOptionValue(const Identifier &key, const char *env_var_name) {
 	const auto env_value = std::getenv(env_var_name);
@@ -47,8 +76,8 @@ bool S3AuthURLParams::operator==(const S3AuthURLParams &other) const {
 }
 
 bool S3AuthRequestOptions::operator==(const S3AuthRequestOptions &other) const {
-	return kms_key_id == other.kms_key_id && requester_pays == other.requester_pays &&
-	       user_project == other.user_project;
+	return kms_key_id == other.kms_key_id && sse_customer_key == other.sse_customer_key &&
+	       requester_pays == other.requester_pays && user_project == other.user_project;
 }
 
 S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
@@ -86,6 +115,10 @@ S3AuthConfig S3AuthResolver::ReadConfig(S3KeyValueReader &secret_reader, const s
 	secret_reader.TryGetSecretKeyOrSetting("session_token", "s3_session_token", credentials.session_token);
 	secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", config.use_ssl);
 	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", request_options.kms_key_id);
+	string sse_c_key;
+	if (secret_reader.TryGetSecretKey("sse_c_key", sse_c_key)) {
+		request_options.sse_customer_key = S3SSECustomerKey::Create(sse_c_key);
+	}
 	secret_reader.TryGetSecretKeysOrSetting("url_compatibility_mode", "s3_url_compatibility_mode",
 	                                        "s3_url_compatibility_mode", config.compatibility_mode);
 	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays", request_options.requester_pays);
@@ -194,6 +227,20 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	result.url = {std::move(endpoint), config.endpoint_mode, style, config.compatibility_mode};
 	result.request_options = std::move(request_options);
 	result.refresh_identity = {config.use_ssl};
+	if (result.request_options.sse_customer_key) {
+		if (!result.request_options.kms_key_id.empty()) {
+			throw InvalidInputException("SSE_C_KEY and KMS_KEY_ID cannot be configured together");
+		}
+		if (!result.provider.SupportsSSECustomerKey()) {
+			throw InvalidInputException("SSE_C_KEY is only supported for S3-compatible endpoints");
+		}
+		if (!result.url.endpoint.UsesSSL()) {
+			throw InvalidInputException("SSE_C_KEY requires an HTTPS endpoint");
+		}
+		if (result.credentials.access_key_id.empty() || result.credentials.secret_access_key.empty()) {
+			throw InvalidInputException("SSE_C_KEY requires both KEY_ID and SECRET for signed S3 requests");
+		}
+	}
 	return result;
 }
 

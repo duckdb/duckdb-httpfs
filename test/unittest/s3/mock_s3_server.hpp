@@ -187,9 +187,15 @@ struct MockS3UploadConfig {
 	MockS3MultipartGeometry geometry = MockS3MultipartGeometry::FLEXIBLE;
 };
 
+struct MockS3SSECustomerConfig {
+	//! Raw keys accepted by the mock; request observations never retain them
+	vector<string> accepted_keys;
+};
+
 struct MockS3ServerConfig {
 	//! Path prefix configured as part of the endpoint, without a trailing slash
 	string endpoint_base_path;
+	bool use_ssl = false;
 	MockS3ObjectConfig object;
 	MockS3AuthConfig auth;
 	MockS3MetadataConfig metadata;
@@ -199,6 +205,7 @@ struct MockS3ServerConfig {
 	MockS3RangeConfig range;
 	MockS3FullGetConfig full_get;
 	MockS3UploadConfig upload;
+	MockS3SSECustomerConfig sse_customer;
 	MockS3HTTPResponseConfig http_response;
 };
 
@@ -218,6 +225,8 @@ struct MockS3RequestObservation {
 	string upload_id;
 	string server_side_encryption;
 	string kms_key_id;
+	string sse_customer_algorithm;
+	string sse_customer_key_md5;
 	string body_digest;
 	optional_idx part_number;
 	idx_t body_size = 0;
@@ -226,6 +235,8 @@ struct MockS3RequestObservation {
 	idx_t session_header_count = 0;
 	int status = 0;
 	bool multipart_upload_published = false;
+	bool has_sse_customer_key = false;
+	bool sse_customer_key_matches = false;
 	//! Client's ephemeral source port; a new connection shows a new port
 	int remote_port = 0;
 };
