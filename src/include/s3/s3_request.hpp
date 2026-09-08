@@ -118,6 +118,7 @@ struct S3RequestSpec {
 	string payload_hash;
 	string content_type;
 	string content_md5;
+	HTTPObjectVersion object_version;
 };
 
 struct S3RequestData {

@@ -532,12 +532,19 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	auto session_request = snapshot.CreateRequest();
 	result.http_params = std::move(session_request.params);
 	auto parsed_s3_url = S3Url::Parse(spec.url, result.auth_params);
-	if (!parsed_s3_url.GetVersionId().empty() && spec.operation != S3RequestOperation::HEAD_OBJECT &&
+	auto &version = spec.object_version.IsSet() ? spec.object_version : parsed_s3_url.GetObjectVersion();
+	if (version.IsSet() && spec.operation != S3RequestOperation::HEAD_OBJECT &&
 	    spec.operation != S3RequestOperation::GET_OBJECT) {
-		throw NotImplementedException("s3_version_id is only supported for reading");
+		throw NotImplementedException("%s is only supported for reading",
+		                              S3Provider::GetVersionParameterName(version.GetType()));
 	}
 	result.display_url = S3Url::GetDisplayUrl(spec.url, result.auth_params);
 	auto query = spec.create_query ? spec.create_query(parsed_s3_url) : S3RequestQuery();
+	if (version.IsSet()) {
+		D_ASSERT(!spec.create_query);
+		query =
+		    S3RequestQuery({{result.auth_params.GetProvider().GetVersionQueryParameter(version), version.GetValue()}});
+	}
 	result.http_url = operation_info.target == S3RequestTarget::BUCKET
 	                      ? parsed_s3_url.GetBucketHTTPUrl(query.WireQuery())
 	                      : parsed_s3_url.GetHTTPUrl(query.WireQuery());
@@ -950,13 +957,7 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const str
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	return S3RequestExecutor::RunHandle(
 	           GetEncryptionUtil(), s3_handle,
-	           S3RequestSpec {s3_url, S3RequestOperation::HEAD_OBJECT,
-	                          [&](const ParsedS3Url &) {
-		                          return s3_handle.requested_version_id.empty()
-		                                     ? S3RequestQuery()
-		                                     : S3RequestQuery({{"versionId", s3_handle.requested_version_id}});
-	                          },
-	                          "", "", ""},
+	           S3RequestSpec {s3_url, S3RequestOperation::HEAD_OBJECT, {}, "", "", "", s3_handle.requested_version},
 	           [&](S3RequestData &request_data) {
 		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		           return RunHeadRequest(request_data.http_url, request_data.headers, params,
@@ -971,16 +972,9 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const str
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                   const HTTPReadConfig &read_config, CachedFileDownload &download) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	const auto version_id =
-	    read_config.condition.type == HTTPReadConditionType::S3_VERSION_ID ? read_config.condition.value : string();
 	return S3RequestExecutor::RunHandle(
 	           GetEncryptionUtil(), s3_handle,
-	           S3RequestSpec {
-	               s3_url, S3RequestOperation::GET_OBJECT,
-	               [&](const ParsedS3Url &) {
-		               return version_id.empty() ? S3RequestQuery() : S3RequestQuery({{"versionId", version_id}});
-	               },
-	               "", "", ""},
+	           S3RequestSpec {s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version},
 	           [&](S3RequestData &request_data) {
 		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		           return RunGetRequest(
@@ -1000,16 +994,9 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
                                                        const HTTPReadConfig &read_config, idx_t file_offset,
                                                        data_ptr_t buffer_out, idx_t buffer_out_len) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	const auto version_id =
-	    read_config.condition.type == HTTPReadConditionType::S3_VERSION_ID ? read_config.condition.value : string();
 	return S3RequestExecutor::RunHandle(
 	           GetEncryptionUtil(), s3_handle,
-	           S3RequestSpec {
-	               s3_url, S3RequestOperation::GET_OBJECT,
-	               [&](const ParsedS3Url &) {
-		               return version_id.empty() ? S3RequestQuery() : S3RequestQuery({{"versionId", version_id}});
-	               },
-	               "", "", ""},
+	           S3RequestSpec {s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version},
 	           [&](S3RequestData &request_data) {
 		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		           return RunGetRangeRequest(

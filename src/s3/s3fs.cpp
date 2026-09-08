@@ -34,9 +34,10 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
                            const S3UploadConfig &upload_config,
                            optional<S3MultipartUploadPolicy> multipart_upload_policy)
     : HTTPFileHandle(fs, file, flags, std::move(http_params_p)),
-      requested_version_id(S3Url::Parse(file.path, auth_params_p).GetVersionId()) {
-	if (flags.OpenForWriting() && !requested_version_id.empty()) {
-		throw NotImplementedException("s3_version_id is only supported for reading");
+      requested_version(S3Url::Parse(file.path, auth_params_p).GetObjectVersion()) {
+	if (flags.OpenForWriting() && requested_version.IsSet()) {
+		throw NotImplementedException("%s is only supported for reading",
+		                              S3Provider::GetVersionParameterName(requested_version.GetType()));
 	}
 	auto captured = request_session->Capture();
 	request_session->TryPublish(captured.snapshot,
@@ -62,20 +63,23 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 
 HTTPReadConfig S3FileHandle::BuildReadConfig() const {
 	auto result = HTTPFileHandle::BuildReadConfig();
-	if (!requested_version_id.empty()) {
-		result.condition.type = HTTPReadConditionType::S3_VERSION_ID;
-		result.condition.value = requested_version_id;
-		return result;
+	if (requested_version.IsSet()) {
+		result.object_version = requested_version;
+	} else if (request_session->Capture().snapshot->Params().s3_version_id_pinning) {
+		result.object_version = GetObjectVersion();
 	}
-	if (!request_session->Capture().snapshot->Params().s3_version_id_pinning) {
-		return result;
-	}
-	auto version_id = GetVersionId();
-	if (!version_id.empty()) {
-		result.condition.type = HTTPReadConditionType::S3_VERSION_ID;
-		result.condition.value = std::move(version_id);
+	if (result.object_version.IsSet()) {
+		result.condition = {};
 	}
 	return result;
+}
+
+HTTPObjectVersion S3FileHandle::ReadObjectVersion(const HTTPHeaders &headers) const {
+	auto captured = request_session->Capture();
+	if (!captured.snapshot->Params().s3_version_id_pinning) {
+		return {};
+	}
+	return captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider().ReadObjectVersion(headers);
 }
 
 shared_ptr<const HTTPRequestSnapshot> S3FileHandle::CreateRequestSnapshot(const HTTPFSParams &params) const {

@@ -72,6 +72,7 @@ public:
 protected:
 	shared_ptr<const HTTPRequestSnapshot> CreateRequestSnapshot(const HTTPFSParams &params) const override;
 	HTTPReadConfig BuildReadConfig() const override;
+	HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const override;
 	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
 	HTTPMetadataCacheEntry GetCacheEntry() const override;
 
@@ -82,7 +83,7 @@ private:
 
 private:
 	//! Immutable object selection; response metadata cannot replace an explicit version
-	const string requested_version_id;
+	const HTTPObjectVersion requested_version;
 
 	//! Upload lifetime and concurrent callers
 	annotated_mutex upload_lock;

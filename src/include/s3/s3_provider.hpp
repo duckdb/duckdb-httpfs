@@ -4,6 +4,8 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/optional.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/unordered_map.hpp"
+#include "http/http_object_version.hpp"
 
 namespace duckdb {
 
@@ -15,6 +17,7 @@ class Value;
 struct CreateSecretInput;
 class S3AuthParams;
 class S3KeyValueReader;
+struct HTTPHeaders;
 
 enum class S3ProviderType : uint8_t { S3, GCS, R2 };
 
@@ -90,12 +93,19 @@ public:
 		return profile;
 	}
 
+	//! Authentication and operation policy
 	S3AuthType GetAuthType(const S3AuthParams &auth_params) const;
 	S3MultipartUploadPolicy GetMultipartUploadPolicy() const;
 	idx_t GetBulkDeleteMaxBatchSize() const;
 	bool SupportsSSECustomerKey() const;
 	string GetBadRequestError(const S3AuthParams &auth_params, const string &correct_region = "") const;
 	string GetAuthError(const S3AuthParams &auth_params) const;
+
+	//! Object version selection and response metadata
+	static HTTPObjectVersion ParseObjectVersion(S3ProviderType provider, unordered_map<string, string> &query_params);
+	static const char *GetVersionParameterName(HTTPObjectVersionType type);
+	const char *GetVersionQueryParameter(const HTTPObjectVersion &version) const;
+	HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const;
 
 	bool operator==(const S3Provider &other) const;
 
@@ -104,6 +114,10 @@ private:
 	S3Provider();
 	S3Provider(S3ProviderMatch route_p, S3CompatibilityProfile profile_p);
 
+private:
+	static HTTPObjectVersion ParseVersionValue(HTTPObjectVersionType type, const string &value);
+
+private:
 	//! Finalized route and compatibility policy
 	S3ProviderMatch route;
 	S3CompatibilityProfile profile;

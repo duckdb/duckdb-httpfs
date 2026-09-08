@@ -1,4 +1,5 @@
 #pragma once
+#include "http/http_object_version.hpp"
 
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/chrono.hpp"
@@ -22,7 +23,7 @@ struct HTTPMetadataCacheEntry {
 	string etag;
 	//! Freshness deadline (inclusive); unset means the server provides no freshness information.
 	optional<timestamp_t> cache_valid_until;
-	string version_id;
+	HTTPObjectVersion object_version;
 	unordered_map<string, string> properties;
 };
 

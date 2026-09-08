@@ -648,4 +648,37 @@ TEST_CASE("HTTP full downloads retain their read condition", "[httpfs][positiona
 	RunS3ThresholdFullDownload("httplib");
 }
 
+TEST_CASE("Provider version metadata stays out of generic HTTP reads", "[httpfs][s3-version][positional-read]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (const bool pinning : {false, true}) {
+			CAPTURE(client, pinning);
+			MockS3ServerConfig config;
+			config.metadata.version_id = "captured-version";
+			config.metadata.version_on_head = true;
+			MockS3Server server(std::move(config));
+			DuckDB db(nullptr);
+			Connection con(db);
+			ConfigureS3ReadTest(db, con, server, client);
+			RequireQueryOk(con, string("SET s3_version_id_pinning=") + (pinning ? "true" : "false"));
+			RequireQueryOk(con, "SET enable_http_metadata_cache=true");
+			RequireQueryOk(con, "BEGIN");
+			auto &fs = FileSystem::GetFileSystem(*con.context);
+			for (idx_t i = 0; i < 2; i++) {
+				auto http =
+				    fs.OpenFile(server.HTTPPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+				REQUIRE_FALSE(http->Cast<HTTPFileHandle>().GetObjectVersion().IsSet());
+				auto s3 = fs.OpenFile(server.S3Path(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+				auto &version = s3->Cast<HTTPFileHandle>().GetObjectVersion();
+				REQUIRE(version.IsSet() == pinning);
+				if (pinning) {
+					REQUIRE(version.GetType() == HTTPObjectVersionType::S3_VERSION_ID);
+					REQUIRE(version.GetValue() == "captured-version");
+				}
+			}
+			REQUIRE(server.Observations().size() == 2);
+			RequireQueryOk(con, "COMMIT");
+		}
+	}
+}
+
 } // namespace duckdb

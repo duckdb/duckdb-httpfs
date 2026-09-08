@@ -16,7 +16,7 @@
 
 namespace duckdb {
 
-enum class HTTPReadConditionType : uint8_t { NONE, ETAG, S3_VERSION_ID };
+enum class HTTPReadConditionType : uint8_t { NONE, ETAG };
 
 struct HTTPReadCondition {
 	HTTPReadConditionType type = HTTPReadConditionType::NONE;
@@ -24,6 +24,8 @@ struct HTTPReadCondition {
 };
 
 struct HTTPReadConfig {
+	//! Selected object version, independent of live-object preconditions
+	HTTPObjectVersion object_version;
 	HTTPReadCondition condition;
 	string etag;
 	bool validate_etag = false;
@@ -60,8 +62,7 @@ public:
 	//! Two-phase construction allows subclasses to customize setup
 	virtual void Initialize(optional_ptr<FileOpener> opener);
 	const HTTPReadConfig &GetReadConfig() const;
-	string GetVersionId() const;
-	void SetVersionId(string version_id);
+	const HTTPObjectVersion &GetObjectVersion() const;
 
 	//! Record a completed range request in the network throughput estimate
 	void RecordNetworkSample(double total_seconds, idx_t bytes, bool sample_has_ttfb, double ttfb_seconds)
@@ -77,6 +78,7 @@ public:
 protected:
 	virtual shared_ptr<const HTTPRequestSnapshot> CreateRequestSnapshot(const HTTPFSParams &params) const;
 	virtual HTTPReadConfig BuildReadConfig() const;
+	virtual HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const;
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
 	void InitializeLogger(FileOpener &opener);
@@ -126,7 +128,8 @@ private:
 	mutable annotated_mutex cursor_mutex;
 	idx_t file_offset DUCKDB_GUARDED_BY(cursor_mutex);
 
-	string version_id;
+	//! Captured metadata and finalized read state
+	HTTPObjectVersion object_version;
 	HTTPReadConfig read_config;
 	bool read_config_initialized = false;
 
