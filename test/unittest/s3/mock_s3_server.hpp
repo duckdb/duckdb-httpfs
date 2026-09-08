@@ -2,6 +2,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/pair.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
 namespace duckdb {
@@ -50,6 +51,8 @@ struct MockS3ObjectConfig {
 	string data = "abcdefghijklmnopqrstuvwxyz0123456789";
 	//! Historical GCS object bodies, selected by the generation query parameter
 	unordered_map<string, string> generations;
+	//! Initial live generation; empty uses the unversioned data above
+	string generation;
 };
 
 struct MockS3AuthConfig {
@@ -65,6 +68,7 @@ struct MockS3MetadataConfig {
 	string etag = "\"httpfs-refresh-test-etag\"";
 	//! ETag returned by GET; use etag when empty
 	string get_etag;
+	MockS3ETagBehavior get_etag_behavior = MockS3ETagBehavior::VALUE;
 	//! S3 version ID returned by selected metadata/data responses
 	string version_id;
 	bool version_on_head = false;
@@ -74,12 +78,14 @@ struct MockS3MetadataConfig {
 	//! Override the Content-Length reported by HEAD while keeping the GET body unchanged
 	optional_idx head_content_length;
 	//! Extra HEAD response headers, including repeated field lines
-	vector<std::pair<string, string>> response_headers;
+	vector<pair<string, string>> response_headers;
+	vector<pair<string, string>> get_response_headers;
+	bool enforce_generation_match = true;
 	//! Write empty response fields without optional whitespace after the colon
 	bool exact_empty_response_headers = false;
 	//! Emit one HTTP redirect before the successful HEAD response
 	bool redirect_head = false;
-	vector<std::pair<string, string>> redirect_response_headers;
+	vector<pair<string, string>> redirect_response_headers;
 };
 
 struct MockS3CompletionFaultConfig {
@@ -213,7 +219,7 @@ struct MockS3ServerConfig {
 };
 
 struct MockS3RequestObservation {
-	vector<std::pair<string, string>> headers;
+	vector<pair<string, string>> headers;
 	string method;
 	string path;
 	string target;
@@ -257,6 +263,7 @@ public:
 	string HTTPPath() const;
 	string S3Path() const;
 	const string &ObjectData() const;
+	void SetObjectGeneration(const string &generation);
 	string UploadedObject() const;
 	string CompletionBody() const;
 	vector<MockS3RequestObservation> Observations() const;

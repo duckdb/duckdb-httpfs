@@ -16,7 +16,7 @@
 
 namespace duckdb {
 
-enum class HTTPReadConditionType : uint8_t { NONE, ETAG };
+enum class HTTPReadConditionType : uint8_t { NONE, ETAG, GCS_GENERATION_MATCH };
 
 struct HTTPReadCondition {
 	HTTPReadConditionType type = HTTPReadConditionType::NONE;
@@ -55,7 +55,8 @@ class HTTPFileHandle : public FileHandle {
 	friend class S3FileSystem;
 
 public:
-	HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, unique_ptr<HTTPParams> params);
+	HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, unique_ptr<HTTPParams> params,
+	               HTTPObjectVersion object_version = {});
 	~HTTPFileHandle() override;
 
 public:
@@ -93,7 +94,8 @@ private:
 	                                         timestamp_t &response_time);
 	unique_ptr<HTTPResponse> RetryFileInfoWithRange(HTTPFileSystem &file_system, timestamp_t &request_time,
 	                                                timestamp_t &response_time);
-	void ApplyFileInfo(const HTTPResponse &response, timestamp_t request_time, timestamp_t response_time);
+	HTTPMetadataCacheEntry ReadFileInfo(const HTTPResponse &response, timestamp_t request_time,
+	                                    timestamp_t response_time);
 	void InitializeRequestState(optional_ptr<FileOpener> opener);
 	bool TryInitializeRead(HTTPFileSystem &file_system, optional_ptr<HTTPMetadataCache> cache,
 	                       bool &should_write_cache);
@@ -236,11 +238,15 @@ protected:
 	                                            const HTTPErrorCallback &get_error,
 	                                            const HTTPSendCallback &send_request);
 
+	//! Read consistency validation and stale metadata invalidation
+	virtual void ValidateResponseVersion(HTTPFileHandle &handle, const HTTPReadConfig &read_config,
+	                                     const HTTPResponse &response);
+	void EraseGlobalCacheEntry(const string &path) DUCKDB_EXCLUDES(global_cache_lock);
+
 private:
-	void ValidateResponseETag(HTTPFileHandle &handle, const HTTPReadConfig &read_config, const HTTPResponse &response);
+	void ValidateCachedFile(HTTPFileHandle &handle, const HTTPReadConfig &read_config, const CachedFileHandle &cached);
 	void ThrowIfReadConditionFailed(HTTPFileHandle &handle, const HTTPReadConfig &read_config,
 	                                const HTTPResponse &response);
-	void EraseGlobalCacheEntry(const string &path) DUCKDB_EXCLUDES(global_cache_lock);
 
 private:
 	//! Global metadata cache

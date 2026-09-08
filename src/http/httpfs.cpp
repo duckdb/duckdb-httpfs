@@ -230,10 +230,11 @@ static bool IsStrongETag(string etag) {
 }
 
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
-                               unique_ptr<HTTPParams> params_p)
+                               unique_ptr<HTTPParams> params_p, HTTPObjectVersion object_version_p)
     : FileHandle(fs, file.path, flags), request_session(make_shared_ptr<HTTPRequestSession>(
                                             make_shared_ptr<HTTPRequestSnapshot>(params_p->Cast<HTTPFSParams>()))),
-      flags(flags), length(0), last_modified(0), force_full_download(false), file_offset(0) {
+      flags(flags), length(0), last_modified(0), force_full_download(false), file_offset(0),
+      object_version(std::move(object_version_p)) {
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {
@@ -441,6 +442,7 @@ bool HTTPFileSystem::ReadAt(FileHandle &handle, data_ptr_t buffer, idx_t read_si
 	D_ASSERT(hfh.file_state);
 	auto cached_file = hfh.file_state->TryGetCachedFileHandle();
 	if (cached_file) {
+		ValidateCachedFile(hfh, read_config, *cached_file);
 		if (cached_file->GetSize() < read_end) {
 			throw IOException("Cached file length can't satisfy the requested Read. You can try to resolve this by "
 			                  "enabling `SET force_download=true`");
@@ -567,7 +569,7 @@ FileMetadata HTTPFileSystem::Stats(FileHandle &handle) {
 	metadata.last_modification_time = sfh.last_modified;
 	metadata.file_type = FileType::FILE_TYPE_REGULAR;
 	metadata.cache_valid_until = sfh.GetCacheValidUntil();
-	metadata.version_tag = sfh.etag;
+	metadata.version_tag = GetVersionTag(handle);
 	return metadata;
 }
 
@@ -680,6 +682,10 @@ unique_ptr<CachedFileHandle> HTTPFileSystem::FullDownload(HTTPFileHandle &hfh, c
 
 	while (true) {
 		if (auto cached_file = hfh.file_state->TryGetCachedFileHandle()) {
+			ValidateCachedFile(hfh, read_config, *cached_file);
+			if (!hfh.initialized) {
+				hfh.InitializeFromCacheEntry(cached_file->GetMetadata());
+			}
 			return cached_file;
 		}
 
@@ -687,14 +693,34 @@ unique_ptr<CachedFileHandle> HTTPFileSystem::FullDownload(HTTPFileHandle &hfh, c
 		if (!download) {
 			continue;
 		}
+		const auto request_time = Timestamp::GetCurrentTimestamp();
 		auto full_download_result = GetRequest(hfh, hfh.path, {}, read_config, *download);
 		ThrowIfReadConditionFailed(hfh, read_config, *full_download_result);
+		if (full_download_result->HasRequestError()) {
+			ErrorData(full_download_result->GetRequestError()).Throw();
+		}
 		if (full_download_result->status != HTTPStatusCode::OK_200) {
 			throw GetHTTPError(hfh, *full_download_result, RequestType::GET_REQUEST, hfh.path);
 		}
+		auto metadata = hfh.ReadFileInfo(*full_download_result, request_time, Timestamp::GetCurrentTimestamp());
+		// A successful conditional or version-selected GET also identifies bytes when a response header is absent.
+		if (!metadata.object_version.IsSet()) {
+			if (read_config.object_version.IsSet()) {
+				metadata.object_version = read_config.object_version;
+			} else if (read_config.condition.type == HTTPReadConditionType::GCS_GENERATION_MATCH) {
+				metadata.object_version =
+				    HTTPObjectVersion(HTTPObjectVersionType::GCS_GENERATION, read_config.condition.value);
+			}
+		}
+		if (metadata.etag.empty() && read_config.condition.type == HTTPReadConditionType::ETAG) {
+			metadata.etag = read_config.condition.value;
+		}
+		if (!hfh.initialized) {
+			hfh.InitializeFromCacheEntry(metadata);
+		}
 		// Publish unconditionally: this buffer is query-scoped and shared only among identical requests,
 		// so HTTP cache policy (no-store/Vary/freshness) does not restrict it.
-		return download->Finalize();
+		return download->Finalize(std::move(metadata));
 	}
 }
 
@@ -944,8 +970,9 @@ private:
 bool HTTPFileHandle::TryLoadFileInfoWithoutRequest() {
 	D_ASSERT(file_state);
 	if (auto cached_file = file_state->TryGetCachedFileHandle()) {
-		length = cached_file->GetSize();
-		initialized = true;
+		if (!initialized) {
+			InitializeFromCacheEntry(cached_file->GetMetadata());
+		}
 		return true;
 	}
 	if (initialized || force_full_download) {
@@ -999,23 +1026,29 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &
 	throw hfs.GetHTTPError(*this, *response, RequestType::GET_REQUEST, path);
 }
 
-void HTTPFileHandle::ApplyFileInfo(const HTTPResponse &response, timestamp_t request_time, timestamp_t response_time) {
-	length = 0;
+HTTPMetadataCacheEntry HTTPFileHandle::ReadFileInfo(const HTTPResponse &response, timestamp_t request_time,
+                                                    timestamp_t response_time) {
+	auto result = GetCacheEntry();
+	result.length = 0;
+	result.last_modified = timestamp_t(0);
+	result.etag.clear();
 	auto content_size = HTTPFileInfoParser::TryParseContentRange(response.headers);
 	if (!content_size.IsValid()) {
 		content_size = HTTPFileInfoParser::TryParseContentLength(response.headers);
 	}
 	if (content_size.IsValid()) {
-		length = content_size.GetIndex();
+		result.length = content_size.GetIndex();
 	}
 	if (response.headers.HasHeader("Last-Modified")) {
-		HTTPFileSystem::TryParseLastModifiedTime(response.headers.GetHeaderValue("Last-Modified"), last_modified);
+		HTTPFileSystem::TryParseLastModifiedTime(response.headers.GetHeaderValue("Last-Modified"),
+		                                         result.last_modified);
 	}
 	if (response.headers.HasHeader("ETag")) {
-		etag = response.headers.GetHeaderValue("ETag");
+		result.etag = response.headers.GetHeaderValue("ETag");
 	}
 	ApplyCachePolicy(response, request_time, response_time);
-	object_version = ReadObjectVersion(response.headers);
+	result.cache_valid_until = GetCacheValidUntil();
+	result.object_version = ReadObjectVersion(response.headers);
 	if (response.headers.HasHeader("Accept-Ranges")) {
 		auto accept_ranges = response.headers.GetHeaderValue("Accept-Ranges");
 		StringUtil::Trim(accept_ranges);
@@ -1023,7 +1056,7 @@ void HTTPFileHandle::ApplyFileInfo(const HTTPResponse &response, timestamp_t req
 			file_state->MarkRangeRequestsSupported();
 		}
 	}
-	initialized = true;
+	return result;
 }
 
 void HTTPFileHandle::LoadFileInfo() {
@@ -1035,7 +1068,7 @@ void HTTPFileHandle::LoadFileInfo() {
 	timestamp_t response_time;
 	auto response = RequestFileInfo(hfs, request_time, response_time);
 	if (response) {
-		ApplyFileInfo(*response, request_time, response_time);
+		InitializeFromCacheEntry(ReadFileInfo(*response, request_time, response_time));
 	}
 }
 
@@ -1062,6 +1095,7 @@ void HTTPFileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cach
 		                        : cache_entry.cache_valid_until;
 	}
 	object_version = cache_entry.object_version;
+	initialized = true;
 
 	// TODO: handle properties
 }

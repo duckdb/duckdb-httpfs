@@ -1,6 +1,7 @@
 #include "s3/s3_provider.hpp"
 
 #include "s3/s3_auth.hpp"
+#include "http/httpfs.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/http_util.hpp"
@@ -68,6 +69,17 @@ HTTPObjectVersion S3Provider::ParseObjectVersion(S3ProviderType provider, unorde
 }
 
 HTTPObjectVersion S3Provider::ReadObjectVersion(const HTTPHeaders &headers) const {
+	if (GetType() == S3ProviderType::GCS && headers.HasHeader("x-goog-generation")) {
+		HTTPObjectVersion result;
+		for (const auto &value : headers.GetHeaderValues("x-goog-generation")) {
+			auto version = ParseVersionValue(HTTPObjectVersionType::GCS_GENERATION, value);
+			if (result.IsSet() && result.GetValue() != version.GetValue()) {
+				throw IOException("Conflicting x-goog-generation response headers");
+			}
+			result = std::move(version);
+		}
+		return result;
+	}
 	if (!headers.HasHeader("x-amz-version-id")) {
 		return {};
 	}
@@ -87,6 +99,35 @@ const char *S3Provider::GetVersionQueryParameter(const HTTPObjectVersion &versio
 	default:
 		throw InternalException("Object version is not set");
 	}
+}
+
+HTTPObjectVersion S3Provider::ReadObjectVersion(const ExtendedOpenFileInfo &info) const {
+	unordered_map<string, string> versions;
+	for (auto type : {HTTPObjectVersionType::S3_VERSION_ID, HTTPObjectVersionType::GCS_GENERATION}) {
+		auto name = GetVersionParameterName(type);
+		auto entry = info.options.find(name);
+		if (entry != info.options.end()) {
+			versions.emplace(name, entry->second.ToString());
+		}
+	}
+	return ParseObjectVersion(GetType(), versions);
+}
+
+void S3Provider::ApplyReadCondition(const HTTPReadCondition &condition, HTTPHeaders &headers) const {
+	if (condition.type != HTTPReadConditionType::GCS_GENERATION_MATCH) {
+		return;
+	}
+	if (GetType() != S3ProviderType::GCS) {
+		throw InvalidInputException("GCS generation checks require a GCS provider");
+	}
+	headers["x-goog-if-generation-match"] = condition.value;
+}
+
+string S3Provider::GetVersionTag(const HTTPObjectVersion &version, const string &etag) const {
+	if (version.GetType() == HTTPObjectVersionType::GCS_GENERATION) {
+		return "gcs-generation:" + version.GetValue();
+	}
+	return etag;
 }
 
 bool S3MultipartUploadPolicy::operator==(const S3MultipartUploadPolicy &other) const {

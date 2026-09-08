@@ -121,7 +121,8 @@ struct HTTPFSOwnedS3Headers {
 public:
 	static bool Contains(const string &name, S3ProviderType provider_type) {
 		return Headers().find(name) != Headers().end() ||
-		       (provider_type == S3ProviderType::GCS && StringUtil::CIEquals(name, "x-goog-user-project"));
+		       (provider_type == S3ProviderType::GCS && (StringUtil::CIEquals(name, "x-goog-user-project") ||
+		                                                 StringUtil::CIEquals(name, "x-goog-if-generation-match")));
 	}
 
 	static string CanonicalName(const string &name, S3ProviderType provider_type) {
@@ -129,8 +130,8 @@ public:
 		if (entry != Headers().end()) {
 			return entry->second;
 		}
-		D_ASSERT(provider_type == S3ProviderType::GCS && StringUtil::CIEquals(name, "x-goog-user-project"));
-		return "x-goog-user-project";
+		D_ASSERT(Contains(name, provider_type));
+		return StringUtil::Lower(name);
 	}
 
 private:
@@ -371,7 +372,8 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
                                          S3RequestOperation operation, const S3RequestQuery &query,
                                          const S3AuthParams &auth_params, string date_now, string datetime_now,
                                          string payload_hash, string content_type, string content_md5,
-                                         const HTTPConfiguredHeaders &configured_headers) {
+                                         const HTTPConfiguredHeaders &configured_headers,
+                                         const HTTPReadCondition &read_condition) {
 	const auto &host = parsed_url.GetHost();
 	auto &operation_info = GetOperationInfo(operation);
 	const auto &encoded_path = operation_info.target == S3RequestTarget::BUCKET ? parsed_url.GetEncodedBucketPath()
@@ -380,6 +382,7 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	auto &credentials = auth_params.GetCredentials();
 	auto &request_options = auth_params.GetRequestOptions();
 	auto headers = CreateConfiguredS3Headers(configured_headers, provider.GetType());
+	provider.ApplyReadCondition(read_condition, headers);
 	if (provider.GetType() == S3ProviderType::GCS && !request_options.user_project.empty()) {
 		headers["x-goog-user-project"] = request_options.user_project;
 	}
@@ -548,9 +551,9 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	result.http_url = operation_info.target == S3RequestTarget::BUCKET
 	                      ? parsed_s3_url.GetBucketHTTPUrl(query.WireQuery())
 	                      : parsed_s3_url.GetHTTPUrl(query.WireQuery());
-	result.headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_s3_url, spec.operation, query,
-	                                              result.auth_params, "", "", spec.payload_hash, spec.content_type,
-	                                              spec.content_md5, session_request.configured_headers);
+	result.headers = S3RequestUtil::CreateHeaders(
+	    encryption_util, parsed_s3_url, spec.operation, query, result.auth_params, "", "", spec.payload_hash,
+	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition);
 	return result;
 }
 
@@ -953,6 +956,35 @@ S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestO
 	    });
 }
 
+void S3FileSystem::ValidateResponseVersion(HTTPFileHandle &handle, const HTTPReadConfig &read_config,
+                                           const HTTPResponse &response) {
+	optional_ptr<const string> expected;
+	if (read_config.object_version.GetType() == HTTPObjectVersionType::GCS_GENERATION) {
+		expected = &read_config.object_version.GetValue();
+	} else if (read_config.condition.type == HTTPReadConditionType::GCS_GENERATION_MATCH) {
+		expected = &read_config.condition.value;
+	}
+	if (!expected) {
+		HTTPFileSystem::ValidateResponseVersion(handle, read_config, response);
+		return;
+	}
+	HTTPObjectVersion actual;
+	try {
+		auto captured = handle.request_session->Capture();
+		actual =
+		    captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider().ReadObjectVersion(response.headers);
+	} catch (...) {
+		EraseGlobalCacheEntry(handle.path);
+		throw;
+	}
+	if (actual.IsSet() &&
+	    (actual.GetType() != HTTPObjectVersionType::GCS_GENERATION || actual.GetValue() != *expected)) {
+		EraseGlobalCacheEntry(handle.path);
+		throw HTTPException(response, "GCS generation on reading file \"%s\" was initially %s and now it returned %s",
+		                    handle.path, *expected, actual.GetValue());
+	}
+}
+
 unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	return S3RequestExecutor::RunHandle(
@@ -972,21 +1004,22 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const str
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                   const HTTPReadConfig &read_config, CachedFileDownload &download) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	return S3RequestExecutor::RunHandle(
-	           GetEncryptionUtil(), s3_handle,
-	           S3RequestSpec {s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version},
-	           [&](S3RequestData &request_data) {
-		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		           return RunGetRequest(
-		               s3_handle, request_data.http_url, request_data.headers, params, read_config, download,
-		               [&](const HTTPResponse &response) {
-			               return S3RequestUtil::GetRequestError(request_data, response);
-		               },
-		               [&](BaseRequest &request) {
-			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data.captured, params,
-			                                                           request);
-		               });
-	           })
+	const S3RequestSpec spec {
+	    s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version, read_config.condition};
+	return S3RequestExecutor::RunHandle(GetEncryptionUtil(), s3_handle, spec,
+	                                    [&](S3RequestData &request_data) {
+		                                    auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		                                    return RunGetRequest(
+		                                        s3_handle, request_data.http_url, request_data.headers, params,
+		                                        read_config, download,
+		                                        [&](const HTTPResponse &response) {
+			                                        return S3RequestUtil::GetRequestError(request_data, response);
+		                                        },
+		                                        [&](BaseRequest &request) {
+			                                        return S3RequestExecutor::SendHandleRequest(
+			                                            s3_handle, request_data.captured, params, request);
+		                                        });
+	                                    })
 	    .response;
 }
 
@@ -994,22 +1027,22 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
                                                        const HTTPReadConfig &read_config, idx_t file_offset,
                                                        data_ptr_t buffer_out, idx_t buffer_out_len) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	return S3RequestExecutor::RunHandle(
-	           GetEncryptionUtil(), s3_handle,
-	           S3RequestSpec {s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version},
-	           [&](S3RequestData &request_data) {
-		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		           return RunGetRangeRequest(
-		               s3_handle, request_data.http_url, request_data.headers, params, read_config, file_offset,
-		               buffer_out, buffer_out_len,
-		               [&](const HTTPResponse &response) {
-			               return S3RequestUtil::GetRequestError(request_data, response);
-		               },
-		               [&](BaseRequest &request) {
-			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data.captured, params,
-			                                                           request);
-		               });
-	           })
+	const S3RequestSpec spec {
+	    s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version, read_config.condition};
+	return S3RequestExecutor::RunHandle(GetEncryptionUtil(), s3_handle, spec,
+	                                    [&](S3RequestData &request_data) {
+		                                    auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		                                    return RunGetRangeRequest(
+		                                        s3_handle, request_data.http_url, request_data.headers, params,
+		                                        read_config, file_offset, buffer_out, buffer_out_len,
+		                                        [&](const HTTPResponse &response) {
+			                                        return S3RequestUtil::GetRequestError(request_data, response);
+		                                        },
+		                                        [&](BaseRequest &request) {
+			                                        return S3RequestExecutor::SendHandleRequest(
+			                                            s3_handle, request_data.captured, params, request);
+		                                        });
+	                                    })
 	    .response;
 }
 

@@ -119,6 +119,7 @@ struct S3RequestSpec {
 	string content_type;
 	string content_md5;
 	HTTPObjectVersion object_version;
+	HTTPReadCondition read_condition;
 };
 
 struct S3RequestData {
@@ -137,7 +138,8 @@ struct S3RequestUtil {
 	                                 S3RequestOperation operation, const S3RequestQuery &query,
 	                                 const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
 	                                 string payload_hash = "", string content_type = "", string content_md5 = "",
-	                                 const HTTPConfiguredHeaders &configured_headers = {});
+	                                 const HTTPConfiguredHeaders &configured_headers = {},
+	                                 const HTTPReadCondition &read_condition = {});
 	static string GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len);
 	static bool IsRequestTimeout(const HTTPResponse &response);
 	static bool IsRetryableReceivedResponse(const HTTPResponse &response);
