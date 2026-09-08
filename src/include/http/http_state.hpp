@@ -1,5 +1,7 @@
 #pragma once
 
+#include "http/http_metadata_cache.hpp"
+
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -128,17 +130,18 @@ private:
 	bool downloading DUCKDB_GUARDED_BY(lock) = false;
 };
 
-//! Immutable data published after a full download completes
+//! Immutable bytes and metadata published after a full download completes
 class CachedFileData {
 	friend class CachedFileHandle;
 
 public:
-	CachedFileData(AllocatedData data_p, idx_t size_p) : data(std::move(data_p)), size(size_p) {
+	CachedFileData(AllocatedData data_p, HTTPMetadataCacheEntry metadata_p)
+	    : data(std::move(data_p)), metadata(std::move(metadata_p)) {
 	}
 
 private:
 	AllocatedData data;
-	idx_t size;
+	HTTPMetadataCacheEntry metadata;
 };
 
 //! Handle to a CachedFile
@@ -150,6 +153,7 @@ public:
 	const char *GetData() const;
 	//! Return the size of the initialized file
 	idx_t GetSize() const;
+	const HTTPMetadataCacheEntry &GetMetadata() const;
 
 private:
 	shared_ptr<CachedFileData> file;
@@ -173,7 +177,7 @@ public:
 	//! Reset bytes written by a prior request attempt
 	void Reset();
 	//! Indicate the file is fully downloaded and safe for parallel reading
-	unique_ptr<CachedFileHandle> Finalize();
+	unique_ptr<CachedFileHandle> Finalize(HTTPMetadataCacheEntry metadata);
 
 private:
 	void ReserveInternal(idx_t capacity);

@@ -1745,6 +1745,43 @@ TEST_CASE("GCS generation URL validation and signing", "[httpfs][s3][gcs-generat
 	}
 }
 
+TEST_CASE("GCS generation conditions are owned and signed before dispatch", "[httpfs][s3][gcs-generation]") {
+	auto config = TestAuthConfig(S3ProviderType::GCS);
+	config.credentials.access_key_id = "key";
+	config.credentials.secret_access_key = "secret";
+	auto auth = ResolveTestAuth(config);
+	const string path = "gcs://bucket/key";
+	auto parsed = S3Url::Parse(path, auth);
+	HTTPFSUtil http_util;
+	HTTPFSParams params(http_util);
+	auto snapshot = make_shared_ptr<S3RequestSnapshot>(params, auth, path, weak_ptr<ClientContext>(), false);
+	HTTPRequestSession session(snapshot);
+	::AESStateSSLFactory encryption_util;
+	S3RequestSpec spec {path, S3RequestOperation::GET_OBJECT, {}, "", "", ""};
+	spec.read_condition = {HTTPReadConditionType::GCS_GENERATION_MATCH, "123"};
+	S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request) {
+		auto timestamp = request.headers.GetHeaderValue("x-amz-date");
+		auto expected =
+		    S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(), auth,
+		                                 timestamp.substr(0, 8), timestamp, "", "", "", {}, spec.read_condition);
+		auto unconditional = S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(),
+		                                                  auth, timestamp.substr(0, 8), timestamp);
+		REQUIRE(request.http_url == parsed.GetHTTPUrl());
+		REQUIRE(request.headers.GetHeaderValue("x-goog-if-generation-match") == "123");
+		REQUIRE(request.headers.GetHeaderValue("Authorization") == expected.GetHeaderValue("Authorization"));
+		REQUIRE(request.headers.GetHeaderValue("Authorization") != unconditional.GetHeaderValue("Authorization"));
+		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+	});
+	HTTPConfiguredHeaders overrides {"", {{"X-GoOg-If-GeNeRaTiOn-MaTcH", "456"}}};
+	REQUIRE_THROWS(S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(), auth, "", "",
+	                                            "", "", "", overrides));
+	for (auto type : {S3ProviderType::S3, S3ProviderType::R2}) {
+		auto other = ResolveTestAuth(TestAuthConfig(type));
+		HTTPHeaders headers;
+		REQUIRE_THROWS(other.GetProvider().ApplyReadCondition(spec.read_condition, headers));
+	}
+}
+
 TEST_CASE("S3 provider version policy preserves version semantics", "[httpfs][s3][gcs-generation]") {
 	for (auto type : {S3ProviderType::S3, S3ProviderType::GCS, S3ProviderType::R2}) {
 		auto provider = ResolveTestAuth(TestAuthConfig(type)).GetProvider();

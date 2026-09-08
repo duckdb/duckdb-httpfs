@@ -33,7 +33,9 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
                            unique_ptr<HTTPParams> http_params_p, const S3AuthParams &auth_params_p,
                            const S3UploadConfig &upload_config,
                            optional<S3MultipartUploadPolicy> multipart_upload_policy)
-    : HTTPFileHandle(fs, file, flags, std::move(http_params_p)),
+    : HTTPFileHandle(fs, file, flags, std::move(http_params_p),
+                     file.extended_info ? auth_params_p.GetProvider().ReadObjectVersion(*file.extended_info)
+                                        : HTTPObjectVersion()),
       requested_version(S3Url::Parse(file.path, auth_params_p).GetObjectVersion()) {
 	if (flags.OpenForWriting() && requested_version.IsSet()) {
 		throw NotImplementedException("%s is only supported for reading",
@@ -65,21 +67,39 @@ HTTPReadConfig S3FileHandle::BuildReadConfig() const {
 	auto result = HTTPFileHandle::BuildReadConfig();
 	if (requested_version.IsSet()) {
 		result.object_version = requested_version;
+	} else if (GetObjectVersion().GetType() == HTTPObjectVersionType::GCS_GENERATION) {
+		if (result.validate_etag) {
+			result.condition.type = HTTPReadConditionType::GCS_GENERATION_MATCH;
+			result.condition.value = GetObjectVersion().GetValue();
+			result.validate_etag = false;
+		}
 	} else if (request_session->Capture().snapshot->Params().s3_version_id_pinning) {
 		result.object_version = GetObjectVersion();
 	}
 	if (result.object_version.IsSet()) {
 		result.condition = {};
+		if (result.object_version.GetType() == HTTPObjectVersionType::GCS_GENERATION) {
+			result.validate_etag = false;
+		}
 	}
 	return result;
 }
 
 HTTPObjectVersion S3FileHandle::ReadObjectVersion(const HTTPHeaders &headers) const {
 	auto captured = request_session->Capture();
-	if (!captured.snapshot->Params().s3_version_id_pinning) {
+	auto version = captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider().ReadObjectVersion(headers);
+	if (version.GetType() == HTTPObjectVersionType::S3_VERSION_ID &&
+	    !captured.snapshot->Params().s3_version_id_pinning) {
 		return {};
 	}
-	return captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider().ReadObjectVersion(headers);
+	return version;
+}
+
+string S3FileSystem::GetVersionTag(FileHandle &handle) {
+	auto &s3_handle = handle.Cast<S3FileHandle>();
+	auto captured = s3_handle.request_session->Capture();
+	return captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider().GetVersionTag(
+	    s3_handle.GetObjectVersion(), s3_handle.etag);
 }
 
 shared_ptr<const HTTPRequestSnapshot> S3FileHandle::CreateRequestSnapshot(const HTTPFSParams &params) const {

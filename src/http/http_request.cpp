@@ -98,14 +98,14 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRequest(HTTPFileHandle &hfh, cons
 	    url, request_headers, http_params,
 	    [&](const HTTPResponse &response) {
 		    if (response.status == HTTPStatusCode::PreconditionFailed_412 &&
-		        read_config.condition.type == HTTPReadConditionType::ETAG) {
+		        read_config.condition.type != HTTPReadConditionType::NONE) {
 			    return false;
 		    }
 		    if (static_cast<int>(response.status) >= 400) {
 			    throw get_error(response);
 		    }
 		    if (static_cast<int>(response.status) < 300) {
-			    ValidateResponseETag(hfh, read_config, response);
+			    ValidateResponseVersion(hfh, read_config, response);
 			    hfh.ApplyCachePolicy(response, request_time, Timestamp::GetCurrentTimestamp());
 		    }
 		    download.Reset();
@@ -155,7 +155,7 @@ public:
 public:
 	bool HandleResponse(const HTTPResponse &response) {
 		if (response.status == HTTPStatusCode::PreconditionFailed_412 &&
-		    read_config.condition.type == HTTPReadConditionType::ETAG) {
+		    read_config.condition.type != HTTPReadConditionType::NONE) {
 			return false;
 		}
 		if (static_cast<int>(response.status) >= 400) {
@@ -281,7 +281,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
 	const auto request_time = Timestamp::GetCurrentTimestamp();
 	HTTPRangeRequestContext context(hfh, read_config, url, range_expr, buffer_out, buffer_out_len,
 	                                std::move(range_request), get_error, [&](const HTTPResponse &response) {
-		                                ValidateResponseETag(hfh, read_config, response);
+		                                ValidateResponseVersion(hfh, read_config, response);
 		                                hfh.ApplyCachePolicy(response, request_time, Timestamp::GetCurrentTimestamp());
 	                                });
 	GetRequestInfo get_request(
@@ -346,8 +346,8 @@ HTTPException HTTPFileSystem::GetHTTPError(FileHandle &, const HTTPResponse &res
 	return HTTPFSUtil::GetHTTPStatusError(response, request_type, "on", url, details);
 }
 
-void HTTPFileSystem::ValidateResponseETag(HTTPFileHandle &hfh, const HTTPReadConfig &read_config,
-                                          const HTTPResponse &response) {
+void HTTPFileSystem::ValidateResponseVersion(HTTPFileHandle &hfh, const HTTPReadConfig &read_config,
+                                             const HTTPResponse &response) {
 	if (!read_config.validate_etag || read_config.etag.empty() || !response.HasHeader("ETag")) {
 		return;
 	}
@@ -365,14 +365,37 @@ void HTTPFileSystem::ValidateResponseETag(HTTPFileHandle &hfh, const HTTPReadCon
 	    hfh.path, read_config.etag, response_etag);
 }
 
+void HTTPFileSystem::ValidateCachedFile(HTTPFileHandle &hfh, const HTTPReadConfig &read_config,
+                                        const CachedFileHandle &cached) {
+	const auto &metadata = cached.GetMetadata();
+	const auto &actual = metadata.object_version;
+	const auto &selected = read_config.object_version;
+	bool version_matches = true;
+	if (selected.GetType() == HTTPObjectVersionType::GCS_GENERATION && actual.IsSet()) {
+		version_matches = actual.GetType() == selected.GetType() && selected.GetValue() == actual.GetValue();
+	} else if (read_config.condition.type == HTTPReadConditionType::GCS_GENERATION_MATCH) {
+		version_matches = actual.GetType() == HTTPObjectVersionType::GCS_GENERATION &&
+		                  actual.GetValue() == read_config.condition.value;
+	}
+	const auto etag_matches = !read_config.validate_etag || read_config.etag.empty() || metadata.etag.empty() ||
+	                          metadata.etag == read_config.etag ||
+	                          StripETagQuotes(metadata.etag) == StripETagQuotes(read_config.etag);
+	if (!version_matches || !etag_matches) {
+		EraseGlobalCacheEntry(hfh.path);
+		throw HTTPException(Exception::ConstructMessage(
+		    "Cached contents of file \"%s\" do not match the version captured when it was opened", hfh.path));
+	}
+}
+
 void HTTPFileSystem::ThrowIfReadConditionFailed(HTTPFileHandle &hfh, const HTTPReadConfig &read_config,
                                                 const HTTPResponse &response) {
 	if (response.status != HTTPStatusCode::PreconditionFailed_412 ||
-	    read_config.condition.type != HTTPReadConditionType::ETAG) {
+	    read_config.condition.type == HTTPReadConditionType::NONE) {
 		return;
 	}
 	EraseGlobalCacheEntry(hfh.path);
-	throw HTTPException(response, "ETag on reading file \"%s\" changed after it was opened: the server rejected %s",
+	auto kind = read_config.condition.type == HTTPReadConditionType::ETAG ? "ETag" : "Object version";
+	throw HTTPException(response, "%s on reading file \"%s\" changed after it was opened: the server rejected %s", kind,
 	                    hfh.path, read_config.condition.value);
 }
 

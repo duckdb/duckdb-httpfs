@@ -336,7 +336,8 @@ public:
 	}
 
 	explicit Impl(MockS3ServerConfig config_p)
-	    : config(std::move(config_p)), server_owner(CreateServer(config.use_ssl)), server(*server_owner) {
+	    : config(std::move(config_p)), live_generation(config.object.generation),
+	      server_owner(CreateServer(config.use_ssl)), server(*server_owner) {
 		uploaded_object = config.upload.initial_published_object;
 		remaining_put_failures = config.failures.transient_put_failures;
 		remaining_get_failures = config.failures.transient_get_failures;
@@ -545,15 +546,26 @@ public:
 		observations.push_back(std::move(observation));
 	}
 
-	optional_ptr<const string> GetObjectData(const httplib::Request &request) const {
-		if (!request.has_param("generation")) {
+	string GetGeneration(const httplib::Request &request) const {
+		if (request.has_param("generation")) {
+			return GetParameter(request, "generation");
+		}
+		annotated_lock_guard<annotated_mutex> guard(generation_lock);
+		return live_generation;
+	}
+
+	optional_ptr<const string> GetObjectData(const string &generation) const {
+		if (generation.empty()) {
 			return config.object.data;
 		}
-		auto entry = config.object.generations.find(GetParameter(request, "generation"));
+		auto entry = config.object.generations.find(generation);
 		return entry == config.object.generations.end() ? nullptr : &entry->second;
 	}
 
-	void SetObjectHeaders(httplib::Response &response, const string &data) const {
+	void SetObjectHeaders(httplib::Response &response, const string &data, const string &generation) const {
+		if (!generation.empty()) {
+			response.set_header("x-goog-generation", generation);
+		}
 		if (config.range.advertise) {
 			response.set_header("Accept-Ranges", "bytes");
 		} else {
@@ -576,8 +588,14 @@ public:
 		return config.metadata.get_etag.empty() ? config.metadata.etag : config.metadata.get_etag;
 	}
 
-	void SetGetHeaders(httplib::Response &response) const {
-		response.set_header("ETag", GetResponseETag());
+	void SetGetHeaders(httplib::Response &response, const string &generation) const {
+		if (!generation.empty()) {
+			response.set_header("x-goog-generation", generation);
+		}
+		for (auto &header : config.metadata.get_response_headers) {
+			response.set_header(header.first, header.second);
+		}
+		SetETagHeader(response, config.metadata.get_etag_behavior, GetResponseETag());
 		if (config.metadata.version_on_get && !config.metadata.version_id.empty()) {
 			response.set_header("x-amz-version-id", config.metadata.version_id);
 		}
@@ -1051,20 +1069,22 @@ public:
 				SendS3Error400(request, response, config.failures.failure_is_request_timeout);
 				return httplib::Server::HandlerResponse::Handled;
 			}
-			auto data = GetObjectData(request);
+			auto generation = GetGeneration(request);
+			auto data = GetObjectData(generation);
 			if (!data) {
 				response.status = 404;
 				Record(request, response.status);
 				return httplib::Server::HandlerResponse::Handled;
 			}
 			response.status = 200;
-			SetObjectHeaders(response, *data);
+			SetObjectHeaders(response, *data, generation);
 			Record(request, response.status);
 			return httplib::Server::HandlerResponse::Handled;
 		});
 
 		server.Get(path, [this](const httplib::Request &request, httplib::Response &response) {
-			auto object_data = GetObjectData(request);
+			auto generation = GetGeneration(request);
+			auto object_data = GetObjectData(generation);
 			if (!object_data) {
 				response.status = 404;
 				Record(request, response.status);
@@ -1086,10 +1106,17 @@ public:
 				return;
 			}
 
+			if (config.metadata.enforce_generation_match && request.has_header("x-goog-if-generation-match") &&
+			    GetHeader(request, "x-goog-if-generation-match") != generation) {
+				response.status = 412;
+				Record(request, response.status);
+				return;
+			}
+
 			auto range = GetHeader(request, "Range");
 			if (range.empty()) {
 				response.status = 200;
-				SetGetHeaders(response);
+				SetGetHeaders(response, generation);
 				if (config.full_get.block_until_released) {
 					response.set_content_provider(
 					    data.size(), "application/octet-stream",
@@ -1134,7 +1161,7 @@ public:
 			}
 			if (config.range.behavior == MockS3RangeBehavior::IGNORE_RANGE) {
 				response.status = 200;
-				SetGetHeaders(response);
+				SetGetHeaders(response, generation);
 				response.set_content(data, "application/octet-stream");
 				Record(request, response.status);
 				return;
@@ -1156,7 +1183,7 @@ public:
 			range_request_started.notify_all();
 			response.status = 206;
 			response.set_header("Accept-Ranges", "bytes");
-			SetGetHeaders(response);
+			SetGetHeaders(response, generation);
 			if (!config.range.blocked.empty() && range == config.range.blocked) {
 				response.set_content_provider(data.size(), "application/octet-stream",
 				                              [this, &data](size_t offset, size_t length, httplib::DataSink &sink) {
@@ -1318,6 +1345,8 @@ public:
 public:
 	//! Server configuration and lifetime
 	MockS3ServerConfig config;
+	mutable annotated_mutex generation_lock;
+	string live_generation DUCKDB_GUARDED_BY(generation_lock);
 	unique_ptr<httplib::Server> server_owner;
 	httplib::Server &server;
 	std::thread server_thread;
@@ -1398,6 +1427,12 @@ string MockS3Server::HTTPPath() const {
 
 const string &MockS3Server::ObjectData() const {
 	return impl->config.object.data;
+}
+
+void MockS3Server::SetObjectGeneration(const string &generation) {
+	D_ASSERT(impl->config.object.generations.count(generation));
+	annotated_lock_guard<annotated_mutex> guard(impl->generation_lock);
+	impl->live_generation = generation;
 }
 
 string MockS3Server::UploadedObject() const {

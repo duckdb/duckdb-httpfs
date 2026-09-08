@@ -43,7 +43,11 @@ const char *CachedFileHandle::GetData() const {
 }
 
 idx_t CachedFileHandle::GetSize() const {
-	return file->size;
+	return file->metadata.length;
+}
+
+const HTTPMetadataCacheEntry &CachedFileHandle::GetMetadata() const {
+	return file->metadata;
 }
 
 CachedFileDownload::CachedFileDownload(shared_ptr<CachedFile> file_p, Allocator &allocator_p)
@@ -99,11 +103,12 @@ void CachedFileDownload::Reset() {
 	size = 0;
 }
 
-unique_ptr<CachedFileHandle> CachedFileDownload::Finalize() {
+unique_ptr<CachedFileHandle> CachedFileDownload::Finalize(HTTPMetadataCacheEntry metadata) {
+	metadata.length = size;
+	auto cached_data = make_shared_ptr<CachedFileData>(std::move(data), std::move(metadata));
 	annotated_lock_guard<annotated_mutex> guard(file->lock);
 	D_ASSERT(file->downloading);
 	D_ASSERT(!file->cached_data);
-	auto cached_data = make_shared_ptr<CachedFileData>(std::move(data), size);
 	file->cached_data = cached_data;
 	file->downloading = false;
 	active = false;

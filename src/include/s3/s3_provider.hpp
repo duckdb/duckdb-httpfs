@@ -18,6 +18,8 @@ struct CreateSecretInput;
 class S3AuthParams;
 class S3KeyValueReader;
 struct HTTPHeaders;
+struct ExtendedOpenFileInfo;
+struct HTTPReadCondition;
 
 enum class S3ProviderType : uint8_t { S3, GCS, R2 };
 
@@ -106,6 +108,9 @@ public:
 	static const char *GetVersionParameterName(HTTPObjectVersionType type);
 	const char *GetVersionQueryParameter(const HTTPObjectVersion &version) const;
 	HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const;
+	HTTPObjectVersion ReadObjectVersion(const ExtendedOpenFileInfo &info) const;
+	void ApplyReadCondition(const HTTPReadCondition &condition, HTTPHeaders &headers) const;
+	string GetVersionTag(const HTTPObjectVersion &version, const string &etag) const;
 
 	bool operator==(const S3Provider &other) const;
 

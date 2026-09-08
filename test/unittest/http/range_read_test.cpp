@@ -236,6 +236,74 @@ TEST_CASE("HTTP full-download fallback is single-flight", "[httpfs][full-downloa
 	}
 }
 
+TEST_CASE("HTTP cached downloads retain an existing handle's ETag condition", "[httpfs][full-download][etag]") {
+	for (const string client : {"curl", "httplib"}) {
+		MockS3ServerConfig config;
+		config.metadata.response_headers = {{"Cache-Control", "no-store"}};
+		MockS3Server server(std::move(config));
+		DuckDB db(nullptr);
+		Connection con(db);
+		HTTPTestHelper::Configure(db, con, 0, client);
+		HTTPTestHelper::RequireQueryOk(con, "BEGIN");
+		auto &fs = FileSystem::GetFileSystem(*con.context);
+		const auto flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO;
+		auto new_handle = fs.OpenFile(server.HTTPPath(), flags);
+		OpenFileInfo info(server.HTTPPath());
+		info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+		info.extended_info->options["last_modified"] = Value::TIMESTAMP(timestamp_t(0));
+		info.extended_info->options["file_size"] = Value::UBIGINT(server.ObjectData().size());
+		info.extended_info->options["etag"] = "\"older-etag\"";
+		auto old_handle = fs.OpenFile(info, flags);
+		auto &new_http = new_handle->Cast<HTTPFileHandle>();
+		bool write_cache = false;
+		new_handle->file_system.Cast<HTTPFileSystem>().FullDownload(new_http, new_http.GetReadConfig(), write_cache);
+		string data(5, '?');
+		REQUIRE_THROWS_WITH(old_handle->Read(QueryContext(*con.context), &data[0], data.size(), 0),
+		                    Catch::Contains("do not match the version"));
+		REQUIRE(data == "?????");
+		REQUIRE(old_handle->Cast<HTTPFileHandle>().etag == "\"older-etag\"");
+		new_handle->Read(QueryContext(*con.context), &data[0], data.size(), 0);
+		REQUIRE(data == server.ObjectData().substr(0, data.size()));
+		HTTPTestHelper::RequireQueryOk(con, "COMMIT");
+	}
+}
+
+TEST_CASE("HTTP cached downloads accept absent GET ETags", "[httpfs][full-download][etag]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (const auto behavior : {MockS3ETagBehavior::OMIT, MockS3ETagBehavior::EMPTY}) {
+			CAPTURE(client, behavior);
+			MockS3ServerConfig config;
+			config.object.data = "old bytes";
+			config.metadata.etag = "W/\"same\"";
+			config.metadata.get_etag_behavior = behavior;
+			MockS3Server server(std::move(config));
+			DuckDB db(nullptr);
+			Connection con(db);
+			HTTPTestHelper::Configure(db, con, 0, client);
+			HTTPTestHelper::RequireQueryOk(con, "SET force_download_threshold=1024");
+			HTTPTestHelper::RequireQueryOk(con, "BEGIN");
+			auto &fs = FileSystem::GetFileSystem(*con.context);
+			auto handle = fs.OpenFile(server.HTTPPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+			auto &hfh = handle->Cast<HTTPFileHandle>();
+			REQUIRE(hfh.etag == "W/\"same\"");
+			REQUIRE(hfh.GetReadConfig().condition.type == HTTPReadConditionType::NONE);
+			auto outcome = HTTPTestHelper::TryReadHandle(con, *handle, 0, server.ObjectData().size());
+			INFO(outcome.error);
+			REQUIRE_FALSE(outcome.failed);
+			REQUIRE(outcome.data == server.ObjectData());
+			bool write_cache = false;
+			auto cached =
+			    handle->file_system.Cast<HTTPFileSystem>().FullDownload(hfh, hfh.GetReadConfig(), write_cache);
+			REQUIRE(cached->GetMetadata().etag.empty());
+			REQUIRE(hfh.etag == "W/\"same\"");
+			auto observations = server.Observations();
+			REQUIRE(HTTPTestHelper::CountRequests(observations, "HEAD", 200) == 1);
+			REQUIRE(HTTPTestHelper::CountRequests(observations, "GET", 200) == 1);
+			HTTPTestHelper::RequireQueryOk(con, "COMMIT");
+		}
+	}
+}
+
 TEST_CASE("HTTP full-download fallback rejects HEAD and GET length mismatches", "[httpfs][full-download][issue-354]") {
 	MockS3ServerConfig config;
 	config.object.data = "AB";

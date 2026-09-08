@@ -100,6 +100,7 @@ public:
 public:
 	//! FileSystem overrides.
 	string GetName() const override;
+	string GetVersionTag(FileHandle &handle) override;
 	bool CanHandleFile(const string &fpath) override;
 	bool OnDiskFile(FileHandle &handle) override;
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
@@ -137,7 +138,9 @@ public:
 	BufferManager &GetBufferManager();
 
 protected:
-	//! FileSystem extension points for S3 open/list/glob.
+	//! FileSystem extension points for S3 reads, open/list/glob.
+	void ValidateResponseVersion(HTTPFileHandle &handle, const HTTPReadConfig &read_config,
+	                             const HTTPResponse &response) override;
 	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
 	                       optional_ptr<FileOpener> opener) override;
 	bool SupportsListFilesExtended() const override;
