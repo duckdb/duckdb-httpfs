@@ -20,7 +20,7 @@ struct HTTPMetadataCacheEntry {
 	idx_t length;
 	timestamp_t last_modified;
 	string etag;
-	//! Freshness deadline (inclusive); unset means the server provides no freshness information.
+	//! Freshness deadline (exclusive); unset means the server provides no freshness information.
 	optional<timestamp_t> cache_valid_until;
 	string version_id;
 	unordered_map<string, string> properties;
@@ -56,7 +56,7 @@ public:
 			return false;
 		}
 		if (!OverridesResponseCachePolicy() && lookup->second.cache_valid_until &&
-		    Timestamp::GetCurrentTimestamp() > *lookup->second.cache_valid_until) {
+		    Timestamp::GetCurrentTimestamp() >= *lookup->second.cache_valid_until) {
 			map.erase(lookup);
 			return false;
 		}

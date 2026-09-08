@@ -903,7 +903,7 @@ optional<timestamp_t> HTTPFileHandle::GetCacheValidUntil() const {
 
 bool HTTPFileHandle::CanReuseCachedData() const {
 	annotated_lock_guard<annotated_mutex> guard(cache_policy_lock);
-	return !cache_valid_until || Timestamp::GetCurrentTimestamp() <= *cache_valid_until;
+	return !cache_valid_until || Timestamp::GetCurrentTimestamp() < *cache_valid_until;
 }
 
 struct HTTPFileInfoParser {
