@@ -880,9 +880,13 @@ void HTTPFileHandle::ApplyCachePolicy(const HTTPResponse &response, timestamp_t 
 		return;
 	}
 	auto response_valid_until = HTTPFileSystem::ComputeCacheValidUntil(response.headers, request_time, response_time);
-	// TODO(hjiang): Prevent shared reuse of private responses and authenticated requests without explicit permission.
+	// TODO(hjiang): Prevent shared reuse of authenticated requests without explicit permission.
 	if (HasCacheControlDirective(response.headers, "no-store")) {
 		// no-store applies to this response, so only blocks populated by this read are retired.
+		response_valid_until = timestamp_t::ninfinity();
+	}
+	if (HasCacheControlDirective(response.headers, "private")) {
+		// Private responses cannot be stored in caches shared across connections.
 		response_valid_until = timestamp_t::ninfinity();
 	}
 	if (VaryProhibitsReuse(response.headers, request_snapshot->Params().extra_headers)) {
@@ -903,7 +907,7 @@ optional<timestamp_t> HTTPFileHandle::GetCacheValidUntil() const {
 
 bool HTTPFileHandle::CanReuseCachedData() const {
 	annotated_lock_guard<annotated_mutex> guard(cache_policy_lock);
-	return !cache_valid_until || Timestamp::GetCurrentTimestamp() <= *cache_valid_until;
+	return !cache_valid_until || Timestamp::GetCurrentTimestamp() < *cache_valid_until;
 }
 
 struct HTTPFileInfoParser {

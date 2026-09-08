@@ -99,7 +99,7 @@ private:
 	                        bool should_write_cache);
 
 	mutable annotated_mutex cache_policy_lock;
-	//! Freshness deadline (inclusive) derived from HTTP caching headers (Cache-Control/Expires).
+	//! Freshness deadline (exclusive) derived from HTTP caching headers (Cache-Control/Expires).
 	//! Unset means no freshness information; positive/negative infinity mean always valid/invalid.
 	//! Used to bound how long cached file data may be served.
 	optional<timestamp_t> cache_valid_until DUCKDB_GUARDED_BY(cache_policy_lock);
@@ -141,7 +141,7 @@ private:
 class HTTPFileSystem : public FileSystem {
 public:
 	static bool TryParseLastModifiedTime(const string &timestamp, timestamp_t &result);
-	//! Compute the freshness deadline (inclusive) from HTTP caching headers (RFC 9111): Cache-Control max-age,
+	//! Compute the freshness deadline (exclusive) from HTTP caching headers (RFC 9111): Cache-Control max-age,
 	//! falling back to Expires relative to Date (or receipt time when Date is absent), adjusted by the response's age.
 	//! Unset if no freshness lifetime is provided.
 	static optional<timestamp_t> ComputeCacheValidUntil(const HTTPHeaders &headers, timestamp_t request_time,
