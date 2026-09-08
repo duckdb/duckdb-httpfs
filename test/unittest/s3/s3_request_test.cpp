@@ -1526,11 +1526,13 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		const string path = "s3://bucket/key?s3_version_id=abc%2F123%2B%3D%26%3F";
 		auto auth_params = ResolveTestAuth(TestAuthConfig(), path);
 		auto parsed_url = S3Url::Parse(path, auth_params);
-		REQUIRE(parsed_url.GetVersionId() == "abc/123+=&?");
+		REQUIRE(parsed_url.GetObjectVersion().GetType() == HTTPObjectVersionType::S3_VERSION_ID);
+		REQUIRE(parsed_url.GetObjectVersion().GetValue() == "abc/123+=&?");
 		REQUIRE(parsed_url.GetKey() == "key");
 		REQUIRE(S3Url::GetDisplayUrl(path, auth_params) == "s3://bucket/key");
 		REQUIRE(auth_params == ResolveTestAuth(TestAuthConfig(), "s3://bucket/key"));
-		REQUIRE(S3Url::Parse("s3://bucket/key?s3_version_id=null", auth_params).GetVersionId() == "null");
+		REQUIRE(S3Url::Parse("s3://bucket/key?s3_version_id=null", auth_params).GetObjectVersion().GetValue() ==
+		        "null");
 	}
 
 	SECTION("empty and duplicate versions are rejected") {
@@ -1545,7 +1547,7 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		const string path = "s3://bucket/key?s3_version_id=abc";
 		auto auth_params = ResolveTestAuth(std::move(config), path);
 		auto parsed_url = S3Url::Parse(path, auth_params);
-		REQUIRE(parsed_url.GetVersionId().empty());
+		REQUIRE_FALSE(parsed_url.GetObjectVersion().IsSet());
 		REQUIRE(parsed_url.GetKey() == "key?s3_version_id=abc");
 	}
 
@@ -1694,6 +1696,76 @@ TEST_CASE("GCS HMAC signing region follows provider defaults", "[httpfs][s3][gcs
 			auto auth_params = ResolveTestAuth(std::move(config));
 			REQUIRE(auth_params.GetCredentials().region.empty());
 		}
+	}
+}
+
+TEST_CASE("GCS generation URL validation and signing", "[httpfs][s3][gcs-generation]") {
+	auto config = TestAuthConfig(S3ProviderType::GCS);
+	config.credentials.access_key_id = "key";
+	config.credentials.secret_access_key = "secret";
+	auto auth = ResolveTestAuth(config);
+	const string path = "gcs://bucket/key?gcs_generation=000123";
+	auto parsed = S3Url::Parse(path, auth);
+	REQUIRE(parsed.GetObjectVersion().GetType() == HTTPObjectVersionType::GCS_GENERATION);
+	REQUIRE(parsed.GetObjectVersion().GetValue() == "123");
+	REQUIRE(S3Url::Parse("gcs://bucket/key?gcs_generation=18446744073709551615", auth).GetObjectVersion().GetValue() ==
+	        "18446744073709551615");
+	for (const string invalid : {"", "0", "-1", "+1", "1.0", "1e3", " 1", "1 ", "18446744073709551616",
+	                             "123&gcs%5Fgeneration=456", "123&s3_version_id=opaque"}) {
+		CAPTURE(invalid);
+		REQUIRE_THROWS(S3Url::Parse("gcs://bucket/key?gcs_generation=" + invalid, auth));
+		REQUIRE_THROWS(ResolveTestAuth(config, "gcs://bucket/key?gcs_generation=" + invalid));
+	}
+	for (const auto type : {S3ProviderType::S3, S3ProviderType::R2}) {
+		auto other = ResolveTestAuth(TestAuthConfig(type));
+		REQUIRE_THROWS(other.GetProvider().GetVersionQueryParameter(parsed.GetObjectVersion()));
+		REQUIRE_THROWS(S3Url::Parse(other.GetProvider().GetRoute().prefix + "bucket/key?gcs_generation=123", other));
+	}
+	config.compatibility_mode = true;
+	auto literal = S3Url::Parse(path, ResolveTestAuth(config, path));
+	REQUIRE_FALSE(literal.GetObjectVersion().IsSet());
+	REQUIRE(literal.GetKey() == "key?gcs_generation=000123");
+
+	HTTPFSUtil http_util;
+	HTTPFSParams params(http_util);
+	auto snapshot = make_shared_ptr<S3RequestSnapshot>(params, auth, path, weak_ptr<ClientContext>(), false);
+	HTTPRequestSession session(snapshot);
+	::AESStateSSLFactory encryption_util;
+	for (const auto operation : {S3RequestOperation::HEAD_OBJECT, S3RequestOperation::GET_OBJECT}) {
+		S3RequestSpec spec {path, operation, {}, "", "", ""};
+		S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request) {
+			auto timestamp = request.headers.GetHeaderValue("x-amz-date");
+			auto expected = S3RequestUtil::CreateHeaders(encryption_util, parsed, operation,
+			                                             S3RequestQuery({{"generation", "123"}}), auth,
+			                                             timestamp.substr(0, 8), timestamp);
+			REQUIRE(request.http_url == parsed.GetHTTPUrl("generation=123"));
+			REQUIRE(request.headers.GetHeaderValue("Authorization") == expected.GetHeaderValue("Authorization"));
+			return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+		});
+	}
+}
+
+TEST_CASE("S3 provider version policy preserves version semantics", "[httpfs][s3][gcs-generation]") {
+	for (auto type : {S3ProviderType::S3, S3ProviderType::GCS, S3ProviderType::R2}) {
+		auto provider = ResolveTestAuth(TestAuthConfig(type)).GetProvider();
+		unordered_map<string, string> params {{"s3_version_id", "opaque/version+id"}, {"unrelated", "value"}};
+		auto version = S3Provider::ParseObjectVersion(type, params);
+		REQUIRE(version.GetType() == HTTPObjectVersionType::S3_VERSION_ID);
+		REQUIRE(version.GetValue() == "opaque/version+id");
+		REQUIRE(string(provider.GetVersionQueryParameter(version)) == "versionId");
+		REQUIRE(string(S3Provider::GetVersionParameterName(version.GetType())) == "s3_version_id");
+		REQUIRE(params.size() == 1);
+		REQUIRE(params.at("unrelated") == "value");
+
+		HTTPHeaders headers;
+		REQUIRE_FALSE(provider.ReadObjectVersion(headers).IsSet());
+		headers.Insert("x-amz-version-id", "");
+		REQUIRE_FALSE(provider.ReadObjectVersion(headers).IsSet());
+		HTTPHeaders version_headers;
+		version_headers.Insert("x-amz-version-id", "null");
+		auto metadata_version = provider.ReadObjectVersion(version_headers);
+		REQUIRE(metadata_version.GetType() == HTTPObjectVersionType::S3_VERSION_ID);
+		REQUIRE(metadata_version.GetValue() == "null");
 	}
 }
 

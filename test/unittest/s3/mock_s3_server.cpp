@@ -545,7 +545,15 @@ public:
 		observations.push_back(std::move(observation));
 	}
 
-	void SetObjectHeaders(httplib::Response &response) const {
+	optional_ptr<const string> GetObjectData(const httplib::Request &request) const {
+		if (!request.has_param("generation")) {
+			return config.object.data;
+		}
+		auto entry = config.object.generations.find(GetParameter(request, "generation"));
+		return entry == config.object.generations.end() ? nullptr : &entry->second;
+	}
+
+	void SetObjectHeaders(httplib::Response &response, const string &data) const {
 		if (config.range.advertise) {
 			response.set_header("Accept-Ranges", "bytes");
 		} else {
@@ -553,7 +561,7 @@ public:
 		}
 		auto content_length = config.metadata.head_content_length.IsValid()
 		                          ? config.metadata.head_content_length.GetIndex()
-		                          : config.object.data.size();
+		                          : data.size();
 		response.set_header("Content-Length", std::to_string(content_length));
 		response.set_header("ETag", config.metadata.etag);
 		if (config.metadata.version_on_head && !config.metadata.version_id.empty()) {
@@ -1043,13 +1051,26 @@ public:
 				SendS3Error400(request, response, config.failures.failure_is_request_timeout);
 				return httplib::Server::HandlerResponse::Handled;
 			}
+			auto data = GetObjectData(request);
+			if (!data) {
+				response.status = 404;
+				Record(request, response.status);
+				return httplib::Server::HandlerResponse::Handled;
+			}
 			response.status = 200;
-			SetObjectHeaders(response);
+			SetObjectHeaders(response, *data);
 			Record(request, response.status);
 			return httplib::Server::HandlerResponse::Handled;
 		});
 
 		server.Get(path, [this](const httplib::Request &request, httplib::Response &response) {
+			auto object_data = GetObjectData(request);
+			if (!object_data) {
+				response.status = 404;
+				Record(request, response.status);
+				return;
+			}
+			const auto &data = *object_data;
 			if (ShouldRejectStaleCredentials(request)) {
 				SendAuthFailure(request, response);
 				return;
@@ -1071,8 +1092,8 @@ public:
 				SetGetHeaders(response);
 				if (config.full_get.block_until_released) {
 					response.set_content_provider(
-					    config.object.data.size(), "application/octet-stream",
-					    [this](size_t offset, size_t length, httplib::DataSink &sink) {
+					    data.size(), "application/octet-stream",
+					    [this, &data](size_t offset, size_t length, httplib::DataSink &sink) {
 						    if (offset == 0) {
 							    annotated_unique_lock<annotated_mutex> lock(full_get_lock);
 							    full_get_seen = true;
@@ -1083,23 +1104,23 @@ public:
 								    return false;
 							    }
 						    }
-						    return sink.write(config.object.data.data() + offset, length);
+						    return sink.write(data.data() + offset, length);
 					    });
 					Record(request, response.status);
 					return;
 				}
 				if (config.full_get.chunked) {
 					response.set_chunked_content_provider(
-					    "application/octet-stream", [this](size_t offset, httplib::DataSink &sink) {
-						    if (offset >= config.object.data.size()) {
+					    "application/octet-stream", [this, &data](size_t offset, httplib::DataSink &sink) {
+						    if (offset >= data.size()) {
 							    sink.done();
 							    return true;
 						    }
-						    const auto length = MinValue<size_t>(7, config.object.data.size() - offset);
-						    if (!sink.write(config.object.data.data() + offset, length)) {
+						    const auto length = MinValue<size_t>(7, data.size() - offset);
+						    if (!sink.write(data.data() + offset, length)) {
 							    return false;
 						    }
-						    if (offset + length == config.object.data.size()) {
+						    if (offset + length == data.size()) {
 							    sink.done();
 						    }
 						    return true;
@@ -1107,21 +1128,21 @@ public:
 					Record(request, response.status);
 					return;
 				}
-				response.set_content(config.object.data, "application/octet-stream");
+				response.set_content(data, "application/octet-stream");
 				Record(request, response.status);
 				return;
 			}
 			if (config.range.behavior == MockS3RangeBehavior::IGNORE_RANGE) {
 				response.status = 200;
 				SetGetHeaders(response);
-				response.set_content(config.object.data, "application/octet-stream");
+				response.set_content(data, "application/octet-stream");
 				Record(request, response.status);
 				return;
 			}
 
 			idx_t range_start;
 			idx_t range_end;
-			if (!ParseRange(range, config.object.data.size(), range_start, range_end)) {
+			if (!ParseRange(range, data.size(), range_start, range_end)) {
 				response.status = 416;
 				Record(request, response.status);
 				return;
@@ -1137,8 +1158,8 @@ public:
 			response.set_header("Accept-Ranges", "bytes");
 			SetGetHeaders(response);
 			if (!config.range.blocked.empty() && range == config.range.blocked) {
-				response.set_content_provider(config.object.data.size(), "application/octet-stream",
-				                              [this](size_t offset, size_t length, httplib::DataSink &sink) {
+				response.set_content_provider(data.size(), "application/octet-stream",
+				                              [this, &data](size_t offset, size_t length, httplib::DataSink &sink) {
 					                              annotated_unique_lock<annotated_mutex> lock(range_release_lock);
 					                              if (!range_release.wait_for(lock, std::chrono::seconds(5),
 					                                                          [this]()
@@ -1147,33 +1168,33 @@ public:
 					                                                              })) {
 						                              return false;
 					                              }
-					                              return sink.write(config.object.data.data() + offset, length);
+					                              return sink.write(data.data() + offset, length);
 				                              });
 				Record(request, response.status);
 				return;
 			}
 			if (!config.range.release.empty() && range == config.range.release) {
-				response.set_content_provider(
-				    config.object.data.size(), "application/octet-stream",
-				    [this](size_t offset, size_t length, httplib::DataSink &sink) {
-					    const auto success = sink.write(config.object.data.data() + offset, length);
-					    if (success) {
-						    {
-							    annotated_lock_guard<annotated_mutex> lock(range_release_lock);
-							    release_range_completed = true;
-						    }
-						    range_release.notify_all();
-					    }
-					    return success;
-				    });
+				response.set_content_provider(data.size(), "application/octet-stream",
+				                              [this, &data](size_t offset, size_t length, httplib::DataSink &sink) {
+					                              const auto success = sink.write(data.data() + offset, length);
+					                              if (success) {
+						                              {
+							                              annotated_lock_guard<annotated_mutex> lock(
+							                                  range_release_lock);
+							                              release_range_completed = true;
+						                              }
+						                              range_release.notify_all();
+					                              }
+					                              return success;
+				                              });
 				Record(request, response.status);
 				return;
 			}
 			if (config.range.block_first_body_until_second && range_request_index == 1) {
 				auto wait_for_second_request = make_shared_ptr<atomic<bool>>(true);
 				response.set_content_provider(
-				    config.object.data.size(), "application/octet-stream",
-				    [this, wait_for_second_request](size_t offset, size_t length, httplib::DataSink &sink) {
+				    data.size(), "application/octet-stream",
+				    [this, &data, wait_for_second_request](size_t offset, size_t length, httplib::DataSink &sink) {
 					    if (wait_for_second_request->exchange(false)) {
 						    annotated_unique_lock<annotated_mutex> lock(range_request_lock);
 						    if (!range_request_started.wait_for(lock, std::chrono::seconds(5),
@@ -1183,7 +1204,7 @@ public:
 							    return false;
 						    }
 					    }
-					    return sink.write(config.object.data.data() + offset, length);
+					    return sink.write(data.data() + offset, length);
 				    });
 				Record(request, response.status);
 				return;
@@ -1191,26 +1212,26 @@ public:
 			if (config.range.behavior == MockS3RangeBehavior::SHORT_SUCCESS &&
 			    ConsumeBehavior(remaining_range_behavior_requests)) {
 				response.set_header("X-Mock-Successful-Short-Response", "1");
-				response.set_content(config.object.data, "application/octet-stream");
+				response.set_content(data, "application/octet-stream");
 				Record(request, response.status);
 				return;
 			}
 			if (config.range.behavior == MockS3RangeBehavior::TRUNCATE_TRANSFER &&
 			    ConsumeBehavior(remaining_range_behavior_requests)) {
-				response.set_content_provider(config.object.data.size(), "application/octet-stream",
-				                              [this](size_t offset, size_t length, httplib::DataSink &sink) {
+				response.set_content_provider(data.size(), "application/octet-stream",
+				                              [this, &data](size_t offset, size_t length, httplib::DataSink &sink) {
 					                              auto omitted_bytes =
 					                                  MinValue<idx_t>(config.range.truncated_bytes, length);
 					                              auto emitted_bytes = length - omitted_bytes;
 					                              if (emitted_bytes > 0) {
-						                              sink.write(config.object.data.data() + offset, emitted_bytes);
+						                              sink.write(data.data() + offset, emitted_bytes);
 					                              }
 					                              return false;
 				                              });
 				Record(request, response.status);
 				return;
 			}
-			response.set_content(config.object.data, "application/octet-stream");
+			response.set_content(data, "application/octet-stream");
 			Record(request, response.status);
 		});
 

@@ -297,12 +297,12 @@ const HTTPReadConfig &HTTPFileHandle::GetReadConfig() const {
 	return read_config;
 }
 
-string HTTPFileHandle::GetVersionId() const {
-	return version_id;
+const HTTPObjectVersion &HTTPFileHandle::GetObjectVersion() const {
+	return object_version;
 }
 
-void HTTPFileHandle::SetVersionId(string version_id_p) {
-	version_id = std::move(version_id_p);
+HTTPObjectVersion HTTPFileHandle::ReadObjectVersion(const HTTPHeaders &headers) const {
+	return {};
 }
 
 unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
@@ -1019,10 +1019,7 @@ void HTTPFileHandle::ApplyFileInfo(const HTTPResponse &response, timestamp_t req
 		etag = response.headers.GetHeaderValue("ETag");
 	}
 	ApplyCachePolicy(response, request_time, response_time);
-	if (request_session->Capture().snapshot->Params().s3_version_id_pinning &&
-	    response.headers.HasHeader("x-amz-version-id")) {
-		SetVersionId(response.headers.GetHeaderValue("x-amz-version-id"));
-	}
+	object_version = ReadObjectVersion(response.headers);
 	if (response.headers.HasHeader("Accept-Ranges")) {
 		auto accept_ranges = response.headers.GetHeaderValue("Accept-Ranges");
 		StringUtil::Trim(accept_ranges);
@@ -1068,7 +1065,7 @@ void HTTPFileHandle::InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cach
 		                        ? optional<timestamp_t>()
 		                        : cache_entry.cache_valid_until;
 	}
-	SetVersionId(cache_entry.version_id);
+	object_version = cache_entry.object_version;
 
 	// TODO: handle properties
 }
@@ -1079,7 +1076,7 @@ HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
 	result.last_modified = last_modified;
 	result.etag = etag;
 	result.cache_valid_until = GetCacheValidUntil();
-	result.version_id = GetVersionId();
+	result.object_version = GetObjectVersion();
 	// TODO: handle properties
 	return result;
 }

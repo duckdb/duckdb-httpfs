@@ -1,6 +1,7 @@
 #pragma once
 
 #include "s3/s3_auth.hpp"
+#include "http/http_object_version.hpp"
 
 namespace duckdb {
 
@@ -16,7 +17,7 @@ public:
 	const string &GetBucket() const;
 	const string &GetKey() const;
 	const string &GetQueryString() const;
-	const string &GetVersionId() const;
+	const HTTPObjectVersion &GetObjectVersion() const;
 
 	//! HTTP request target
 	string GetHTTPUrl(const string &http_query_string = "") const;
@@ -36,7 +37,7 @@ private:
 	string query_string;
 
 	//! Explicit object version, independent of credentials and endpoint routing
-	string version_id;
+	HTTPObjectVersion object_version;
 
 	//! HTTP request target
 	string host;

@@ -3,6 +3,8 @@
 #include "s3/s3_auth.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/http_util.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension_entries.hpp"
@@ -11,6 +13,81 @@
 #include <algorithm>
 
 namespace duckdb {
+
+const char *S3Provider::GetVersionParameterName(HTTPObjectVersionType type) {
+	switch (type) {
+	case HTTPObjectVersionType::S3_VERSION_ID:
+		return "s3_version_id";
+	case HTTPObjectVersionType::GCS_GENERATION:
+		return "gcs_generation";
+	default:
+		throw InternalException("Object version is not set");
+	}
+}
+
+HTTPObjectVersion S3Provider::ParseVersionValue(HTTPObjectVersionType type, const string &value) {
+	if (type == HTTPObjectVersionType::S3_VERSION_ID) {
+		if (value.empty()) {
+			throw InvalidInputException("%s cannot be empty", GetVersionParameterName(type));
+		}
+		return HTTPObjectVersion(type, value);
+	}
+	D_ASSERT(type == HTTPObjectVersionType::GCS_GENERATION);
+	uint64_t generation = 0;
+	for (auto c : value) {
+		if (c < '0' || c > '9' || generation > (NumericLimits<uint64_t>::Maximum() - (c - '0')) / 10) {
+			throw InvalidInputException("%s must be a positive uint64 decimal", GetVersionParameterName(type));
+		}
+		generation = generation * 10 + (c - '0');
+	}
+	if (generation == 0) {
+		throw InvalidInputException("%s must be a positive uint64 decimal", GetVersionParameterName(type));
+	}
+	return HTTPObjectVersion(type, std::to_string(generation));
+}
+
+HTTPObjectVersion S3Provider::ParseObjectVersion(S3ProviderType provider, unordered_map<string, string> &query_params) {
+	HTTPObjectVersion result;
+	for (const auto type : {HTTPObjectVersionType::S3_VERSION_ID, HTTPObjectVersionType::GCS_GENERATION}) {
+		const auto name = GetVersionParameterName(type);
+		auto entry = query_params.find(name);
+		if (entry == query_params.end()) {
+			continue;
+		}
+		if (type == HTTPObjectVersionType::GCS_GENERATION && provider != S3ProviderType::GCS) {
+			throw InvalidInputException("%s is only supported for GCS URLs", name);
+		}
+		if (result.IsSet()) {
+			throw InvalidInputException("%s and %s cannot be combined", name,
+			                            GetVersionParameterName(result.GetType()));
+		}
+		result = ParseVersionValue(type, entry->second);
+		query_params.erase(entry);
+	}
+	return result;
+}
+
+HTTPObjectVersion S3Provider::ReadObjectVersion(const HTTPHeaders &headers) const {
+	if (!headers.HasHeader("x-amz-version-id")) {
+		return {};
+	}
+	auto value = headers.GetHeaderValue("x-amz-version-id");
+	return value.empty() ? HTTPObjectVersion() : ParseVersionValue(HTTPObjectVersionType::S3_VERSION_ID, value);
+}
+
+const char *S3Provider::GetVersionQueryParameter(const HTTPObjectVersion &version) const {
+	switch (version.GetType()) {
+	case HTTPObjectVersionType::S3_VERSION_ID:
+		return "versionId";
+	case HTTPObjectVersionType::GCS_GENERATION:
+		if (GetType() != S3ProviderType::GCS) {
+			throw InvalidInputException("GCS generation selection requires a GCS provider");
+		}
+		return "generation";
+	default:
+		throw InternalException("Object version is not set");
+	}
+}
 
 bool S3MultipartUploadPolicy::operator==(const S3MultipartUploadPolicy &other) const {
 	return part_size_strategy == other.part_size_strategy && minimum_part_size == other.minimum_part_size &&

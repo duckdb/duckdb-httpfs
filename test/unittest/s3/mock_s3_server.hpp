@@ -2,6 +2,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/unordered_map.hpp"
 
 namespace duckdb {
 
@@ -47,6 +48,8 @@ struct MockS3ObjectConfig {
 	string bucket = "refresh-bucket";
 	string key = "object.bin";
 	string data = "abcdefghijklmnopqrstuvwxyz0123456789";
+	//! Historical GCS object bodies, selected by the generation query parameter
+	unordered_map<string, string> generations;
 };
 
 struct MockS3AuthConfig {

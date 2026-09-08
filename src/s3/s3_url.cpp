@@ -94,14 +94,18 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthConfig &config)
 	if (config.route.type == S3ProviderType::GCS) {
 		GetQueryParam("gcs_user_project", request_options.user_project, query_params);
 	}
-	// Object selection is parsed by Parse, not stored in authentication parameters.
-	query_params.erase("s3_version_id");
+	// Validate object selection without storing it in authentication parameters.
+	S3Provider::ParseObjectVersion(config.route.type, query_params);
 	if (!query_params.empty()) {
 		auto supported_parameters =
 		    string("'s3_region', 's3_access_key_id', 's3_secret_access_key', 's3_session_token',\n's3_endpoint', "
-		           "'s3_url_style', 's3_use_ssl', 's3_requester_pays', 's3_version_id'");
+		           "'s3_url_style', 's3_use_ssl', 's3_requester_pays'");
+		supported_parameters +=
+		    ", '" + string(S3Provider::GetVersionParameterName(HTTPObjectVersionType::S3_VERSION_ID)) + "'";
 		if (config.route.type == S3ProviderType::GCS) {
-			supported_parameters += ", 'gcs_user_project'";
+			supported_parameters += ", 'gcs_user_project', '" +
+			                        string(S3Provider::GetVersionParameterName(HTTPObjectVersionType::GCS_GENERATION)) +
+			                        "'";
 		}
 		throw IOException("Invalid query parameters found. Supported parameters are:\n%s", supported_parameters);
 	}
@@ -201,9 +205,7 @@ ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 	ParsedS3Url result;
 	if (!query_string.empty()) {
 		auto query_params = ParseQueryParameters(query_string);
-		if (GetQueryParam("s3_version_id", result.version_id, query_params) && result.version_id.empty()) {
-			throw InvalidInputException("s3_version_id cannot be empty");
-		}
+		result.object_version = S3Provider::ParseObjectVersion(route.type, query_params);
 	}
 	result.prefix = std::move(prefix);
 	result.bucket = std::move(bucket);
@@ -232,8 +234,8 @@ const string &ParsedS3Url::GetQueryString() const {
 	return query_string;
 }
 
-const string &ParsedS3Url::GetVersionId() const {
-	return version_id;
+const HTTPObjectVersion &ParsedS3Url::GetObjectVersion() const {
+	return object_version;
 }
 
 string ParsedS3Url::GetHTTPUrl(const string &http_query_string) const {
