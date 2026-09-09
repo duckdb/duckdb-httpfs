@@ -1,4 +1,5 @@
 #include "s3/s3_request.hpp"
+#include "duckdb/main/http/http_retry_budget.hpp"
 
 #include "s3/s3fs.hpp"
 #include "s3/s3_xml_response.hpp"
@@ -10,7 +11,6 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/thread.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/function/scalar/strftime_format.hpp"
 #include "duckdb/logging/file_system_logger.hpp"
@@ -527,10 +527,10 @@ static bool TryRefreshS3AuthMaterial(optional_ptr<ClientContext> context, option
 
 S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_util,
                                                    const CapturedHTTPRequestSnapshot &captured,
-                                                   const S3RequestSpec &spec) {
+                                                   const S3RequestSpec &spec, HTTPRetryBudget &retry_budget) {
 	auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
 	auto &operation_info = S3RequestUtil::GetOperationInfo(spec.operation);
-	S3RequestData result {spec.operation, snapshot.auth_params};
+	S3RequestData result(spec.operation, snapshot.auth_params, retry_budget);
 	result.captured = captured;
 	auto session_request = snapshot.CreateRequest();
 	result.http_params = std::move(session_request.params);
@@ -555,12 +555,6 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	    encryption_util, parsed_s3_url, spec.operation, query, result.auth_params, "", "", spec.payload_hash,
 	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition);
 	return result;
-}
-
-S3RequestData S3RequestExecutor::CreateHandleRequestData(EncryptionUtil &encryption_util, S3FileHandle &s3_handle,
-                                                         const S3RequestSpec &spec) {
-	auto captured = s3_handle.request_session->Capture();
-	return S3RequestExecutor::CreateRequestData(encryption_util, captured, spec);
 }
 
 static optional_idx GetRegionRedirect(const HTTPResponse &response, const S3AuthParams &auth_params,
@@ -630,17 +624,6 @@ static bool IsS3RequestTimeoutError(const ErrorData &error) {
 	return S3XMLResponseParser::TryParseError(body_entry->second, s3_error) && s3_error.code == "RequestTimeout";
 }
 
-void S3RequestExecutor::SleepForRetry(const HTTPParams &http_params, idx_t retries, double &wait_ms) {
-	if (retries == 0) {
-		wait_ms = static_cast<double>(http_params.retry_wait_ms);
-		return;
-	}
-#ifndef DUCKDB_NO_THREADS
-	ThreadUtil::SleepMs(static_cast<idx_t>(wait_ms));
-#endif
-	wait_ms *= http_params.retry_backoff;
-}
-
 static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const HTTPResponse &response) {
 	if (response.HasRequestError()) {
 		return false;
@@ -652,71 +635,62 @@ static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
 }
 
-S3RequestResult S3RequestExecutor::Run(const CreateDataCallback &create_data, const RequestCallback &request,
+S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,
+                                       const S3RequestSpec &spec, const RequestCallback &request,
                                        const RefreshCallback &refresh_auth_params, const SetRegionCallback &set_region,
                                        const FreshConnectionCallback &fresh_connection,
                                        const ReceivedResponseCallback &response_callback) {
-	// Auth refresh and region redirect are one-shot; transient responses follow the configured HTTP retry policy.
 	bool retried_auth_refresh = false;
 	bool retried_region = false;
-	idx_t transient_retries = 0;
-	double transient_wait_ms = 0;
-	for (;;) {
-		auto request_data = create_data();
-		auto &http_params = request_data.http_params->Cast<HTTPFSParams>();
-		try {
-			auto result = request(request_data);
-			auto received_response = result && !result->HasRequestError();
-			if (received_response && !retried_auth_refresh && IsAuthRefreshStatus(*result) &&
-			    refresh_auth_params(request_data)) {
-				retried_auth_refresh = true;
-				continue;
+	HTTPRetryBudget retry_budget(session.Capture().snapshot->Params());
+	S3RequestResult result {};
+	retry_budget.Run([&]() {
+		// Only bounded auth/region corrections bypass transient retry admission.
+		for (;;) {
+			auto request_data = CreateRequestData(encryption_util, session.Capture(), spec, retry_budget);
+			try {
+				auto response = request(request_data);
+				auto received_response = response && !response->HasRequestError();
+				if (received_response && !retried_auth_refresh && IsAuthRefreshStatus(*response) &&
+				    refresh_auth_params(request_data)) {
+					retried_auth_refresh = true;
+					continue;
+				}
+				string correct_region;
+				if (received_response && !retried_region &&
+				    GetRegionRedirect(*response, request_data.auth_params, correct_region).IsValid()) {
+					set_region(request_data, correct_region);
+					retried_region = true;
+					continue;
+				}
+				bool should_retry = received_response && ShouldRetryReceivedResponse(request_data, *response);
+				if (received_response && response_callback &&
+				    response_callback(request_data, *response) == S3ReceivedResponseAction::RETRY_FRESH_CONNECTION) {
+					D_ASSERT(fresh_connection);
+					fresh_connection(request_data);
+					should_retry = true;
+				}
+				result = {std::move(response),
+				          S3RequestContext {request_data.operation, std::move(request_data.captured),
+				                            std::move(request_data.display_url)}};
+				return should_retry ? HTTPRetryDecision::Retry() : HTTPRetryDecision::Finish();
+			} catch (std::exception &ex) {
+				ErrorData error(ex);
+				if (!retried_auth_refresh && IsAuthRefreshStatus(error) && refresh_auth_params(request_data)) {
+					retried_auth_refresh = true;
+					continue;
+				}
+				string correct_region;
+				if (!retried_region && GetRegionRedirect(error, request_data.auth_params, correct_region).IsValid()) {
+					set_region(request_data, correct_region);
+					retried_region = true;
+					continue;
+				}
+				throw;
 			}
-			string correct_region;
-			if (received_response && !retried_region &&
-			    GetRegionRedirect(*result, request_data.auth_params, correct_region).IsValid()) {
-				set_region(request_data, correct_region);
-				retried_region = true;
-				continue;
-			}
-			if (received_response && transient_retries < http_params.retries &&
-			    ShouldRetryReceivedResponse(request_data, *result)) {
-				SleepForRetry(http_params, transient_retries, transient_wait_ms);
-				transient_retries++;
-				continue;
-			}
-			if (received_response && response_callback &&
-			    response_callback(request_data, *result) == S3ReceivedResponseAction::RETRY_FRESH_CONNECTION &&
-			    transient_retries < http_params.retries) {
-				D_ASSERT(fresh_connection);
-				fresh_connection(request_data);
-				SleepForRetry(http_params, transient_retries, transient_wait_ms);
-				transient_retries++;
-				continue;
-			}
-			return {std::move(result), S3RequestContext {request_data.operation, std::move(request_data.captured),
-			                                             std::move(request_data.display_url)}};
-		} catch (std::exception &ex) {
-			ErrorData error(ex);
-			if (!retried_auth_refresh && IsAuthRefreshStatus(error) && refresh_auth_params(request_data)) {
-				retried_auth_refresh = true;
-				continue;
-			}
-			string correct_region;
-			if (!retried_region && GetRegionRedirect(error, request_data.auth_params, correct_region).IsValid()) {
-				set_region(request_data, correct_region);
-				retried_region = true;
-				continue;
-			}
-			if (S3RequestUtil::GetOperationInfo(request_data.operation).retry_timeout &&
-			    transient_retries < http_params.retries && IsS3RequestTimeoutError(error)) {
-				SleepForRetry(http_params, transient_retries, transient_wait_ms);
-				transient_retries++;
-				continue;
-			}
-			throw;
 		}
-	}
+	});
+	return result;
 }
 
 bool S3RequestExecutor::TryRefreshSession(HTTPRequestSession &session, const S3RequestData &request_data) {
@@ -801,7 +775,7 @@ S3RequestResult S3RequestExecutor::RunSession(EncryptionUtil &encryption_util, H
                                               const RegionRedirectCallback &region_redirect,
                                               const ReceivedResponseCallback &response_callback) {
 	return S3RequestExecutor::Run(
-	    [&]() { return S3RequestExecutor::CreateRequestData(encryption_util, session.Capture(), spec); }, request,
+	    encryption_util, session, spec, request,
 	    [&](const S3RequestData &request_data) { return S3RequestExecutor::TryRefreshSession(session, request_data); },
 	    [&](const S3RequestData &request_data, const string &correct_region) {
 		    string previous_region;
@@ -819,7 +793,7 @@ S3RequestResult S3RequestExecutor::RunSession(EncryptionUtil &encryption_util, H
 S3RequestResult S3RequestExecutor::RunHandle(EncryptionUtil &encryption_util, S3FileHandle &s3_handle,
                                              const S3RequestSpec &spec, const RequestCallback &request) {
 	return S3RequestExecutor::Run(
-	    [&]() { return S3RequestExecutor::CreateHandleRequestData(encryption_util, s3_handle, spec); }, request,
+	    encryption_util, *s3_handle.request_session, spec, request,
 	    [&](const S3RequestData &request_data) {
 		    return S3RequestExecutor::TryRefreshSession(*s3_handle.request_session, request_data);
 	    },
@@ -844,10 +818,12 @@ void S3RequestExecutor::InvalidateSessionConnections(HTTPRequestSession &session
 	}
 }
 
-unique_ptr<HTTPResponse> S3RequestExecutor::SendSessionRequest(HTTPRequestSession &session,
-                                                               const CapturedHTTPRequestSnapshot &captured,
-                                                               HTTPFSParams &params, BaseRequest &request) {
-	auto lease = session.AcquireClient(captured, params, request.proto_host_port);
+unique_ptr<HTTPResponse> S3RequestExecutor::SendSessionRequest(HTTPRequestSession &session, S3RequestData &request_data,
+                                                               BaseRequest &request) {
+	D_ASSERT(&request.params == request_data.http_params.get());
+	request.retry_budget = request_data.retry_budget;
+	auto &params = request_data.http_params->Cast<HTTPFSParams>();
+	auto lease = session.AcquireClient(request_data.captured, params, request.proto_host_port);
 	try {
 		auto response = params.http_util.Request(request, lease.Client());
 		auto request_timeout = response && S3RequestUtil::IsRequestTimeout(*response);
@@ -871,10 +847,9 @@ unique_ptr<HTTPResponse> S3RequestExecutor::SendSessionRequest(HTTPRequestSessio
 	}
 }
 
-unique_ptr<HTTPResponse> S3RequestExecutor::SendHandleRequest(S3FileHandle &s3_handle,
-                                                              const CapturedHTTPRequestSnapshot &captured,
-                                                              HTTPFSParams &params, BaseRequest &request) {
-	return S3RequestExecutor::SendSessionRequest(*s3_handle.request_session, captured, params, request);
+unique_ptr<HTTPResponse> S3RequestExecutor::SendHandleRequest(S3FileHandle &s3_handle, S3RequestData &request_data,
+                                                              BaseRequest &request) {
+	return S3RequestExecutor::SendSessionRequest(*s3_handle.request_session, request_data, request);
 }
 
 HTTPException S3RequestUtil::GetRequestError(const S3RequestData &request_data, const HTTPResponse &response) {
@@ -929,8 +904,7 @@ S3RequestResult S3FileSystem::PostRequest(HTTPRequestSession &session, S3Request
 		    return RunPostRequest(request_data.http_url, request_data.headers, params, result, buffer_in, buffer_in_len,
 		                          [&](BaseRequest &request) {
 			                          request.try_request = true;
-			                          return S3RequestExecutor::SendSessionRequest(session, request_data.captured,
-			                                                                       params, request);
+			                          return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		                          });
 	    });
 }
@@ -950,8 +924,7 @@ S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestO
 		    return RunPutRequest(request_data.http_url, request_data.headers, params, buffer_in, buffer_in_len,
 		                         content_type, [&](BaseRequest &request) {
 			                         request.try_request = true;
-			                         return S3RequestExecutor::SendSessionRequest(session, request_data.captured,
-			                                                                      params, request);
+			                         return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		                         });
 	    });
 }
@@ -992,11 +965,10 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const str
 	           S3RequestSpec {s3_url, S3RequestOperation::HEAD_OBJECT, {}, "", "", "", s3_handle.requested_version},
 	           [&](S3RequestData &request_data) {
 		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		           return RunHeadRequest(request_data.http_url, request_data.headers, params,
-		                                 [&](BaseRequest &request) {
-			                                 return S3RequestExecutor::SendHandleRequest(
-			                                     s3_handle, request_data.captured, params, request);
-		                                 });
+		           return RunHeadRequest(
+		               request_data.http_url, request_data.headers, params, [&](BaseRequest &request) {
+			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
+		               });
 	           })
 	    .response;
 }
@@ -1006,20 +978,19 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	const S3RequestSpec spec {
 	    s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version, read_config.condition};
-	return S3RequestExecutor::RunHandle(GetEncryptionUtil(), s3_handle, spec,
-	                                    [&](S3RequestData &request_data) {
-		                                    auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		                                    return RunGetRequest(
-		                                        s3_handle, request_data.http_url, request_data.headers, params,
-		                                        read_config, download,
-		                                        [&](const HTTPResponse &response) {
-			                                        return S3RequestUtil::GetRequestError(request_data, response);
-		                                        },
-		                                        [&](BaseRequest &request) {
-			                                        return S3RequestExecutor::SendHandleRequest(
-			                                            s3_handle, request_data.captured, params, request);
-		                                        });
-	                                    })
+	return S3RequestExecutor::RunHandle(
+	           GetEncryptionUtil(), s3_handle, spec,
+	           [&](S3RequestData &request_data) {
+		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		           return RunGetRequest(
+		               s3_handle, request_data.http_url, request_data.headers, params, read_config, download,
+		               [&](const HTTPResponse &response) {
+			               return S3RequestUtil::GetRequestError(request_data, response);
+		               },
+		               [&](BaseRequest &request) {
+			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
+		               });
+	           })
 	    .response;
 }
 
@@ -1039,8 +1010,8 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 			                                        return S3RequestUtil::GetRequestError(request_data, response);
 		                                        },
 		                                        [&](BaseRequest &request) {
-			                                        return S3RequestExecutor::SendHandleRequest(
-			                                            s3_handle, request_data.captured, params, request);
+			                                        return S3RequestExecutor::SendHandleRequest(s3_handle, request_data,
+			                                                                                    request);
 		                                        });
 	                                    })
 	    .response;
@@ -1055,8 +1026,7 @@ unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, const s
 		                                    return RunDeleteRequest(request_data.http_url, request_data.headers, params,
 		                                                            [&](BaseRequest &request) {
 			                                                            return S3RequestExecutor::SendHandleRequest(
-			                                                                s3_handle, request_data.captured, params,
-			                                                                request);
+			                                                                s3_handle, request_data, request);
 		                                                            });
 	                                    })
 	    .response;
@@ -1073,7 +1043,7 @@ S3RequestResult S3FileSystem::DeleteRequest(HTTPRequestSession &session, S3Reque
 	    [&](S3RequestData &request_data) {
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    return RunDeleteRequest(request_data.http_url, request_data.headers, params, [&](BaseRequest &request) {
-			    return S3RequestExecutor::SendSessionRequest(session, request_data.captured, params, request);
+			    return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		    });
 	    });
 }

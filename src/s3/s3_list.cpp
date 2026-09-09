@@ -325,7 +325,7 @@ S3ListObjectsV2Result AWSListObjectV2::Request(EncryptionUtil &encryption_util, 
 	    [&](S3RequestData &request_data) {
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    GetRequestInfo get_request(request_data.http_url, request_data.headers, params, nullptr, nullptr);
-		    return S3RequestExecutor::SendSessionRequest(session, request_data.captured, params, get_request);
+		    return S3RequestExecutor::SendSessionRequest(session, request_data, get_request);
 	    },
 	    [&](const S3RequestData &request_data, const string &previous_region, const string &correct_region) {
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
