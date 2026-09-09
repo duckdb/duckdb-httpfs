@@ -654,7 +654,7 @@ private:
 	}
 
 	unique_ptr<HTTPResponse> TransformResponseCurl(CURLcode res, bool include_body = true) {
-		auto status_code = HTTPStatusCode(request_info->response_code);
+		auto status_code = HTTPUtil::ToStatusCode(request_info->response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
 		if (res != CURLcode::CURLE_OK) {
 			response->request_error = curl_easy_strerror(res);
@@ -664,7 +664,7 @@ private:
 			response->body = request_info->body;
 		}
 		response->url = request_info->url;
-		response->reason = HTTPUtil::GetStatusMessage(HTTPUtil::ToStatusCode(request_info->response_code));
+		response->reason = HTTPUtil::GetStatusMessage(status_code);
 		if (!request_info->header_collection.empty()) {
 			auto &response_headers = request_info->header_collection.back();
 			for (auto &header : response_headers) {

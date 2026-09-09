@@ -286,8 +286,7 @@ S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    return RunPostRequest(request_data.http_url, request_data.headers, params, result,
 		                          const_data_ptr_cast(body.data()), body.length(), [&](BaseRequest &request) {
-			                          return S3RequestExecutor::SendSessionRequest(session, request_data.captured,
-			                                                                       params, request);
+			                          return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		                          });
 	    });
 }

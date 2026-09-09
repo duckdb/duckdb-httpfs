@@ -12,6 +12,7 @@
 namespace duckdb {
 
 class ClientContext;
+class HTTPRetryBudget;
 class S3FileHandle;
 
 struct S3RefreshableHTTPParams {
@@ -123,6 +124,15 @@ struct S3RequestSpec {
 };
 
 struct S3RequestData {
+	friend struct S3RequestExecutor;
+
+private:
+	S3RequestData(S3RequestOperation operation_p, S3AuthParams auth_params_p, HTTPRetryBudget &retry_budget_p)
+	    : operation(operation_p), auth_params(std::move(auth_params_p)), retry_budget(retry_budget_p) {
+	}
+	S3RequestData(S3RequestData &&) = default;
+
+public:
 	S3RequestOperation operation;
 	S3AuthParams auth_params;
 	unique_ptr<HTTPParams> http_params;
@@ -130,6 +140,10 @@ struct S3RequestData {
 	string http_url;
 	string display_url;
 	HTTPHeaders headers;
+
+private:
+	//! Borrowed from the executor for this operation, including all reconstructed requests.
+	HTTPRetryBudget &retry_budget;
 };
 
 struct S3RequestUtil {
@@ -152,6 +166,7 @@ struct S3RequestUtil {
 };
 
 struct S3RequestExecutor {
+	//! Callbacks run synchronously and must not retain request data.
 	using RequestCallback = std::function<unique_ptr<HTTPResponse>(S3RequestData &)>;
 	using RegionRedirectCallback = std::function<void(const S3RequestData &, const string &, const string &)>;
 	using ReceivedResponseCallback =
@@ -169,30 +184,27 @@ struct S3RequestExecutor {
 	static S3RefreshableHTTPParams ReadRefreshableHTTPParams(optional_ptr<FileOpener> opener, const string &path);
 	static shared_ptr<HTTPRequestSession> CreateSession(optional_ptr<FileOpener> opener, const string &path,
 	                                                    const S3AuthParams &auth_params);
-	static void SleepForRetry(const HTTPParams &http_params, idx_t retries, double &wait_ms);
-
-	static unique_ptr<HTTPResponse> SendSessionRequest(HTTPRequestSession &session,
-	                                                   const CapturedHTTPRequestSnapshot &captured,
-	                                                   HTTPFSParams &params, BaseRequest &request);
-	static unique_ptr<HTTPResponse> SendHandleRequest(S3FileHandle &handle, const CapturedHTTPRequestSnapshot &captured,
-	                                                  HTTPFSParams &params, BaseRequest &request);
+	static unique_ptr<HTTPResponse> SendSessionRequest(HTTPRequestSession &session, S3RequestData &request_data,
+	                                                   BaseRequest &request);
+	static unique_ptr<HTTPResponse> SendHandleRequest(S3FileHandle &handle, S3RequestData &request_data,
+	                                                  BaseRequest &request);
 
 private:
-	using CreateDataCallback = std::function<S3RequestData()>;
+	using CreateDataCallback = std::function<S3RequestData(HTTPRetryBudget &)>;
 	using FreshConnectionCallback = std::function<void(const S3RequestData &)>;
 	using RefreshCallback = std::function<bool(const S3RequestData &)>;
 	using SetRegionCallback = std::function<void(const S3RequestData &, const string &)>;
 
-	static S3RequestResult Run(const CreateDataCallback &create_data, const RequestCallback &request,
-	                           const RefreshCallback &refresh_auth_params, const SetRegionCallback &set_region,
-	                           const FreshConnectionCallback &fresh_connection,
+	static S3RequestResult Run(HTTPRequestSession &session, const CreateDataCallback &create_data,
+	                           const RequestCallback &request, const RefreshCallback &refresh_auth_params,
+	                           const SetRegionCallback &set_region, const FreshConnectionCallback &fresh_connection,
 	                           const ReceivedResponseCallback &response_callback = {});
 	static bool TryRefreshSession(HTTPRequestSession &session, const S3RequestData &request_data);
 	static void InvalidateSessionConnections(HTTPRequestSession &session, HTTPFSParams &params);
 	static S3RequestData CreateRequestData(EncryptionUtil &encryption_util, const CapturedHTTPRequestSnapshot &captured,
-	                                       const S3RequestSpec &spec);
+	                                       const S3RequestSpec &spec, HTTPRetryBudget &retry_budget);
 	static S3RequestData CreateHandleRequestData(EncryptionUtil &encryption_util, S3FileHandle &handle,
-	                                             const S3RequestSpec &spec);
+	                                             const S3RequestSpec &spec, HTTPRetryBudget &retry_budget);
 };
 
 } // namespace duckdb

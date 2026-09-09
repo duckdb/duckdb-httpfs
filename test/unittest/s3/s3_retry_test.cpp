@@ -8,8 +8,92 @@
 #include "duckdb.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/http/http_retry_budget.hpp"
 
 namespace duckdb {
+
+TEST_CASE("HTTP retry driver owns admission and callback execution", "[httpfs][retry][shared_retry]") {
+	HTTPFSUtil http_util;
+	HTTPFSParams params(http_util);
+	params.retries = 2;
+	params.retry_wait_ms = 0;
+	HTTPRetryBudget budget(params);
+	idx_t attempts = 0;
+
+	SECTION("Finish does not consume retries") {
+		budget.Run([&]() {
+			attempts++;
+			return HTTPRetryDecision::Finish();
+		});
+		REQUIRE(attempts == 1);
+		attempts = 0;
+		budget.Run([&]() {
+			attempts++;
+			return HTTPRetryDecision::Retry();
+		});
+		REQUIRE(attempts == 3);
+	}
+	SECTION("Nested drivers share admission") {
+		idx_t inner_attempts = 0;
+		budget.Run([&]() {
+			attempts++;
+			budget.Run([&]() {
+				inner_attempts++;
+				return HTTPRetryDecision::Retry();
+			});
+			return HTTPRetryDecision::Retry();
+		});
+		REQUIRE(attempts == 1);
+		REQUIRE(inner_attempts == 3);
+	}
+	SECTION("Attempt exceptions propagate without another retry") {
+		REQUIRE_THROWS_AS(budget.Run([&]() -> HTTPRetryDecision {
+			attempts++;
+			if (attempts == 1) {
+				return HTTPRetryDecision::Retry();
+			}
+			throw IOException("attempt failure");
+		}),
+		                  IOException);
+		REQUIRE(attempts == 2);
+		attempts = 0;
+		budget.Run([&]() {
+			attempts++;
+			return HTTPRetryDecision::Retry();
+		});
+		REQUIRE(attempts == 2);
+	}
+	SECTION("Core retry hook errors are not transport errors") {
+		HTTPHeaders headers;
+		GetRequestInfo request("http://localhost/object", headers, params, nullptr, nullptr);
+		request.retry_budget = budget;
+		idx_t hooks = 0;
+		REQUIRE_THROWS_AS(HTTPUtil::RunRequestWithRetry(
+		                      [&]() {
+			                      attempts++;
+			                      return make_uniq<HTTPResponse>(HTTPStatusCode::InternalServerError_500);
+		                      },
+		                      request,
+		                      [&]() {
+			                      hooks++;
+			                      throw IOException("hook failure");
+		                      }),
+		                  IOException);
+		REQUIRE(attempts == 1);
+		REQUIRE(hooks == 1);
+		attempts = 0;
+		budget.Run([&]() {
+			attempts++;
+			return HTTPRetryDecision::Retry();
+		});
+		REQUIRE(attempts == 2);
+	}
+#ifndef DUCKDB_CRASH_ON_ASSERT
+	SECTION("Missing callback is a contract error") {
+		REQUIRE_THROWS_AS(budget.Run({}), InternalException);
+	}
+#endif
+}
 
 namespace {
 
@@ -349,6 +433,62 @@ static void RunTransientGetRetryScenario(const string &client_implementation) {
 	// The read hit transient RequestTimeout 400s and was retried until it succeeded.
 	REQUIRE(MockS3HasObservation(observations, "GET", S3TestHelper::STALE_KEY_ID, 400));
 	REQUIRE(MockS3HasObservation(observations, "GET", S3TestHelper::STALE_KEY_ID, 200));
+}
+
+static void RunSharedReadBudgetScenario(const string &client, bool range, bool caching, idx_t retries, idx_t failures,
+                                        int auth_status = 0) {
+	MockS3ServerConfig config;
+	config.auth.refresh_target = auth_status ? (range ? MockS3RefreshTarget::RANGE_GET : MockS3RefreshTarget::FULL_GET)
+	                                         : MockS3RefreshTarget::DELETE_OBJECT;
+	if (auth_status) {
+		config.auth.stale_status = auth_status;
+	}
+	config.failures.transient_get_failures = failures;
+	auto data = config.object.data;
+	MockS3Server server(std::move(config));
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto test_id = S3TestHelper::ConfigureRefresh(db, con, server, client, caching);
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=" + to_string(retries));
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=0");
+	S3TestHelper::RequireQueryOk(con, "SET force_download=" + string(range ? "false" : "true"));
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto read = [&]() {
+		auto &fs = FileSystem::GetFileSystem(*con.context);
+		auto flags = range ? FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO : FileFlags::FILE_FLAGS_READ;
+		auto handle = fs.OpenFile(S3TestHelper::S3_PATH, flags);
+		string buffer(8, '\0');
+		handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 7);
+		REQUIRE(buffer == data.substr(7, buffer.size()));
+	};
+	if (failures > retries || auth_status) {
+		auto error = RequireError(read);
+		REQUIRE(StringUtil::Contains(error, "RequestTimeout"));
+	} else {
+		read();
+	}
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	vector<MockS3RequestObservation> gets;
+	for (const auto &observation : observations) {
+		if (observation.method == "GET") {
+			gets.push_back(observation);
+		}
+	}
+	if (auth_status) {
+		S3TestHelper::AssertSingleRefresh(test_id);
+		REQUIRE(gets.size() == retries + 2);
+		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::STALE_KEY_ID, auth_status) == retries + 1);
+		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::FRESH_KEY_ID, 400) == 1);
+	} else {
+		REQUIRE(gets.size() == MinValue(failures, retries) + 1);
+	}
+	for (idx_t i = 1; i < gets.size(); i++) {
+		REQUIRE(gets[i].target == gets[0].target);
+		REQUIRE(gets[i].range == gets[0].range);
+		REQUIRE(gets[i].remote_port != gets[i - 1].remote_port);
+	}
 }
 
 static void RunTransientDeleteRetryScenario(const string &client_implementation) {
@@ -753,9 +893,10 @@ static void RunMalformedListWithoutRetriesTest(const string &client_implementati
 	REQUIRE(GetListObservations(observations).size() == 1);
 }
 
-static void RunMixedListRetryBudgetTest(const string &client_implementation) {
+static void RunMixedListRetryBudgetTest(const string &client_implementation, bool core_failure = false) {
 	MockS3ServerConfig config;
-	config.failures.transient_400_lists = 1;
+	config.failures.transient_503_lists = core_failure ? 1 : 0;
+	config.failures.transient_400_lists = core_failure ? 0 : 1;
 	config.failures.malformed_success_lists = 1;
 	MockS3Server server(std::move(config));
 
@@ -772,7 +913,7 @@ static void RunMixedListRetryBudgetTest(const string &client_implementation) {
 	INFO(MockS3DescribeObservations(observations));
 	auto lists = GetListObservations(observations);
 	REQUIRE(lists.size() == 2);
-	REQUIRE(lists[0].status == 400);
+	REQUIRE(lists[0].status == (core_failure ? 503 : 400));
 	REQUIRE(lists[1].status == 200);
 	REQUIRE(lists[0].target == lists[1].target);
 }
@@ -965,6 +1106,73 @@ TEST_CASE("S3 ListObjectsV2 response failures share one retry budget", "[httpfs]
 	}
 	SECTION("curl") {
 		RunMixedListRetryBudgetTest("curl");
+	}
+	SECTION("httplib core throttle then malformed response") {
+		RunMixedListRetryBudgetTest("httplib", true);
+	}
+	SECTION("curl core throttle then malformed response") {
+		RunMixedListRetryBudgetTest("curl", true);
+	}
+}
+
+TEST_CASE("S3 reads share core's retry budget", "[httpfs][s3][retry][shared_retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		for (bool range : {false, true}) {
+			for (bool caching : {false, true}) {
+				CAPTURE(client, range, caching);
+				RunSharedReadBudgetScenario(client, range, caching, 2, 1000);
+				RunSharedReadBudgetScenario(client, range, caching, 2, 2);
+				RunSharedReadBudgetScenario(client, range, caching, 0, 1);
+			}
+		}
+	}
+}
+
+TEST_CASE("S3 credential correction retains spent GET retries", "[httpfs][s3][retry][shared_retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		for (bool range : {false, true}) {
+			for (int status : {401, 403}) {
+				CAPTURE(client, range, status);
+				RunSharedReadBudgetScenario(client, range, true, 2, 1, status);
+			}
+		}
+	}
+}
+
+TEST_CASE("S3 response and transport failures share a DELETE budget", "[httpfs][s3][retry][shared_retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		for (idx_t retries : {1, 2}) {
+			CAPTURE(client, retries);
+			MockS3ServerConfig config;
+			config.auth.refresh_target = MockS3RefreshTarget::PUT;
+			config.failures.transient_delete_failures = 1;
+			config.failures.transient_delete_disconnects = 1;
+			MockS3Server server(std::move(config));
+			DuckDB db(nullptr);
+			Connection con(db);
+			S3TestHelper::ConfigureRefresh(db, con, server, client, true);
+			S3TestHelper::RequireQueryOk(con, "SET http_retries=" + to_string(retries));
+			S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=0");
+			S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+			auto &fs = FileSystem::GetFileSystem(*con.context);
+			if (retries == 1) {
+				REQUIRE_THROWS(fs.RemoveFile(S3TestHelper::S3_PATH));
+			} else {
+				fs.RemoveFile(S3TestHelper::S3_PATH);
+			}
+			S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+			auto observations = server.Observations();
+			INFO(MockS3DescribeObservations(observations));
+			REQUIRE(observations.size() == retries + 1);
+			REQUIRE(observations[0].status == 400);
+			REQUIRE(observations[1].status == 200);
+			if (retries == 2) {
+				REQUIRE(observations[2].status == 204);
+			}
+			for (idx_t i = 1; i < observations.size(); i++) {
+				REQUIRE(observations[i].remote_port != observations[i - 1].remote_port);
+			}
+		}
 	}
 }
 
