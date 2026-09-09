@@ -190,12 +190,11 @@ struct S3RequestExecutor {
 	                                                  BaseRequest &request);
 
 private:
-	using CreateDataCallback = std::function<S3RequestData(HTTPRetryBudget &)>;
 	using FreshConnectionCallback = std::function<void(const S3RequestData &)>;
 	using RefreshCallback = std::function<bool(const S3RequestData &)>;
 	using SetRegionCallback = std::function<void(const S3RequestData &, const string &)>;
 
-	static S3RequestResult Run(HTTPRequestSession &session, const CreateDataCallback &create_data,
+	static S3RequestResult Run(EncryptionUtil &encryption_util, HTTPRequestSession &session, const S3RequestSpec &spec,
 	                           const RequestCallback &request, const RefreshCallback &refresh_auth_params,
 	                           const SetRegionCallback &set_region, const FreshConnectionCallback &fresh_connection,
 	                           const ReceivedResponseCallback &response_callback = {});
@@ -203,8 +202,6 @@ private:
 	static void InvalidateSessionConnections(HTTPRequestSession &session, HTTPFSParams &params);
 	static S3RequestData CreateRequestData(EncryptionUtil &encryption_util, const CapturedHTTPRequestSnapshot &captured,
 	                                       const S3RequestSpec &spec, HTTPRetryBudget &retry_budget);
-	static S3RequestData CreateHandleRequestData(EncryptionUtil &encryption_util, S3FileHandle &handle,
-	                                             const S3RequestSpec &spec, HTTPRetryBudget &retry_budget);
 };
 
 } // namespace duckdb

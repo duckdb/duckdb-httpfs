@@ -557,12 +557,6 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	return result;
 }
 
-S3RequestData S3RequestExecutor::CreateHandleRequestData(EncryptionUtil &encryption_util, S3FileHandle &s3_handle,
-                                                         const S3RequestSpec &spec, HTTPRetryBudget &retry_budget) {
-	auto captured = s3_handle.request_session->Capture();
-	return S3RequestExecutor::CreateRequestData(encryption_util, captured, spec, retry_budget);
-}
-
 static optional_idx GetRegionRedirect(const HTTPResponse &response, const S3AuthParams &auth_params,
                                       string &region_out) {
 	if (response.status != HTTPStatusCode::MovedPermanently_301 && response.status != HTTPStatusCode::BadRequest_400) {
@@ -641,9 +635,9 @@ static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
 }
 
-S3RequestResult S3RequestExecutor::Run(HTTPRequestSession &session, const CreateDataCallback &create_data,
-                                       const RequestCallback &request, const RefreshCallback &refresh_auth_params,
-                                       const SetRegionCallback &set_region,
+S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,
+                                       const S3RequestSpec &spec, const RequestCallback &request,
+                                       const RefreshCallback &refresh_auth_params, const SetRegionCallback &set_region,
                                        const FreshConnectionCallback &fresh_connection,
                                        const ReceivedResponseCallback &response_callback) {
 	bool retried_auth_refresh = false;
@@ -653,7 +647,7 @@ S3RequestResult S3RequestExecutor::Run(HTTPRequestSession &session, const Create
 	retry_budget.Run([&]() {
 		// Only bounded auth/region corrections bypass transient retry admission.
 		for (;;) {
-			auto request_data = create_data(retry_budget);
+			auto request_data = CreateRequestData(encryption_util, session.Capture(), spec, retry_budget);
 			try {
 				auto response = request(request_data);
 				auto received_response = response && !response->HasRequestError();
@@ -781,11 +775,7 @@ S3RequestResult S3RequestExecutor::RunSession(EncryptionUtil &encryption_util, H
                                               const RegionRedirectCallback &region_redirect,
                                               const ReceivedResponseCallback &response_callback) {
 	return S3RequestExecutor::Run(
-	    session,
-	    [&](HTTPRetryBudget &retry_budget) {
-		    return S3RequestExecutor::CreateRequestData(encryption_util, session.Capture(), spec, retry_budget);
-	    },
-	    request,
+	    encryption_util, session, spec, request,
 	    [&](const S3RequestData &request_data) { return S3RequestExecutor::TryRefreshSession(session, request_data); },
 	    [&](const S3RequestData &request_data, const string &correct_region) {
 		    string previous_region;
@@ -803,11 +793,7 @@ S3RequestResult S3RequestExecutor::RunSession(EncryptionUtil &encryption_util, H
 S3RequestResult S3RequestExecutor::RunHandle(EncryptionUtil &encryption_util, S3FileHandle &s3_handle,
                                              const S3RequestSpec &spec, const RequestCallback &request) {
 	return S3RequestExecutor::Run(
-	    *s3_handle.request_session,
-	    [&](HTTPRetryBudget &retry_budget) {
-		    return S3RequestExecutor::CreateHandleRequestData(encryption_util, s3_handle, spec, retry_budget);
-	    },
-	    request,
+	    encryption_util, *s3_handle.request_session, spec, request,
 	    [&](const S3RequestData &request_data) {
 		    return S3RequestExecutor::TryRefreshSession(*s3_handle.request_session, request_data);
 	    },
