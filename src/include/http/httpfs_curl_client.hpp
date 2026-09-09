@@ -37,7 +37,8 @@ private:
 	CURLHandle();
 
 public:
-	CURLHandle(const string &token, const string &cert_path, bool use_native_ca);
+	CURLHandle(const string &token, const string &cert_path, bool use_native_ca,
+	           shared_ptr<CurlCertificateStoreCache> certificate_store_cache = nullptr);
 	~CURLHandle();
 
 public:
@@ -47,6 +48,7 @@ public:
 	CURLcode Execute() {
 		return curl_easy_perform(curl);
 	}
+	void SetVerifySSL(bool verify_ssl);
 	template <class T>
 	void SetOption(CURLoption option, T value) {
 		auto result = curl_easy_setopt(curl, option, value);
@@ -57,7 +59,16 @@ public:
 	uint16_t GetResponseCode();
 
 private:
+	static CURLcode ConfigureSSLContext(CURL *curl, void *ssl_context, void *user_data);
+
+private:
+	//! Curl transport and the immutable CA bundle selection.
 	CURL *curl = nullptr;
+	string cert_path;
+
+	//! A non-null cache selects callback-based verification; otherwise curl handles it.
+	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
+	bool verify_server_certificate = true;
 };
 
 class CURLRequestHeaders {

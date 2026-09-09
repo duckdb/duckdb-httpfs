@@ -1,4 +1,5 @@
 #include "http/httpfs_client.hpp"
+#include "http/curl_certificate_store_cache.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/thread.hpp"
@@ -89,6 +90,9 @@ void HTTPClientConnectionCache::Clear() {
 //===--------------------------------------------------------------------===//
 // HTTPFSCurlUtil — connection caching
 //===--------------------------------------------------------------------===//
+
+HTTPFSCurlUtil::HTTPFSCurlUtil() : certificate_store_cache(make_shared_ptr<CurlCertificateStoreCache>()) {
+}
 
 bool HTTPFSCurlUtil::EnableCaching(const BaseRequest &request) const {
 	if (!ConnectionCachingEnabled()) {

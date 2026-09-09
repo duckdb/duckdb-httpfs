@@ -1,6 +1,7 @@
 target_sources(
   unittest_httpfs
-  PRIVATE connection_reuse_test.cpp
+  PRIVATE certificate_store_test.cpp
+          connection_reuse_test.cpp
           http_cache_policy_test.cpp
           hffs_test.cpp
           http_request_session_test.cpp
