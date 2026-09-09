@@ -9,7 +9,7 @@
 #include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/common/hash_functions.hpp"
 #include "duckdb/common/helper.hpp"
-#include "duckdb/common/http_util.hpp"
+#include "duckdb/main/http/http_util.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/function/scalar/strftime_format.hpp"
@@ -449,12 +449,12 @@ static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const stri
 	return S3AuthResolver::Resolve(opener, info);
 }
 
-S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(optional_ptr<FileOpener> opener,
+S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(HTTPFSUtil &http_util,
+                                                                     optional_ptr<FileOpener> opener,
                                                                      const string &path) {
 	FileOpenerInfo info = {path};
-	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util.InitializeParameters(opener, info);
-	return S3RefreshableHTTPParams(params->Cast<HTTPFSParams>());
+	auto params = HTTPFSUtil::InitializeRawParameters(http_util, opener, info);
+	return S3RefreshableHTTPParams(*params);
 }
 
 static bool TryRefreshS3SecretForPath(ClientContext &context, const string &path) {
@@ -489,7 +489,8 @@ static bool ReloadS3AuthMaterial(optional_ptr<FileOpener> opener, const string &
 	    reloaded_auth_params.GetCredentials().region != previous_region) {
 		reloaded_auth_params = reloaded_auth_params.WithRegion(std::move(previous_region));
 	}
-	auto reloaded_http_params = S3RequestExecutor::ReadRefreshableHTTPParams(opener, path);
+	auto reloaded_http_params =
+	    S3RequestExecutor::ReadRefreshableHTTPParams(http_params.http_util.Cast<HTTPFSUtil>(), opener, path);
 
 	if (reloaded_auth_params == auth_params && reloaded_http_params == S3RefreshableHTTPParams(http_params)) {
 		return false;
@@ -783,11 +784,7 @@ S3RequestResult S3RequestExecutor::RunSession(EncryptionUtil &encryption_util, H
 			    region_redirect(request_data, previous_region, correct_region);
 		    }
 	    },
-	    [&](const S3RequestData &request_data) {
-		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		    S3RequestExecutor::InvalidateSessionConnections(session, params);
-	    },
-	    response_callback);
+	    [&](const S3RequestData &) { S3RequestExecutor::InvalidateSessionConnections(session); }, response_callback);
 }
 
 S3RequestResult S3RequestExecutor::RunHandle(EncryptionUtil &encryption_util, S3FileHandle &s3_handle,
@@ -811,38 +808,25 @@ S3RequestResult S3RequestExecutor::RunHandle(EncryptionUtil &encryption_util, S3
 	    {});
 }
 
-void S3RequestExecutor::InvalidateSessionConnections(HTTPRequestSession &session, HTTPFSParams &params) {
-	session.InvalidateClients();
-	if (params.httpfs_util) {
-		params.httpfs_util->ClearCachedConnections();
-	}
+void S3RequestExecutor::InvalidateSessionConnections(HTTPRequestSession &session) {
+	session.InvalidateConnections();
 }
 
 unique_ptr<HTTPResponse> S3RequestExecutor::SendSessionRequest(HTTPRequestSession &session, S3RequestData &request_data,
                                                                BaseRequest &request) {
 	D_ASSERT(&request.params == request_data.http_params.get());
 	request.retry_budget = request_data.retry_budget;
-	auto &params = request_data.http_params->Cast<HTTPFSParams>();
-	auto lease = session.AcquireClient(request_data.captured, params, request.proto_host_port);
 	try {
-		auto response = params.http_util.Request(request, lease.Client());
+		auto response = session.Request(request);
 		auto request_timeout = response && S3RequestUtil::IsRequestTimeout(*response);
-		// A completed S3 response leaves the transport reusable unless it reports a stalled connection.
-		if (response && (request_timeout || response->HasRequestError())) {
-			lease.Invalidate();
-		}
 		if (request_timeout) {
-			InvalidateSessionConnections(session, params);
+			InvalidateSessionConnections(session);
 		}
 		return response;
 	} catch (std::exception &ex) {
-		lease.Invalidate();
 		if (IsS3RequestTimeoutError(ErrorData(ex))) {
-			InvalidateSessionConnections(session, params);
+			InvalidateSessionConnections(session);
 		}
-		throw;
-	} catch (...) {
-		lease.Invalidate();
 		throw;
 	}
 }
@@ -1097,16 +1081,18 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 shared_ptr<HTTPRequestSession> S3RequestExecutor::CreateSession(optional_ptr<FileOpener> opener, const string &path,
                                                                 const S3AuthParams &auth_params) {
 	FileOpenerInfo info = {path};
-	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto http_params = http_util.InitializeParameters(opener, info);
+	auto request_session = HTTPRequestSession::Create(opener, info);
 	weak_ptr<ClientContext> weak_context;
 	auto context = FileOpener::TryGetClientContext(opener);
 	auto refresh_enabled = CredentialRefreshEnabled(opener);
 	if (context && refresh_enabled) {
 		weak_context = context->shared_from_this();
 	}
-	return make_shared_ptr<HTTPRequestSession>(make_shared_ptr<S3RequestSnapshot>(
-	    http_params->Cast<HTTPFSParams>(), auth_params, path, std::move(weak_context), refresh_enabled));
+	auto captured = request_session->Capture();
+	request_session->TryPublish(captured.snapshot,
+	                            make_shared_ptr<S3RequestSnapshot>(captured.snapshot->Params(), auth_params, path,
+	                                                               std::move(weak_context), refresh_enabled));
+	return request_session;
 }
 
 } // namespace duckdb

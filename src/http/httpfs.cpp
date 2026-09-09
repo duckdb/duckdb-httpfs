@@ -7,7 +7,7 @@
 #include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/helper.hpp"
-#include "duckdb/common/http_util.hpp"
+#include "duckdb/main/http/http_util.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/multiply.hpp"
@@ -23,6 +23,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/storage/external_file_cache/external_file_cache_util.hpp"
 #include "http/http_state.hpp"
 
 #include <map>
@@ -56,24 +57,22 @@ void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> res
 
 struct HTTPParametersInitializer {
 private:
-	HTTPParametersInitializer(HTTPFSUtil &httpfs_util_p, optional_ptr<FileOpener> opener_p,
+	HTTPParametersInitializer(HTTPUtil &http_util, optional_ptr<FileOpener> opener_p,
 	                          optional_ptr<FileOpenerInfo> info_p)
-	    : httpfs_util(httpfs_util_p), opener(opener_p), info(info_p), result(make_uniq<HTTPFSParams>(httpfs_util)) {
+	    : opener(opener_p), info(info_p), result(make_uniq<HTTPFSParams>(http_util)) {
 	}
 
 public:
-	static unique_ptr<HTTPParams> Create(HTTPFSUtil &httpfs_util, optional_ptr<FileOpener> opener,
-	                                     optional_ptr<FileOpenerInfo> info) {
-		HTTPParametersInitializer initializer(httpfs_util, opener, info);
+	static unique_ptr<HTTPFSParams> Create(HTTPUtil &http_util, optional_ptr<FileOpener> opener,
+	                                       optional_ptr<FileOpenerInfo> info) {
+		HTTPParametersInitializer initializer(http_util, opener, info);
 		return initializer.Initialize();
 	}
 
 private:
-	unique_ptr<HTTPParams> Initialize() {
+	unique_ptr<HTTPFSParams> Initialize() {
 		result->Initialize(opener);
 		result->state = HTTPState::TryGetState(opener);
-		result->client_reuse_mode = httpfs_util.GetClientReuseMode();
-		result->httpfs_util = httpfs_util;
 		if (!opener) {
 			return std::move(result);
 		}
@@ -108,9 +107,6 @@ private:
 		if (context &&
 		    context->TryGetCurrentUserSetting(EnableExternalFileCacheSetting::SettingIndex, external_cache_enabled) &&
 		    external_cache_enabled.GetValue<bool>()) {
-			result->override_response_cache_policy = true;
-		} else if (context &&
-		           Settings::Get<ValidateExternalFileCacheSetting>(*context) == CacheValidationMode::NO_VALIDATION) {
 			result->override_response_cache_policy = true;
 		}
 
@@ -200,7 +196,6 @@ private:
 	}
 
 private:
-	HTTPFSUtil &httpfs_util;
 	optional_ptr<FileOpener> opener;
 	optional_ptr<FileOpenerInfo> info;
 	unique_ptr<HTTPFSParams> result;
@@ -208,7 +203,14 @@ private:
 
 unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener> opener,
                                                         optional_ptr<FileOpenerInfo> info) {
-	return HTTPParametersInitializer::Create(*this, opener, info);
+	auto result = InitializeRawParameters(*this, opener, info);
+	result->RefreshTransportReuseDomain();
+	return result;
+}
+
+unique_ptr<HTTPFSParams> HTTPFSUtil::InitializeRawParameters(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,
+                                                             optional_ptr<FileOpenerInfo> info) {
+	return HTTPParametersInitializer::Create(http_util, opener, info);
 }
 
 unique_ptr<HTTPParams> HTTPFSParams::Clone() const {
@@ -230,11 +232,10 @@ static bool IsStrongETag(string etag) {
 }
 
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
-                               unique_ptr<HTTPParams> params_p, HTTPObjectVersion object_version_p)
-    : FileHandle(fs, file.path, flags), request_session(make_shared_ptr<HTTPRequestSession>(
-                                            make_shared_ptr<HTTPRequestSnapshot>(params_p->Cast<HTTPFSParams>()))),
-      flags(flags), length(0), last_modified(0), force_full_download(false), file_offset(0),
-      object_version(std::move(object_version_p)) {
+                               shared_ptr<HTTPRequestSession> request_session_p, HTTPObjectVersion object_version_p)
+    : FileHandle(fs, file.path, flags), request_session(std::move(request_session_p)), flags(flags), length(0),
+      last_modified(0), force_full_download(false), file_offset(0), object_version(std::move(object_version_p)) {
+	D_ASSERT(request_session);
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {
@@ -254,13 +255,6 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		auto force_full_download_entry = info.find("force_full_download");
 		if (force_full_download_entry != info.end()) {
 			force_full_download = force_full_download_entry->second.GetValue<bool>();
-		}
-		auto validate_cache_entry = info.find("validate_external_file_cache");
-		if (validate_cache_entry != info.end() && !validate_cache_entry->second.GetValue<bool>()) {
-			auto captured = request_session->Capture();
-			auto snapshot_params = captured.snapshot->Params();
-			snapshot_params.override_response_cache_policy = true;
-			request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
 		}
 		if (lm_entry != info.end() && etag_entry != info.end() && fs_entry != info.end()) {
 			// we found all relevant entries (last_modified, etag and file size)
@@ -313,8 +307,7 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 	FileOpenerInfo info;
 	info.file_path = file.path;
 
-	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util.InitializeParameters(opener, info);
+	auto request_session = HTTPRequestSession::Create(opener, info);
 
 	auto secret_manager = FileOpener::TryGetSecretManager(opener);
 	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
@@ -323,11 +316,13 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 
 		if (secret_match.HasMatch()) {
 			const auto &kv_secret = secret_match.secret_entry->secret->Cast<KeyValueSecret>();
-			auto &httpfs_params = params->Cast<HTTPFSParams>();
+			auto captured = request_session->Capture();
+			auto httpfs_params = captured.snapshot->Params();
 			httpfs_params.bearer_token = kv_secret.TryGetValue("token", true).ToString();
+			request_session->TryPublish(captured.snapshot, make_shared_ptr<HTTPRequestSnapshot>(httpfs_params));
 		}
 	}
-	return make_uniq<HTTPFileHandle>(*this, file, flags, std::move(params));
+	return make_uniq<HTTPFileHandle>(*this, file, flags, std::move(request_session));
 }
 
 unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file, FileOpenFlags flags,
@@ -337,7 +332,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	if (flags.ReturnNullIfNotExists()) {
 		try {
 			auto handle = CreateHandle(file, flags, opener);
-			handle->Initialize(opener);
+			handle->Initialize(file, opener);
 			return std::move(handle);
 		} catch (...) {
 			return nullptr;
@@ -350,7 +345,7 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 		handle->write_overwrite_mode = true;
 	}
 
-	handle->Initialize(opener);
+	handle->Initialize(file, opener);
 
 	DUCKDB_LOG_FILE_SYSTEM_OPEN((*handle));
 
@@ -1115,16 +1110,21 @@ HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
 	return result;
 }
 
-void HTTPFileHandle::InitializeRequestState(optional_ptr<FileOpener> opener) {
+void HTTPFileHandle::InitializeRequestState(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
 	auto client_context = FileOpener::TryGetClientContext(opener);
+	auto database = FileOpener::TryGetDatabase(opener);
 	if (client_context) {
 		buffer_allocator = BufferAllocator::Get(*client_context);
 	} else {
-		auto database = FileOpener::TryGetDatabase(opener);
 		buffer_allocator = database ? BufferAllocator::Get(*database) : Allocator::DefaultAllocator();
 	}
 	auto captured = request_session->Capture();
 	auto snapshot_params = captured.snapshot->Params();
+	if (database) {
+		const auto validation = ExternalFileCacheUtil::GetCacheValidationMode(file, client_context, *database);
+		snapshot_params.override_response_cache_policy =
+		    snapshot_params.override_response_cache_policy || validation == CacheValidationMode::NO_VALIDATION;
+	}
 	snapshot_params.state = HTTPState::TryGetState(opener);
 	if (!snapshot_params.state) {
 		snapshot_params.state = make_shared_ptr<HTTPState>();
@@ -1183,9 +1183,9 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 	}
 }
 
-void HTTPFileHandle::Initialize(optional_ptr<FileOpener> opener) {
+void HTTPFileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
 	auto &hfs = file_system.Cast<HTTPFileSystem>();
-	InitializeRequestState(opener);
+	InitializeRequestState(file, opener);
 	auto current_cache = TryGetMetadataCache(opener, hfs);
 	bool should_write_cache = false;
 	if (TryInitializeRead(hfs, current_cache, should_write_cache)) {
@@ -1208,18 +1208,6 @@ HTTPFileHandle::~HTTPFileHandle() {
 }
 
 void HTTPFileHandle::Close() {
-}
-
-void HTTPFSUtil::ClearCachedConnections() {
-	// no-op by default
-}
-
-HTTPClientReuseMode HTTPFSUtil::GetClientReuseMode() const {
-#ifdef EMSCRIPTEN
-	return HTTPClientReuseMode::NONE;
-#else
-	return HTTPClientReuseMode::SESSION_LOCAL;
-#endif
 }
 
 string HTTPFSUtil::GetName() const {

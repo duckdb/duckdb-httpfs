@@ -85,16 +85,17 @@ public:
 public:
 	void Initialize(HTTPParams &http_p) override {
 		auto &http_params = http_p.Cast<HTTPFSParams>();
+		http_params.PrepareTransportReuseDomain();
+		const auto new_reuse_domain = http_params.GetTransportReuseDomain();
+		const bool connection_changed =
+		    !transport_reuse_domain.IsValid() || transport_reuse_domain.GetIndex() != new_reuse_domain;
+		if (transport_reuse_domain.IsValid() && connection_changed) {
+			client = make_uniq<duckdb_httplib_openssl::Client>(GetBaseUrl());
+		}
 		client->set_follow_location(http_params.follow_location);
 		client->set_keep_alive(http_params.keep_alive);
-		if (!http_params.ca_cert_file.empty()) {
-			client->set_ca_cert_path(http_params.ca_cert_file.c_str());
-		} else {
-			client->set_ca_cert_path("");
-		}
-		const bool verify_ssl =
-		    http_params.override_verify_ssl ? http_params.verify_ssl : http_params.enable_server_cert_verification;
-		client->enable_server_certificate_verification(verify_ssl);
+		client->set_ca_cert_path(http_params.ca_cert_file.c_str());
+		client->enable_server_certificate_verification(http_params.VerifyServerCertificate());
 		client->set_write_timeout(NumericCast<time_t>(http_params.timeout),
 		                          NumericCast<time_t>(http_params.timeout_usec));
 		client->set_read_timeout(NumericCast<time_t>(http_params.timeout),
@@ -108,19 +109,31 @@ public:
 			client->set_bearer_token_auth("");
 		}
 
-		if (!http_params.http_proxy.empty()) {
+		if (connection_changed && !http_params.http_proxy.empty()) {
 			client->set_proxy(http_params.http_proxy, NumericCast<int>(http_params.http_proxy_port));
-
-			if (!http_params.http_proxy_username.empty()) {
-				client->set_proxy_basic_auth(http_params.http_proxy_username, http_params.http_proxy_password);
-			} else {
-				client->set_proxy_basic_auth("", "");
-			}
-		} else {
+		} else if (connection_changed) {
 			client->set_proxy("", -1);
+		}
+		if (!http_params.http_proxy_username.empty()) {
+			client->set_proxy_basic_auth(http_params.http_proxy_username, http_params.http_proxy_password);
+		} else {
 			client->set_proxy_basic_auth("", "");
 		}
 		state = http_params.state;
+		transport_reuse_domain = new_reuse_domain;
+	}
+
+	bool CanReuse(const HTTPParams &http_p) const override {
+		auto &http_params = http_p.Cast<HTTPFSParams>();
+		return http_params.CanReuseTransport() && transport_reuse_domain.IsValid() &&
+		       transport_reuse_domain.GetIndex() == http_params.GetTransportReuseDomain();
+	}
+
+	void Cleanup() override {
+		state = nullptr;
+		client->set_bearer_token_auth("");
+		client->set_proxy_basic_auth("", "");
+		client->set_ca_cert_path("");
 	}
 
 	static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &header_map) {
@@ -271,10 +284,14 @@ private:
 private:
 	unique_ptr<duckdb_httplib_openssl::Client> client;
 	optional_ptr<HTTPState> state;
+	//! Reuse domain used to configure the current connection.
+	optional_idx transport_reuse_domain;
 };
 
 unique_ptr<HTTPClient> HTTPFSUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
-	auto client = make_uniq<HTTPFSClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
+	auto &httpfs_params = http_params.Cast<HTTPFSParams>();
+	httpfs_params.PrepareTransportReuseDomain();
+	auto client = make_uniq<HTTPFSClient>(httpfs_params, proto_host_port);
 	return std::move(client);
 }
 

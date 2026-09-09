@@ -30,10 +30,10 @@ S3FileHandle::UploadClaim::~UploadClaim() {
 }
 
 S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
-                           unique_ptr<HTTPParams> http_params_p, const S3AuthParams &auth_params_p,
+                           shared_ptr<HTTPRequestSession> request_session_p, const S3AuthParams &auth_params_p,
                            const S3UploadConfig &upload_config,
                            optional<S3MultipartUploadPolicy> multipart_upload_policy)
-    : HTTPFileHandle(fs, file, flags, std::move(http_params_p),
+    : HTTPFileHandle(fs, file, flags, std::move(request_session_p),
                      file.extended_info ? auth_params_p.GetProvider().ReadObjectVersion(*file.extended_info)
                                         : HTTPObjectVersion()),
       requested_version(S3Url::Parse(file.path, auth_params_p).GetObjectVersion()) {
@@ -217,8 +217,7 @@ unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, 
 	FileOpenerInfo info = {file.path};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 
-	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util.InitializeParameters(opener, info);
+	auto request_session = HTTPRequestSession::Create(opener, info);
 	S3UploadConfig upload_config;
 	optional<S3MultipartUploadPolicy> multipart_upload_policy;
 	if (flags.OpenForWriting()) {
@@ -226,7 +225,7 @@ unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, 
 		upload_config = S3UploadConfig::ReadFrom(opener, *multipart_upload_policy);
 	}
 
-	return make_uniq<S3FileHandle>(*this, file, flags, std::move(params), auth_params, upload_config,
+	return make_uniq<S3FileHandle>(*this, file, flags, std::move(request_session), auth_params, upload_config,
 	                               std::move(multipart_upload_policy));
 }
 
@@ -249,7 +248,7 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 	return result;
 }
 
-void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
+void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
 	auto context = FileOpener::TryGetClientContext(opener);
 	auto refresh_enabled = S3RequestExecutor::CredentialRefreshEnabled(opener);
 	{
@@ -265,7 +264,7 @@ void S3FileHandle::Initialize(optional_ptr<FileOpener> opener) {
 		                                       std::move(weak_context), refresh_enabled, snapshot.region_redirected,
 		                                       snapshot.credential_generation, snapshot.multipart_upload_policy));
 	}
-	HTTPFileHandle::Initialize(opener);
+	HTTPFileHandle::Initialize(file, opener);
 }
 
 bool S3FileSystem::CanHandleFile(const string &fpath) {

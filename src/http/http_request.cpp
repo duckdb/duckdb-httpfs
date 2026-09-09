@@ -35,23 +35,6 @@ static HTTPHeaders PrepareFullGetHeaders(const HTTPHeaders &headers, const HTTPR
 	return result;
 }
 
-static unique_ptr<HTTPResponse> SendSessionRequest(HTTPRequestSession &session,
-                                                   const CapturedHTTPRequestSnapshot &captured,
-                                                   HTTPFSParams &request_params, BaseRequest &request) {
-	auto lease = session.AcquireClient(captured, request_params, request.proto_host_port);
-	try {
-		auto response = request_params.http_util.Request(request, lease.Client());
-		// A completed HTTP response leaves the transport reusable, regardless of its status.
-		if (response && response->HasRequestError()) {
-			lease.Invalidate();
-		}
-		return response;
-	} catch (...) {
-		lease.Invalidate();
-		throw;
-	}
-}
-
 unique_ptr<HTTPResponse> HTTPFileSystem::RunHeadRequest(const string &url, const HTTPHeaders &header_map,
                                                         HTTPFSParams &http_params,
                                                         const HTTPSendCallback &send_request) {
@@ -297,18 +280,16 @@ unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, const s
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto captured = hfh.request_session->Capture();
 	auto session_request = captured.snapshot->CreateRequest(std::move(header_map));
-	return RunHeadRequest(url, session_request.headers, *session_request.params, [&](BaseRequest &request) {
-		return SendSessionRequest(*hfh.request_session, captured, *session_request.params, request);
-	});
+	return RunHeadRequest(url, session_request.headers, *session_request.params,
+	                      [&](BaseRequest &request) { return hfh.request_session->Request(request); });
 }
 
 unique_ptr<HTTPResponse> HTTPFileSystem::DeleteRequest(FileHandle &handle, const string &url, HTTPHeaders header_map) {
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto captured = hfh.request_session->Capture();
 	auto session_request = captured.snapshot->CreateRequest(std::move(header_map));
-	return RunDeleteRequest(url, session_request.headers, *session_request.params, [&](BaseRequest &request) {
-		return SendSessionRequest(*hfh.request_session, captured, *session_request.params, request);
-	});
+	return RunDeleteRequest(url, session_request.headers, *session_request.params,
+	                        [&](BaseRequest &request) { return hfh.request_session->Request(request); });
 }
 
 const char *HTTPFSUtil::GetRequestMethod(RequestType request_type) {
@@ -407,9 +388,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 	return RunGetRequest(
 	    hfh, url, session_request.headers, *session_request.params, read_config, download,
 	    [&](const HTTPResponse &response) { return GetHTTPError(handle, response, RequestType::GET_REQUEST, url); },
-	    [&](BaseRequest &request) {
-		    return SendSessionRequest(*hfh.request_session, captured, *session_request.params, request);
-	    });
+	    [&](BaseRequest &request) { return hfh.request_session->Request(request); });
 }
 
 unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, string url, HTTPHeaders header_map,
@@ -422,9 +401,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	    hfh, url, session_request.headers, *session_request.params, read_config, file_offset, buffer_out,
 	    buffer_out_len,
 	    [&](const HTTPResponse &response) { return GetHTTPError(handle, response, RequestType::GET_REQUEST, url); },
-	    [&](BaseRequest &request) {
-		    return SendSessionRequest(*hfh.request_session, captured, *session_request.params, request);
-	    });
+	    [&](BaseRequest &request) { return hfh.request_session->Request(request); });
 }
 
 } // namespace duckdb

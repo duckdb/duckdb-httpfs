@@ -49,7 +49,7 @@ protected:
 	unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
 	                                        optional_ptr<FileOpener> opener) override;
 
-	static string ListHFRequest(const ParsedHFUrl &url, HTTPFSParams &http_params, string &next_page_url);
+	static string ListHFRequest(const ParsedHFUrl &url, HTTPRequestSession &session, string &next_page_url);
 
 private:
 	static ParsedHFUrl HFUrlParse(const string &url);
@@ -64,8 +64,8 @@ class HFFileHandle : public HTTPFileHandle {
 
 public:
 	HFFileHandle(FileSystem &fs, ParsedHFUrl hf_url, const OpenFileInfo &file, FileOpenFlags flags,
-	             unique_ptr<HTTPParams> http_params)
-	    : HTTPFileHandle(fs, file, flags, std::move(http_params)), parsed_url(std::move(hf_url)) {
+	             shared_ptr<HTTPRequestSession> request_session)
+	    : HTTPFileHandle(fs, file, flags, std::move(request_session)), parsed_url(std::move(hf_url)) {
 	}
 	~HFFileHandle() override;
 

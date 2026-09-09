@@ -474,7 +474,7 @@ static void RunRefreshPublicationScenario(const string &client_implementation, b
 	auto session = handle->Cast<S3FileHandle>().request_session;
 	S3ProviderRefreshHook refresh_hook(test_id, [session, invalidate_clients, publish_region]() {
 		if (invalidate_clients) {
-			session->InvalidateClients();
+			session->InvalidateConnections();
 		}
 		if (publish_region) {
 			PublishTestS3Region(session, "eu-west-1");

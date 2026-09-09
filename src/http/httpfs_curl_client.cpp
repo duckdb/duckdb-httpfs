@@ -92,14 +92,8 @@ CURLHandle::CURLHandle() {
 	}
 }
 
-CURLHandle::CURLHandle(const string &token, const string &cert_path, bool use_native_ca) : CURLHandle() {
-	if (!token.empty()) {
-		SetOption(CURLOPT_XOAUTH2_BEARER, token.c_str());
-		SetOption(CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
-	}
-	if (!cert_path.empty()) {
-		SetOption(CURLOPT_CAINFO, cert_path.c_str());
-	}
+CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
+	SetOption(CURLOPT_MAXCONNECTS, 1L);
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
 	if (use_native_ca) {
 		ssl_options |= CURLSSLOPT_NATIVE_CA;
@@ -161,6 +155,7 @@ private:
 			client.state = params.state;
 			InitializeHandle(client, params);
 			client.request_info = make_uniq<RequestInfo>();
+			ConfigureCredentials(client, params);
 			ConfigureConnection(client, params);
 			ConfigureTimeoutsAndCallbacks(client, params);
 			ConfigureProxy(client, params);
@@ -168,24 +163,33 @@ private:
 
 	private:
 		static void InitializeHandle(HTTPFSCurlClient &client, const HTTPFSParams &params) {
-			auto cert_file_path = params.ca_cert_file;
-			if (client.curl && client.stored_bearer_token == params.bearer_token &&
-			    client.stored_cert_file_path == cert_file_path) {
+			const auto reuse_domain = params.GetTransportReuseDomain();
+			if (client.curl && client.transport_reuse_domain.IsValid() &&
+			    client.transport_reuse_domain.GetIndex() == reuse_domain) {
 				return;
 			}
 			HTTPFSCurlClient::InitCurlGlobal();
-			client.stored_cert_file_path = cert_file_path;
-			if (cert_file_path.empty()) {
-				cert_file_path = SelectCURLCertPath();
+			client.curl = make_uniq<CURLHandle>(params.ca_cert_file.empty());
+			client.transport_reuse_domain = reuse_domain;
+			client.resolved_cert_file_path = params.ca_cert_file.empty() ? SelectCURLCertPath() : params.ca_cert_file;
+		}
+
+		static void ConfigureCredentials(HTTPFSCurlClient &client, const HTTPFSParams &params) {
+			if (params.bearer_token.empty()) {
+				client.curl->SetOption(CURLOPT_XOAUTH2_BEARER, nullptr);
+				client.curl->SetOption(CURLOPT_HTTPAUTH, CURLAUTH_NONE);
+			} else {
+				client.curl->SetOption(CURLOPT_XOAUTH2_BEARER, params.bearer_token.c_str());
+				client.curl->SetOption(CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
 			}
-			client.curl = make_uniq<CURLHandle>(params.bearer_token, cert_file_path, params.ca_cert_file.empty());
-			client.stored_bearer_token = params.bearer_token;
+			client.curl->SetOption(CURLOPT_CAINFO, client.resolved_cert_file_path.empty()
+			                                           ? nullptr
+			                                           : client.resolved_cert_file_path.c_str());
 		}
 
 		static void ConfigureConnection(HTTPFSCurlClient &client, const HTTPFSParams &params) {
 			client.curl->SetOption(CURLOPT_FORBID_REUSE, params.keep_alive ? 0L : 1L);
-			const bool verify_ssl =
-			    params.override_verify_ssl ? params.verify_ssl : params.enable_curl_server_cert_verification;
+			const bool verify_ssl = params.VerifyServerCertificate();
 			client.curl->SetOption(CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
 			client.curl->SetOption(CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
 		}
@@ -380,8 +384,6 @@ public:
 		if (result != CURLUE_OK) {
 			throw IOException("Failed to initialize curl URL: %s", curl_url_strerror(result));
 		}
-		stored_bearer_token = "";
-		stored_cert_file_path = "";
 		Initialize(http_params);
 	}
 	~HTTPFSCurlClient() override {
@@ -391,7 +393,20 @@ public:
 public:
 	void Initialize(HTTPParams &http_p) override {
 		auto &http_params = http_p.Cast<HTTPFSParams>();
+		http_params.PrepareTransportReuseDomain();
+		if (CanReuse(http_params) &&
+		    http_params.http_util.GetTransportReusePolicy() == HTTPTransportReusePolicy::SHARED && http_params.logger &&
+		    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+			http_params.logger->WriteLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+			                             HTTPFSInfoLogType::ConstructLogMessage("connection_cache_hit", GetBaseUrl()));
+		}
 		ClientConfigurator::Configure(*this, http_params);
+	}
+
+	bool CanReuse(const HTTPParams &http_p) const override {
+		auto &http_params = http_p.Cast<HTTPFSParams>();
+		return curl && http_params.CanReuseTransport() && transport_reuse_domain.IsValid() &&
+		       transport_reuse_domain.GetIndex() == http_params.GetTransportReuseDomain();
 	}
 	static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &header_map) {
 		if (!http_params.user_agent.empty()) {
@@ -616,8 +631,34 @@ public:
 	}
 
 	void Cleanup() override {
-		// Release any buffers retained from the last request before this client is parked in the connection cache.
-		request_info = make_uniq<RequestInfo>();
+		state = nullptr;
+		try {
+			if (curl) {
+				curl->SetOption(CURLOPT_CURLU, nullptr);
+				curl->SetOption(CURLOPT_URL, nullptr);
+				curl->SetOption(CURLOPT_HTTPHEADER, nullptr);
+				curl->SetOption(CURLOPT_POSTFIELDS, nullptr);
+				curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
+				curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
+				// Clearing POSTFIELDS selects POST, so restore a bodyless default before reuse.
+				curl->SetOption(CURLOPT_HTTPGET, 1L);
+				curl->SetOption(CURLOPT_HEADERFUNCTION, nullptr);
+				curl->SetOption(CURLOPT_HEADERDATA, nullptr);
+				curl->SetOption(CURLOPT_WRITEFUNCTION, nullptr);
+				curl->SetOption(CURLOPT_WRITEDATA, nullptr);
+				curl->SetOption(CURLOPT_XOAUTH2_BEARER, nullptr);
+				curl->SetOption(CURLOPT_HTTPAUTH, CURLAUTH_NONE);
+				curl->SetOption(CURLOPT_CAINFO, nullptr);
+				curl->SetOption(CURLOPT_PROXY, nullptr);
+				curl->SetOption(CURLOPT_PROXYUSERNAME, nullptr);
+				curl->SetOption(CURLOPT_PROXYPASSWORD, nullptr);
+			}
+		} catch (...) {
+			curl.reset();
+			request_info.reset();
+			throw;
+		}
+		request_info.reset();
 	}
 
 private:
@@ -718,39 +759,33 @@ private:
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
 	CURLURLHandle curl_base_url;
-	string stored_bearer_token;
-	string stored_cert_file_path;
+	//! Reuse domain used to configure the current connection.
+	optional_idx transport_reuse_domain;
+	string resolved_cert_file_path;
 };
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
-	if (ConnectionCachingEnabled()) {
-		auto client = FindCachedClient(proto_host_port);
-		if (client) {
-			if (http_params.logger &&
-			    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
-				http_params.logger->WriteLog(
-				    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
-				    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_hit", proto_host_port));
-			}
-			client->Initialize(http_params);
-			return client;
-		}
-		if (http_params.logger && http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
-			http_params.logger->WriteLog(
-			    HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
-			    HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", proto_host_port));
-		}
+	auto &httpfs_params = http_params.Cast<HTTPFSParams>();
+	httpfs_params.PrepareTransportReuseDomain();
+	if (connection_caching_enabled && http_params.logger &&
+	    http_params.logger->ShouldLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL)) {
+		http_params.logger->WriteLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
+		                             HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", proto_host_port));
 	}
-	auto client = make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
+	auto client = make_uniq<HTTPFSCurlClient>(httpfs_params, proto_host_port);
 	return std::move(client);
 }
 
-unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClientExtended(HTTPParams &http_params, const string &proto_host_port,
-                                                                const HTTPClientInitializationOptions &options) {
-	if (options.cache_policy == HTTPClientCachePolicy::BYPASS_CACHE) {
-		return make_uniq<HTTPFSCurlClient>(http_params.Cast<HTTPFSParams>(), proto_host_port);
-	}
-	return InitializeClient(http_params, proto_host_port);
+HTTPFSCurlUtil::HTTPFSCurlUtil(bool connection_caching_enabled_p)
+    : connection_caching_enabled(connection_caching_enabled_p) {
+}
+
+bool HTTPFSCurlUtil::GetDefaultVerifySSL(const HTTPFSParams &params) const {
+	return params.enable_curl_server_cert_verification;
+}
+
+HTTPTransportReusePolicy HTTPFSCurlUtil::GetTransportReusePolicy() const {
+	return connection_caching_enabled ? HTTPTransportReusePolicy::SHARED : HTTPTransportReusePolicy::EPHEMERAL;
 }
 
 string HTTPFSCurlUtil::GetName() const {

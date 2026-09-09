@@ -42,9 +42,12 @@ static string ParseNextUrlFromLinkHeader(const string &link_header_content) {
 
 HFFileHandle::~HFFileHandle() = default;
 
-string HuggingFaceFileSystem::ListHFRequest(const ParsedHFUrl &url, HTTPFSParams &http_params, string &next_page_url) {
-	HTTPHeaders header_map;
+string HuggingFaceFileSystem::ListHFRequest(const ParsedHFUrl &url, HTTPRequestSession &session,
+                                            string &next_page_url) {
 	string link_header_result;
+	auto captured = session.Capture();
+	auto session_request = captured.snapshot->CreateRequest();
+	auto &http_params = *session_request.params;
 
 	std::stringstream response;
 	string fragment_next_page_url = next_page_url;
@@ -55,7 +58,7 @@ string HuggingFaceFileSystem::ListHFRequest(const ParsedHFUrl &url, HTTPFSParams
 		fragment_next_page_url = "/" + fragment_next_page_url;
 	}
 	GetRequestInfo get_request(
-	    url.endpoint + fragment_next_page_url, header_map, http_params,
+	    url.endpoint + fragment_next_page_url, session_request.headers, http_params,
 	    [&](const HTTPResponse &response) {
 		    if (static_cast<int>(response.status) >= 400) {
 			    throw HTTPFSUtil::GetHTTPStatusError(response, RequestType::GET_REQUEST, "listing", next_page_url);
@@ -69,7 +72,7 @@ string HuggingFaceFileSystem::ListHFRequest(const ParsedHFUrl &url, HTTPFSParams
 		    response << string(const_char_ptr_cast(data), data_length);
 		    return true;
 	    });
-	auto res = http_params.http_util.Request(get_request);
+	auto res = session.Request(get_request);
 	if (res->HasRequestError()) {
 		throw IOException(res->GetRequestError() + " error for HTTP GET to '" + next_page_url + "'");
 	}
@@ -249,10 +252,11 @@ vector<OpenFileInfo> HuggingFaceFileSystem::Glob(const string &path, FileOpener 
 
 	FileOpenerInfo info;
 	info.file_path = path;
-	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util.InitializeParameters(opener, info);
-	auto &http_params = params->Cast<HTTPFSParams>();
+	auto request_session = HTTPRequestSession::Create(opener, info);
+	auto captured = request_session->Capture();
+	auto http_params = captured.snapshot->Params();
 	SetParams(http_params, path, opener);
+	request_session->TryPublish(captured.snapshot, make_shared_ptr<HTTPRequestSnapshot>(http_params));
 	ParsedHFUrl curr_hf_path = parsed_glob_url;
 	curr_hf_path.path = shared_path;
 
@@ -272,7 +276,7 @@ vector<OpenFileInfo> HuggingFaceFileSystem::Glob(const string &path, FileOpener 
 			break;
 		}
 
-		auto response_str = ListHFRequest(curr_hf_path, http_params, next_page_url);
+		auto response_str = ListHFRequest(curr_hf_path, *request_session, next_page_url);
 		ParseListResult(response_str, files, dirs);
 	}
 
@@ -327,11 +331,13 @@ unique_ptr<HTTPFileHandle> HuggingFaceFileSystem::CreateHandle(const OpenFileInf
 	FileOpenerInfo info;
 	info.file_path = file.path;
 
-	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util.InitializeParameters(opener, info);
-	SetParams(params->Cast<HTTPFSParams>(), file.path, opener);
+	auto request_session = HTTPRequestSession::Create(opener, info);
+	auto captured = request_session->Capture();
+	auto params = captured.snapshot->Params();
+	SetParams(params, file.path, opener);
+	request_session->TryPublish(captured.snapshot, make_shared_ptr<HTTPRequestSnapshot>(params));
 
-	return make_uniq<HFFileHandle>(*this, std::move(parsed_url), file, flags, std::move(params));
+	return make_uniq<HFFileHandle>(*this, std::move(parsed_url), file, flags, std::move(request_session));
 }
 
 void HuggingFaceFileSystem::SetParams(HTTPFSParams &params, const string &path, optional_ptr<FileOpener> opener) {
