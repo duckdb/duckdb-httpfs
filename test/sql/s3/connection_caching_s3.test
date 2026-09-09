@@ -33,7 +33,7 @@ SELECT count(*) > 0 FROM duckdb_logs WHERE message LIKE '%connection_cache_miss%
 ----
 true
 
-# Read the same file again — the file handle was destroyed, client returned to pool, should get a hit
+# Read the same file again — the file handle was destroyed, client returned to the manager, should get a hit
 statement ok
 FROM parquet_scan('s3://overturemaps-us-west-2/bridgefiles/2025-03-19.0-beta.0/dataset=Esri Community Maps/theme=buildings/type=building/part-00000-947c2149-23db-4abc-a7ee-3a892aac90ff.c000.snappy.parquet') LIMIT 1;
 

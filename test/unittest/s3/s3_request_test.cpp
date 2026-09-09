@@ -3,6 +3,7 @@
 #include "s3/mock_s3_server.hpp"
 #include "s3/s3_test_helper.hpp"
 
+#include "http/http_test_helper.hpp"
 #include "http/httpfs.hpp"
 #include "http/httpfs_client.hpp"
 #include "crypto.hpp"
@@ -2111,34 +2112,52 @@ TEST_CASE("S3 malformed response cleanup does not require retry admission", "[ht
 	}
 	for (idx_t retries : {0, 2}) {
 		CAPTURE(retries);
-		HTTPFSUtil http_util;
-		HTTPFSParams params(http_util);
-		params.retries = retries;
-		params.retry_wait_ms = 1;
-		auto snapshot = make_shared_ptr<S3RequestSnapshot>(params, ResolveTestAuth(TestAuthConfig()), "s3://bucket/key",
-		                                                   weak_ptr<ClientContext>(), false);
-		HTTPRequestSession session(snapshot);
-		::AESStateSSLFactory encryption_util;
-		S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
-		idx_t attempts = 0;
-		S3RequestExecutor::RunSession(
-		    encryption_util, session, spec,
-		    [&](S3RequestData &request) {
-			    REQUIRE(request.captured.client_generation == attempts);
-			    attempts++;
-			    auto response = make_uniq<HTTPResponse>(transient_response ? HTTPStatusCode::BadRequest_400
-			                                                               : HTTPStatusCode::OK_200);
-			    if (transient_response) {
-				    response->body = "<Error><Code>RequestTimeout</Code></Error>";
-			    }
-			    return response;
-		    },
-		    {},
-		    [](const S3RequestData &, const HTTPResponse &) {
-			    return S3ReceivedResponseAction::RETRY_FRESH_CONNECTION;
-		    });
-		REQUIRE(attempts == retries + 1);
-		REQUIRE(session.Capture().client_generation == attempts);
+		for (const string client : {"curl", "httplib"}) {
+			CAPTURE(client);
+			MockS3Server server {MockS3ServerConfig()};
+			DuckDB db(nullptr);
+			Connection con(db);
+			HTTPTestHelper::Configure(db, con, retries, client, true);
+			HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+			ClientContextFileOpener opener(*con.context);
+			auto session =
+			    S3RequestExecutor::CreateSession(opener, "s3://bucket/key", ResolveTestAuth(TestAuthConfig()));
+			::AESStateSSLFactory encryption_util;
+			S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
+			idx_t attempts = 0;
+			S3RequestExecutor::RunSession(
+			    encryption_util, *session, spec,
+			    [&](S3RequestData &request_data) {
+				    HeadRequestInfo request(server.HTTPPath(), {}, *request_data.http_params);
+				    auto response = S3RequestExecutor::SendSessionRequest(*session, request_data, request);
+				    REQUIRE(response->Success());
+				    attempts++;
+				    if (transient_response) {
+					    response->status = HTTPStatusCode::BadRequest_400;
+					    response->body = "<Error><Code>RequestTimeout</Code></Error>";
+				    }
+				    return response;
+			    },
+			    {},
+			    [](const S3RequestData &, const HTTPResponse &) {
+				    return S3ReceivedResponseAction::RETRY_FRESH_CONNECTION;
+			    });
+			REQUIRE(attempts == retries + 1);
+
+			// Even the final response must invalidate the connection when no retry can be admitted.
+			auto followup = session->Capture().snapshot->CreateRequest();
+			HeadRequestInfo request(server.HTTPPath(), followup.headers, *followup.params);
+			REQUIRE(session->Request(request)->Success());
+			auto observations = server.Observations();
+			REQUIRE(observations.size() == attempts + 1);
+			for (idx_t i = 0; i < observations.size(); i++) {
+				REQUIRE(observations[i].remote_port != 0);
+				if (i > 0) {
+					REQUIRE(observations[i].remote_port != observations[i - 1].remote_port);
+				}
+			}
+			HTTPTestHelper::RequireQueryOk(con, "ROLLBACK");
+		}
 	}
 }
 

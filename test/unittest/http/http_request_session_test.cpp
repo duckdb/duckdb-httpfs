@@ -105,13 +105,8 @@ public:
 		client.reset();
 	}
 
-	HTTPClientReuseMode GetClientReuseMode() const override {
-		return reuse_mode;
-	}
-
 public:
 	ClientLifecycle &lifecycle;
-	HTTPClientReuseMode reuse_mode = HTTPClientReuseMode::SESSION_LOCAL;
 	std::function<void()> on_initialize;
 	std::function<void()> on_client_initialize;
 	std::function<void()> on_close;
@@ -120,8 +115,6 @@ public:
 
 static HTTPFSParams CreateParams(TrackingHTTPUtil &http_util) {
 	HTTPFSParams result(http_util);
-	result.client_reuse_mode = http_util.GetClientReuseMode();
-	result.httpfs_util = http_util;
 	return result;
 }
 
@@ -171,160 +164,12 @@ TEST_CASE("HTTP request snapshots are immutable and checked", "[httpfs][request-
 	REQUIRE_FALSE(stale_publication.published);
 	REQUIRE(stale_publication.current.snapshot == current.snapshot);
 
-	session->InvalidateClients();
-	auto stale_generation_replacement = make_shared_ptr<HTTPRequestSnapshot>(CreateParams(http_util));
-	auto newer_generation = session->TryPublish(current.snapshot, stale_generation_replacement);
-	REQUIRE(newer_generation.published);
-	REQUIRE(newer_generation.current.snapshot == stale_generation_replacement);
-	REQUIRE(newer_generation.current.client_generation > current.client_generation);
-	REQUIRE(newer_generation.current.snapshot->type == HTTPRequestSnapshotType::HTTP);
-}
-
-TEST_CASE("HTTP client leases obey snapshot generations", "[httpfs][request-session]") {
-	ClientLifecycle lifecycle;
-	TrackingHTTPUtil http_util(lifecycle);
-	TrackingHTTPUtil other_http_util(lifecycle);
-	auto params = CreateParams(http_util);
-	auto session = make_shared_ptr<HTTPRequestSession>(make_shared_ptr<HTTPRequestSnapshot>(params));
-	auto session_ptr = session.get();
-
-	http_util.on_initialize = [session_ptr]() {
-		auto captured = session_ptr->Capture();
-		REQUIRE(captured.snapshot);
-	};
-	http_util.on_close = [session_ptr]() {
-		auto captured = session_ptr->Capture();
-		REQUIRE(captured.snapshot);
-	};
-
-	{
-		auto captured = session->Capture();
-		auto request = captured.snapshot->CreateRequest();
-		REQUIRE(&request.params->http_util == &http_util);
-		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-		REQUIRE(lease.Client());
-	}
-	REQUIRE(lifecycle.initialized == 1);
-	REQUIRE(lifecycle.closed == 0);
-	REQUIRE(lifecycle.destroyed == 0);
-
-	{
-		auto captured = session->Capture();
-		auto request = captured.snapshot->CreateRequest();
-		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-		REQUIRE(lease.Client());
-		REQUIRE(lifecycle.initialized == 1);
-		lease.Invalidate();
-	}
-	REQUIRE(lifecycle.closed == 0);
-	REQUIRE(lifecycle.destroyed == 1);
-
-	{
-		auto captured = session->Capture();
-		auto request = captured.snapshot->CreateRequest();
-		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-		REQUIRE(lease.Client());
-
-		auto incompatible_params = CreateParams(other_http_util);
-		auto replacement = make_shared_ptr<HTTPRequestSnapshot>(incompatible_params);
-		REQUIRE(session->TryPublish(captured.snapshot, replacement).published);
-	}
-	REQUIRE(lifecycle.initialized == 2);
-	REQUIRE(lifecycle.closed == 0);
-	REQUIRE(lifecycle.destroyed == 2);
-
-	{
-		auto captured = session->Capture();
-		auto request = captured.snapshot->CreateRequest();
-		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-		REQUIRE(lease.Client());
-	}
-	REQUIRE(lifecycle.initialized == 3);
-	REQUIRE(lifecycle.closed == 0);
-	REQUIRE(lifecycle.destroyed == 2);
-
-	session.reset();
-	REQUIRE(lifecycle.closed == 1);
-	REQUIRE(lifecycle.destroyed == 3);
-}
-
-TEST_CASE("HTTP request sessions reinitialize reused clients", "[httpfs][request-session]") {
-	ClientLifecycle lifecycle;
-	TrackingHTTPUtil http_util(lifecycle);
-	auto params = CreateParams(http_util);
-	params.state = make_shared_ptr<HTTPState>();
-	auto initial_state = params.state;
-	auto session = make_shared_ptr<HTTPRequestSession>(make_shared_ptr<HTTPRequestSnapshot>(params));
-	auto session_ptr = session.get();
-	http_util.on_client_initialize = [session_ptr]() {
-		auto captured = session_ptr->Capture();
-		REQUIRE(captured.snapshot);
-	};
-
-	{
-		auto captured = session->Capture();
-		auto request = captured.snapshot->CreateRequest();
-		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-		REQUIRE(lease.Client());
-	}
-	REQUIRE(lifecycle.initialized == 1);
-	REQUIRE(lifecycle.client_initializations == 1);
-	REQUIRE(lifecycle.last_state == initial_state);
-
-	auto replacement_params = params;
-	replacement_params.state = make_shared_ptr<HTTPState>();
-	auto replacement_state = replacement_params.state;
-	auto captured = session->Capture();
-	auto publication = session->TryPublish(captured.snapshot, make_shared_ptr<HTTPRequestSnapshot>(replacement_params));
-	REQUIRE(publication.published);
-	REQUIRE(publication.current.client_generation == captured.client_generation);
-
-	{
-		auto current = session->Capture();
-		auto request = current.snapshot->CreateRequest();
-		auto lease = session->AcquireClient(current, *request.params, "http://localhost");
-		REQUIRE(lease.Client());
-	}
-	REQUIRE(lifecycle.initialized == 1);
-	REQUIRE(lifecycle.client_initializations == 2);
-	REQUIRE(lifecycle.last_state == replacement_state);
-}
-
-TEST_CASE("HTTP request sessions discard clients that fail reinitialization", "[httpfs][request-session]") {
-	ClientLifecycle lifecycle;
-	TrackingHTTPUtil http_util(lifecycle);
-	auto params = CreateParams(http_util);
-	auto session = make_shared_ptr<HTTPRequestSession>(make_shared_ptr<HTTPRequestSnapshot>(params));
-	idx_t initialization_count = 0;
-	http_util.on_client_initialize = [&]() {
-		initialization_count++;
-		if (initialization_count == 2) {
-			throw IOException("reinitialization failed");
-		}
-	};
-
-	{
-		auto captured = session->Capture();
-		auto request = captured.snapshot->CreateRequest();
-		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-		REQUIRE(lease.Client());
-	}
-
-	auto captured = session->Capture();
-	auto request = captured.snapshot->CreateRequest();
-	REQUIRE_THROWS(session->AcquireClient(captured, *request.params, "http://localhost"));
-	REQUIRE(lifecycle.initialized == 1);
-	REQUIRE(lifecycle.client_initializations == 2);
-	REQUIRE(lifecycle.destroyed == 1);
-
-	captured = session->Capture();
-	request = captured.snapshot->CreateRequest();
-	{
-		auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-		REQUIRE(lease.Client());
-	}
-	REQUIRE(lifecycle.initialized == 2);
-	REQUIRE(lifecycle.destroyed == 1);
+	session->InvalidateConnections();
+	auto replacement_after_invalidation = make_shared_ptr<HTTPRequestSnapshot>(CreateParams(http_util));
+	auto after_invalidation = session->TryPublish(current.snapshot, replacement_after_invalidation);
+	REQUIRE(after_invalidation.published);
+	REQUIRE(after_invalidation.current.snapshot == replacement_after_invalidation);
+	REQUIRE(after_invalidation.current.snapshot->type == HTTPRequestSnapshotType::HTTP);
 }
 
 TEST_CASE("HTTP transport retries bypass the client cache", "[httpfs][request-session]") {
@@ -421,44 +266,6 @@ TEST_CASE("HTTP request snapshots copy HTTPFS parameters through one source", "[
 	REQUIRE(request.params->force_download_threshold == 42);
 	REQUIRE(request.params->hf_max_per_page == 99);
 	REQUIRE(request.params->state == params.state);
-}
-
-TEST_CASE("HTTP client leases preserve backend reuse policy", "[httpfs][request-session]") {
-	SECTION("shared clients return through the HTTP util") {
-		ClientLifecycle lifecycle;
-		TrackingHTTPUtil http_util(lifecycle);
-		http_util.reuse_mode = HTTPClientReuseMode::SHARED;
-		auto params = CreateParams(http_util);
-		auto session = make_shared_ptr<HTTPRequestSession>(make_shared_ptr<HTTPRequestSnapshot>(params));
-
-		auto captured = session->Capture();
-		auto request = captured.snapshot->CreateRequest();
-		{
-			auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-			REQUIRE(lease.Client());
-		}
-		REQUIRE(lifecycle.initialized == 1);
-		REQUIRE(lifecycle.closed == 1);
-		REQUIRE(lifecycle.destroyed == 1);
-	}
-
-	SECTION("client-free implementations do not initialize or close clients") {
-		ClientLifecycle lifecycle;
-		TrackingHTTPUtil http_util(lifecycle);
-		http_util.reuse_mode = HTTPClientReuseMode::NONE;
-		auto params = CreateParams(http_util);
-		auto session = make_shared_ptr<HTTPRequestSession>(make_shared_ptr<HTTPRequestSnapshot>(params));
-
-		auto captured = session->Capture();
-		auto request = captured.snapshot->CreateRequest();
-		{
-			auto lease = session->AcquireClient(captured, *request.params, "http://localhost");
-			REQUIRE_FALSE(lease.Client());
-		}
-		REQUIRE(lifecycle.initialized == 0);
-		REQUIRE(lifecycle.closed == 0);
-		REQUIRE(lifecycle.destroyed == 0);
-	}
 }
 
 } // namespace duckdb

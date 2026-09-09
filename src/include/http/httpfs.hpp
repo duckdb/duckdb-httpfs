@@ -55,13 +55,13 @@ class HTTPFileHandle : public FileHandle {
 	friend class S3FileSystem;
 
 public:
-	HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, unique_ptr<HTTPParams> params,
-	               HTTPObjectVersion object_version = {});
+	HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+	               shared_ptr<HTTPRequestSession> request_session, HTTPObjectVersion object_version = {});
 	~HTTPFileHandle() override;
 
 public:
 	//! Two-phase construction allows subclasses to customize setup
-	virtual void Initialize(optional_ptr<FileOpener> opener);
+	virtual void Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener);
 	const HTTPReadConfig &GetReadConfig() const;
 	const HTTPObjectVersion &GetObjectVersion() const;
 
@@ -96,7 +96,7 @@ private:
 	                                                timestamp_t &response_time);
 	HTTPMetadataCacheEntry ReadFileInfo(const HTTPResponse &response, timestamp_t request_time,
 	                                    timestamp_t response_time);
-	void InitializeRequestState(optional_ptr<FileOpener> opener);
+	void InitializeRequestState(const OpenFileInfo &file, optional_ptr<FileOpener> opener);
 	bool TryInitializeRead(HTTPFileSystem &file_system, optional_ptr<HTTPMetadataCache> cache,
 	                       bool &should_write_cache);
 	void InitializeFileInfo(HTTPFileSystem &file_system, optional_ptr<HTTPMetadataCache> cache,

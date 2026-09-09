@@ -1,5 +1,5 @@
 #include "http/http_state.hpp"
-#include "duckdb/common/http_util.hpp"
+#include "duckdb/main/http/http_util.hpp"
 #include "duckdb/main/query_profiler.hpp"
 
 namespace duckdb {

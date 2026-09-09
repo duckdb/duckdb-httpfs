@@ -308,7 +308,8 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 		}
 
 		S3DeleteBatchUrlInfo url_info = {parsed_url.GetPrefix(), parsed_url.GetBucketHTTPUrl(), auth_params};
-		auto refreshable_http_params = S3RequestExecutor::ReadRefreshableHTTPParams(opener, path);
+		auto refreshable_http_params = S3RequestExecutor::ReadRefreshableHTTPParams(
+		    HTTPFSUtil::GetHTTPUtil(opener).Cast<HTTPFSUtil>(), opener, path);
 		auto identity =
 		    CreateDeleteBatchIdentity(std::move(url_info), std::move(refreshable_http_params), opener, path);
 		auto entry = delete_batches.find(identity);

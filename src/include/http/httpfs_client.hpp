@@ -1,11 +1,9 @@
 #pragma once
 
-#include "duckdb/common/http_util.hpp"
-#include "duckdb/common/atomic.hpp"
-#include "duckdb/common/array.hpp"
+#include "duckdb/main/http/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
-#include "duckdb/common/vector.hpp"
 #include "duckdb/logging/log_type.hpp"
+#include "http/httpfs_transport.hpp"
 
 namespace duckdb {
 
@@ -32,8 +30,8 @@ struct FileOpenerInfo;
 class HTTPState;
 class HTTPFSUtil;
 class HTTPException;
-
-enum class HTTPClientReuseMode : uint8_t { SESSION_LOCAL, SHARED, NONE };
+class HTTPRequestSession;
+struct HTTPFSParams;
 
 struct HTTPFSHeaderValue {
 	static bool IsEmpty(const string &value) {
@@ -49,11 +47,14 @@ struct HTTPFSHeaderValue {
 struct HTTPFSParams : public HTTPParams {
 public:
 	explicit HTTPFSParams(HTTPUtil &http_util) : HTTPParams(http_util) {
-		http_proxy_port = 0;
 	}
 
 public:
 	unique_ptr<HTTPParams> Clone() const;
+	void RefreshTransportReuseDomain();
+	void PrepareTransportReuseDomain();
+	bool CanReuseTransport() const;
+	bool VerifyServerCertificate() const;
 
 public:
 	static constexpr bool DEFAULT_ENABLE_SERVER_CERT_VERIFICATION = false;
@@ -71,46 +72,34 @@ public:
 	string bearer_token;
 	bool unsafe_disable_etag_checks {false};
 	bool s3_version_id_pinning {false};
-	//! Explicitly enabling the external file cache preserves its legacy reuse semantics.
+	//! Ignore response freshness when validation is disabled or legacy cache reuse is requested.
 	bool override_response_cache_policy {false};
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
 	idx_t force_download_threshold = 0;
-	HTTPClientReuseMode client_reuse_mode = HTTPClientReuseMode::SESSION_LOCAL;
-	optional_ptr<HTTPFSUtil> httpfs_util;
-};
-
-class HTTPClientConnectionCache {
-public:
-	unique_ptr<HTTPClient> Find(const string &base_url);
-	void Store(unique_ptr<HTTPClient> &&client);
-	void Clear();
 
 private:
-	struct Pool {
-		annotated_mutex lock {};
-		vector<unique_ptr<HTTPClient>> entries DUCKDB_GUARDED_BY(lock) {vector<unique_ptr<HTTPClient>>(POOL_SIZE)};
-	};
+	friend class HTTPFSUtil;
 
-public:
-	static constexpr idx_t POOL_COUNT = 16;
-	static constexpr idx_t POOL_SIZE = 32;
-	static_assert((POOL_COUNT & (POOL_COUNT - 1)) == 0, "POOL_COUNT must be a power of two");
+	void SetTransportReuseConfig(const HTTPFSConnectionConfig &config, bool transport_reusable);
 
 private:
-	array<Pool, POOL_COUNT> pools {};
+	//! Exact configuration captured with the current reuse domain.
+	HTTPFSConnectionConfig transport_reuse_config;
+	//! Whether the captured domain may reuse a client.
+	bool transport_reusable = false;
 };
 
 class HTTPFSUtil : public HTTPUtil {
 public:
 	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
 	                                            optional_ptr<FileOpenerInfo> info) override;
+	//! Read HTTPFS settings without publishing a transport reuse domain.
+	static unique_ptr<HTTPFSParams> InitializeRawParameters(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,
+	                                                        optional_ptr<FileOpenerInfo> info);
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
-
-	//! Clear any cached connections
-	virtual void ClearCachedConnections();
-	virtual HTTPClientReuseMode GetClientReuseMode() const;
+	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
 	static const char *GetRequestMethod(RequestType request_type);
@@ -119,38 +108,41 @@ public:
 	                                        const string &details = "");
 
 	string GetName() const override;
+
+private:
+	friend struct HTTPFSParams;
+
+	void SetTransportReuseDomain(HTTPFSParams &params);
+	virtual bool GetDefaultVerifySSL(const HTTPFSParams &params) const;
+
+private:
+	//! Bound retained proxy credentials and lookup cost; overflow domains cannot reuse clients.
+	static constexpr idx_t MAX_TRANSPORT_REUSE_DOMAINS = 256;
+	//! Protects transport domain interning.
+	annotated_mutex transport_reuse_lock;
+	//! Exact reusable configurations retained by this provider.
+	vector<HTTPFSConnectionConfig> transport_reuse_domains DUCKDB_GUARDED_BY(transport_reuse_lock);
+	//! Next non-recycled transport domain identity.
+	idx_t next_transport_reuse_domain DUCKDB_GUARDED_BY(transport_reuse_lock) = 1;
 };
 
 #ifndef EMSCRIPTEN
 
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
+	explicit HTTPFSCurlUtil(bool connection_caching_enabled_p = true);
+
+public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
-	unique_ptr<HTTPClient> InitializeClientExtended(HTTPParams &http_params, const string &proto_host_port,
-	                                                const HTTPClientInitializationOptions &options) override;
-	void CloseClient(unique_ptr<HTTPClient> &&client) override;
-	void ClearCachedConnections() override;
-	HTTPClientReuseMode GetClientReuseMode() const override;
-	void SetConnectionCachingEnabled(bool enabled);
-	unique_ptr<HTTPResponse> SendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client) override;
+	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	string GetName() const override;
 
 private:
-	//! Send request with connection caching (acquire from pool, run, store back)
-	unique_ptr<HTTPResponse> CachingSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client);
-	//! Send request without caching (delegates to HTTPUtil::SendRequest)
-	unique_ptr<HTTPResponse> BaseSendRequest(BaseRequest &request, unique_ptr<HTTPClient> &client);
-
-	bool EnableCaching(const BaseRequest &request) const;
-	bool ConnectionCachingEnabled() const;
-	unique_ptr<HTTPClient> FindCachedClient(const string &base_url);
-	void StoreCachedClient(unique_ptr<HTTPClient> &&client);
+	bool GetDefaultVerifySSL(const HTTPFSParams &params) const override;
 
 private:
-	//! Shared connection-cache state
-	atomic<bool> connection_caching_enabled {true};
-	HTTPClientConnectionCache connection_cache;
+	const bool connection_caching_enabled;
 };
 
 #endif

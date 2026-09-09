@@ -2,8 +2,11 @@
 
 #include "http/http_test_helper.hpp"
 #include "http/http_metadata_cache.hpp"
+#include "http/http_request_session.hpp"
 #include "http/http_state.hpp"
 #include "http/httpfs_client.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/http/http_transport_manager.hpp"
 
 namespace duckdb {
 
@@ -17,7 +20,7 @@ static void RunCompletedErrorFollowup(const string &client_implementation) {
 
 	DuckDB db(nullptr);
 	Connection con(db);
-	HTTPTestHelper::Configure(db, con, 0, client_implementation);
+	HTTPTestHelper::Configure(db, con, 0, client_implementation, true);
 
 	HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 	auto &fs = FileSystem::GetFileSystem(*con.context);
@@ -31,38 +34,7 @@ static void RunCompletedErrorFollowup(const string &client_implementation) {
 	REQUIRE(HTTPTestHelper::CountRequests(observations, "GET", 206, "bytes=0-1") == 1);
 }
 
-static void RunCurlRetryClientBypassesSharedCache() {
-	MockS3Server server {MockS3ServerConfig()};
-	HTTPFSCurlUtil http_util;
-	HTTPFSParams params(http_util);
-	params.client_reuse_mode = HTTPClientReuseMode::SHARED;
-	params.httpfs_util = http_util;
-
-	auto first_client = http_util.InitializeClient(params, "http://" + server.Endpoint());
-	HeadRequestInfo first_request(server.HTTPPath(), HTTPHeaders(), params);
-	auto first_response = http_util.Request(first_request, first_client);
-	REQUIRE(first_response);
-	REQUIRE(first_response->Success());
-	http_util.CloseClient(std::move(first_client));
-
-	HTTPClientInitializationOptions options;
-	options.cache_policy = HTTPClientCachePolicy::BYPASS_CACHE;
-	auto retry_client = http_util.InitializeClientExtended(params, "http://" + server.Endpoint(), options);
-	HeadRequestInfo retry_request(server.HTTPPath(), HTTPHeaders(), params);
-	auto retry_response = http_util.Request(retry_request, retry_client);
-	REQUIRE(retry_response);
-	REQUIRE(retry_response->Success());
-
-	auto observations = server.Observations();
-	INFO(MockS3DescribeObservations(observations));
-	auto ports = HTTPTestHelper::RequestPorts(observations, "HEAD", 200);
-	REQUIRE(ports.size() == 2);
-	REQUIRE(ports[0] != 0);
-	REQUIRE(ports[1] != 0);
-	REQUIRE(ports[0] != ports[1]);
-}
-
-static void RunCurlTerminalTransportErrorIsNotCached() {
+static void RunCurlTerminalTransportErrorIsNotReused() {
 	MockS3ServerConfig config;
 	config.range.behavior = MockS3RangeBehavior::TRUNCATE_TRANSFER;
 	config.range.behavior_requests = 1;
@@ -75,18 +47,18 @@ static void RunCurlTerminalTransportErrorIsNotCached() {
 	HTTPTestHelper::RequireQueryOk(con, "CALL enable_logging('HTTPFSInfo')");
 	HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 
-	auto &http_util = HTTPUtil::Get(*db.instance);
-	auto params = http_util.InitializeParameters(*con.context, server.HTTPPath());
+	auto session = db.instance->config.GetHTTPTransportManager().CreateSession(*con.context, server.HTTPPath());
+	auto &params = session.Parameters();
 	HTTPHeaders headers;
 	headers.Insert("Range", "bytes=0-3");
-	GetRequestInfo failed_request(server.HTTPPath(), headers, *params, nullptr, nullptr);
+	GetRequestInfo failed_request(server.HTTPPath(), headers, params, nullptr, nullptr);
 	failed_request.try_request = true;
-	auto failed_response = http_util.Request(failed_request);
+	auto failed_response = session.Request(failed_request);
 	REQUIRE(failed_response);
 	REQUIRE(failed_response->HasRequestError());
 
-	HeadRequestInfo completed_error_request(server.HTTPPath(), HTTPHeaders(), *params);
-	auto completed_error_response = http_util.Request(completed_error_request);
+	HeadRequestInfo completed_error_request(server.HTTPPath(), HTTPHeaders(), params);
+	auto completed_error_response = session.Request(completed_error_request);
 	REQUIRE(completed_error_response);
 	REQUIRE_FALSE(completed_error_response->HasRequestError());
 	REQUIRE(completed_error_response->status == HTTPStatusCode::NotFound_404);
@@ -96,8 +68,8 @@ static void RunCurlTerminalTransportErrorIsNotCached() {
 	REQUIRE_FALSE(hits->HasError());
 	REQUIRE(hits->GetValue(0, 0).GetValue<idx_t>() == 0);
 
-	HeadRequestInfo reused_error_request(server.HTTPPath(), HTTPHeaders(), *params);
-	auto reused_error_response = http_util.Request(reused_error_request);
+	HeadRequestInfo reused_error_request(server.HTTPPath(), HTTPHeaders(), params);
+	auto reused_error_response = session.Request(reused_error_request);
 	REQUIRE(reused_error_response);
 	REQUIRE_FALSE(reused_error_response->HasRequestError());
 	REQUIRE(reused_error_response->status == HTTPStatusCode::NotFound_404);
@@ -222,28 +194,168 @@ static void RunHTTPStateCounterScenario(HTTPFSUtil &http_util) {
 	REQUIRE(state->IsEmpty());
 }
 
-static void RunCurlConnectionCachingTransitionScenario() {
-	MockS3Server server {MockS3ServerConfig()};
-	HTTPFSCurlUtil http_util;
+static void RunCurlConnectionCachingPolicyScenario() {
+	HTTPFSCurlUtil caching_enabled(true);
+	HTTPFSCurlUtil caching_disabled(false);
+	REQUIRE(caching_enabled.GetTransportReusePolicy() == HTTPTransportReusePolicy::SHARED);
+	REQUIRE(caching_disabled.GetTransportReusePolicy() == HTTPTransportReusePolicy::EPHEMERAL);
+}
+
+static void RunConnectionCompatibilityScenario(HTTPFSUtil &http_util) {
 	HTTPFSParams params(http_util);
+	REQUIRE_FALSE(params.CanReuseTransport());
+	REQUIRE_FALSE(HTTPFSConnectionConfig::Create(params).reuse_domain.IsValid());
+	params.http_proxy = "proxy.test";
+	params.http_proxy_port = 8080;
+	params.http_proxy_username = "user";
+	params.http_proxy_password = "password";
+	params.override_verify_ssl = true;
+	params.verify_ssl = true;
+	REQUIRE(params.VerifyServerCertificate());
+	auto client = http_util.InitializeClient(params, "http://localhost");
+	REQUIRE(client->CanReuse(params));
+	REQUIRE(params.GetTransportReuseDomain() != 0);
 
-	auto first_client = http_util.InitializeClient(params, "http://" + server.Endpoint());
-	HeadRequestInfo first_request(server.HTTPPath(), HTTPHeaders(), params);
-	REQUIRE(http_util.Request(first_request, first_client));
-	http_util.CloseClient(std::move(first_client));
+	HTTPFSParams equivalent(http_util);
+	equivalent.http_proxy = params.http_proxy;
+	equivalent.http_proxy_port = params.http_proxy_port;
+	equivalent.http_proxy_username = params.http_proxy_username;
+	equivalent.http_proxy_password = params.http_proxy_password;
+	equivalent.override_verify_ssl = params.override_verify_ssl;
+	equivalent.verify_ssl = params.verify_ssl;
+	equivalent.RefreshTransportReuseDomain();
+	REQUIRE(equivalent.GetTransportReuseDomain() == params.GetTransportReuseDomain());
 
-	http_util.SetConnectionCachingEnabled(false);
-	REQUIRE(http_util.GetClientReuseMode() == HTTPClientReuseMode::SESSION_LOCAL);
-	http_util.SetConnectionCachingEnabled(true);
-	REQUIRE(http_util.GetClientReuseMode() == HTTPClientReuseMode::SHARED);
+	auto require_incompatible = [&](const std::function<void(HTTPFSParams &)> &modify) {
+		auto changed = params;
+		modify(changed);
+		REQUIRE_FALSE(client->CanReuse(changed));
+		REQUIRE_THROWS_AS(client->Initialize(changed), InvalidInputException);
+	};
+	require_incompatible([](HTTPFSParams &changed) { changed.http_proxy = "other-proxy.test"; });
+	require_incompatible([](HTTPFSParams &changed) { changed.http_proxy_port = 8123; });
+	require_incompatible([](HTTPFSParams &changed) { changed.http_proxy_username = "other-user"; });
+	require_incompatible([](HTTPFSParams &changed) { changed.http_proxy_password = "other-password"; });
+	require_incompatible([](HTTPFSParams &changed) { changed.http_proxy.clear(); });
+	require_incompatible([](HTTPFSParams &changed) { changed.ca_cert_file = "/tmp/test-ca.pem"; });
+	require_incompatible([](HTTPFSParams &changed) { changed.verify_ssl = false; });
+	require_incompatible([](HTTPFSParams &changed) { changed.override_verify_ssl = false; });
 
-	auto second_client = http_util.InitializeClient(params, "http://" + server.Endpoint());
-	HeadRequestInfo second_request(server.HTTPPath(), HTTPHeaders(), params);
-	REQUIRE(http_util.Request(second_request, second_client));
+	auto bearer_changed = params;
+	bearer_changed.bearer_token = "token";
+	bearer_changed.RefreshTransportReuseDomain();
+	REQUIRE(bearer_changed.GetTransportReuseDomain() == params.GetTransportReuseDomain());
+	REQUIRE(client->CanReuse(bearer_changed));
 
-	auto ports = HTTPTestHelper::RequestPorts(server.Observations(), "HEAD", 200);
+	auto ignored_backend_default = params;
+	if (http_util.GetName() == "HTTPFS-Curl") {
+		ignored_backend_default.enable_curl_server_cert_verification = false;
+	} else {
+		ignored_backend_default.enable_server_cert_verification = true;
+	}
+	ignored_backend_default.RefreshTransportReuseDomain();
+	REQUIRE(ignored_backend_default.GetTransportReuseDomain() == params.GetTransportReuseDomain());
+
+	HTTPFSParams backend_default(http_util);
+	REQUIRE(backend_default.VerifyServerCertificate() == (http_util.GetName() == "HTTPFS-Curl"));
+	backend_default.RefreshTransportReuseDomain();
+	auto changed_backend_default = backend_default;
+	if (http_util.GetName() == "HTTPFS-Curl") {
+		changed_backend_default.enable_curl_server_cert_verification = false;
+	} else {
+		changed_backend_default.enable_server_cert_verification = true;
+	}
+	changed_backend_default.RefreshTransportReuseDomain();
+	REQUIRE(changed_backend_default.VerifyServerCertificate() != backend_default.VerifyServerCertificate());
+	REQUIRE(changed_backend_default.GetTransportReuseDomain() != backend_default.GetTransportReuseDomain());
+
+	HTTPFSParams first_without_proxy(http_util);
+	first_without_proxy.http_proxy_port = 1234;
+	first_without_proxy.http_proxy_username = "ignored-user";
+	first_without_proxy.http_proxy_password = "ignored-password";
+	first_without_proxy.RefreshTransportReuseDomain();
+	HTTPFSParams second_without_proxy(http_util);
+	second_without_proxy.http_proxy_port = 5678;
+	second_without_proxy.http_proxy_username = "other-ignored-user";
+	second_without_proxy.http_proxy_password = "other-ignored-password";
+	second_without_proxy.RefreshTransportReuseDomain();
+	REQUIRE(first_without_proxy.GetTransportReuseDomain() == second_without_proxy.GetTransportReuseDomain());
+}
+
+static void RunTransportReuseDomainBoundScenario() {
+	HTTPFSUtil http_util;
+	for (idx_t domain = 0; domain < 256; domain++) {
+		HTTPFSParams params(http_util);
+		params.http_proxy = "proxy" + to_string(domain) + ".test";
+		params.RefreshTransportReuseDomain();
+		REQUIRE(params.CanReuseTransport());
+	}
+	HTTPFSParams overflow(http_util);
+	overflow.http_proxy = "overflow-proxy.test";
+	overflow.RefreshTransportReuseDomain();
+	REQUIRE(overflow.GetTransportReuseDomain() != 0);
+	REQUIRE_FALSE(overflow.CanReuseTransport());
+	overflow.http_proxy = "changed-overflow-proxy.test";
+	REQUIRE_THROWS_AS(http_util.InitializeClient(overflow, "http://localhost"), InvalidInputException);
+}
+
+static void RunRawParametersScenario() {
+	HTTPFSUtil http_util;
+	for (idx_t domain = 0; domain < 300; domain++) {
+		auto params = HTTPFSUtil::InitializeRawParameters(http_util, nullptr, nullptr);
+		params->http_proxy = "unused-proxy" + to_string(domain) + ".test";
+		REQUIRE(params->GetTransportReuseDomain() == 0);
+	}
+	HTTPFSParams finalized(http_util);
+	finalized.http_proxy = "first-finalized-proxy.test";
+	finalized.RefreshTransportReuseDomain();
+	REQUIRE(finalized.GetTransportReuseDomain() == 1);
+}
+
+static void RunSnapshotProviderDomainScenario() {
+	HTTPFSUtil captured_provider;
+	HTTPFSUtil current_provider;
+	HTTPFSParams captured_params(captured_provider);
+	captured_params.http_proxy = "stale-proxy.test";
+	captured_params.RefreshTransportReuseDomain();
+	HTTPFSParams refreshed_params(current_provider);
+	refreshed_params.http_proxy = "fresh-proxy.test";
+	refreshed_params.RefreshTransportReuseDomain();
+	REQUIRE(captured_params.GetTransportReuseDomain() == refreshed_params.GetTransportReuseDomain());
+
+	auto merged_params = captured_params;
+	merged_params.http_proxy = refreshed_params.http_proxy;
+	HTTPRequestSnapshot replacement(merged_params);
+	HTTPFSParams expected(captured_provider);
+	expected.http_proxy = refreshed_params.http_proxy;
+	expected.RefreshTransportReuseDomain();
+	REQUIRE(replacement.Params().GetTransportReuseDomain() == expected.GetTransportReuseDomain());
+	REQUIRE(replacement.Params().GetTransportReuseDomain() != refreshed_params.GetTransportReuseDomain());
+}
+
+static void RunConnectionReuseScenario(const string &client_implementation) {
+	MockS3Server server {MockS3ServerConfig()};
+	DuckDB db(nullptr);
+	Connection con(db);
+	HTTPTestHelper::Configure(db, con, 0, client_implementation, true);
+	HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto session = db.instance->config.GetHTTPTransportManager().CreateSession(*con.context, server.HTTPPath());
+	auto &params = session.Parameters();
+
+	for (idx_t i = 0; i < 2; i++) {
+		HeadRequestInfo request(server.HTTPPath(), HTTPHeaders(), params);
+		auto response = session.Request(request);
+		REQUIRE(response);
+		REQUIRE(response->Success());
+	}
+
+	auto observations = server.Observations();
+	auto ports = HTTPTestHelper::RequestPorts(observations, "HEAD", 200);
+	INFO(MockS3DescribeObservations(observations));
 	REQUIRE(ports.size() == 2);
-	REQUIRE(ports[0] != ports[1]);
+	REQUIRE(ports[0] != 0);
+	REQUIRE(ports[0] == ports[1]);
+	HTTPTestHelper::RequireQueryOk(con, "COMMIT");
 }
 
 } // namespace
@@ -257,12 +369,8 @@ TEST_CASE("HTTP request sessions allow follow-up requests after completed errors
 	}
 }
 
-TEST_CASE("Curl retries bypass the shared connection cache", "[httpfs][request-session]") {
-	RunCurlRetryClientBypassesSharedCache();
-}
-
-TEST_CASE("Curl terminal transport errors are not cached", "[httpfs][request-session]") {
-	RunCurlTerminalTransportErrorIsNotCached();
+TEST_CASE("Curl terminal transport errors are not reused", "[httpfs][request-session]") {
+	RunCurlTerminalTransportErrorIsNotReused();
 }
 
 TEST_CASE("Curl response headers accept exact empty fields", "[httpfs][curl][headers]") {
@@ -306,6 +414,53 @@ TEST_CASE("HTTP PUT respects explicit Content-Type and retains the fallback", "[
 	}
 }
 
+TEST_CASE("Curl pooled bodyless requests do not inherit upload state", "[httpfs][connection-cache]") {
+	for (bool put_first : {false, true}) {
+		for (bool use_delete : {false, true}) {
+			CAPTURE(put_first, use_delete);
+			MockS3ServerConfig config;
+			config.http_response.options_body = "options response";
+			MockS3Server server(std::move(config));
+			DuckDB db(nullptr);
+			Connection con(db);
+			HTTPTestHelper::Configure(db, con, 0, "curl", true);
+			HTTPTestHelper::RequireQueryOk(con, "SET http_timeout=2");
+			HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+			auto session = DBConfig::GetConfig(*db.instance)
+			                   .GetHTTPTransportManager()
+			                   .CreateSession(*con.context, server.HTTPPath());
+			auto &params = session.Parameters();
+			if (put_first) {
+				const string body = "payload";
+				const string content_type = "application/octet-stream";
+				PutRequestInfo request(server.HTTPPath(), {}, params, const_data_ptr_cast(body.data()), body.size(),
+				                       content_type);
+				REQUIRE(session.Request(request)->Success());
+			} else {
+				HeadRequestInfo request(server.HTTPPath(), {}, params);
+				REQUIRE(session.Request(request)->Success());
+			}
+			if (use_delete) {
+				DeleteRequestInfo request(server.HTTPPath(), {}, params);
+				REQUIRE(session.Request(request)->Success());
+			} else {
+				OptionsRequestInfo request(server.HTTPPath(), {}, params);
+				REQUIRE(session.Request(request)->Success());
+			}
+			auto observations = server.Observations();
+			REQUIRE(observations.size() == 2);
+			REQUIRE(observations[0].remote_port != 0);
+			REQUIRE(observations[1].remote_port == observations[0].remote_port);
+			REQUIRE(observations[1].method == (use_delete ? "DELETE" : "OPTIONS"));
+			REQUIRE(observations[1].body_size == 0);
+			for (const auto *header : {"Transfer-Encoding", "Content-Type", "Expect"}) {
+				REQUIRE(MockS3HeaderValues(observations[1], header).empty());
+			}
+			HTTPTestHelper::RequireQueryOk(con, "ROLLBACK");
+		}
+	}
+}
+
 TEST_CASE("HTTP clients record request and byte counters", "[httpfs][http-state]") {
 	SECTION("httplib") {
 		HTTPFSUtil http_util;
@@ -317,8 +472,89 @@ TEST_CASE("HTTP clients record request and byte counters", "[httpfs][http-state]
 	}
 }
 
-TEST_CASE("Disabling curl connection caching clears pooled clients", "[httpfs][connection-cache]") {
-	RunCurlConnectionCachingTransitionScenario();
+TEST_CASE("Curl connection caching selects the manager reuse policy", "[httpfs][connection-cache]") {
+	RunCurlConnectionCachingPolicyScenario();
+
+	SECTION("httplib checks connection configuration") {
+		HTTPFSUtil http_util;
+		RunConnectionCompatibilityScenario(http_util);
+	}
+	SECTION("curl checks connection configuration") {
+		HTTPFSCurlUtil http_util;
+		RunConnectionCompatibilityScenario(http_util);
+	}
+	SECTION("exact connection domain retention is bounded") {
+		RunTransportReuseDomainBoundScenario();
+	}
+	SECTION("raw parameter reads do not publish connection domains") {
+		RunRawParametersScenario();
+	}
+	SECTION("request snapshots use their captured provider's domain") {
+		RunSnapshotProviderDomainScenario();
+	}
+	SECTION("httplib reuses its session connection") {
+		RunConnectionReuseScenario("httplib");
+	}
+	SECTION("curl reuses its shared connection") {
+		RunConnectionReuseScenario("curl");
+	}
+}
+
+TEST_CASE("HTTP clients isolate request credentials across connections",
+          "[httpfs][connection-cache][request-session]") {
+	for (const auto &backend : {"curl", "httplib"}) {
+		DYNAMIC_SECTION(backend) {
+			MockS3Server server {MockS3ServerConfig()};
+			DuckDB db(nullptr);
+			Connection first(db);
+			Connection second(db);
+			HTTPTestHelper::Configure(db, first, 0, backend, true);
+			HTTPTestHelper::RequireQueryOk(first, "BEGIN TRANSACTION");
+			HTTPTestHelper::RequireQueryOk(second, "BEGIN TRANSACTION");
+			auto &manager = db.instance->config.GetHTTPTransportManager();
+			auto first_session = manager.CreateSession(*first.context, server.HTTPPath());
+			auto second_session = manager.CreateSession(*second.context, server.HTTPPath());
+			auto &first_params = first_session.Parameters().Cast<HTTPFSParams>();
+			auto &second_params = second_session.Parameters().Cast<HTTPFSParams>();
+			first_params.bearer_token = "first-token";
+			first_params.extra_headers["X-Connection"] = "first";
+			second_params.bearer_token = "second-token";
+			second_params.extra_headers["X-Connection"] = "second";
+			REQUIRE(first_params.GetTransportReuseDomain() == second_params.GetTransportReuseDomain());
+			auto request = [&](HTTPTransportManager::Session &session) {
+				HTTPRequestSnapshot snapshot(session.Parameters().Cast<HTTPFSParams>());
+				auto request_state = snapshot.CreateRequest();
+				HeadRequestInfo info(server.HTTPPath(), request_state.headers, *request_state.params);
+				auto response = session.Request(info);
+				REQUIRE(response);
+				REQUIRE(response->Success());
+			};
+			request(first_session);
+			request(second_session);
+			second_params.bearer_token.clear();
+			second_params.extra_headers.clear();
+			request(second_session);
+			request(first_session);
+			auto observations = server.Observations();
+			REQUIRE(observations.size() == 4);
+			REQUIRE(MockS3HeaderValues(observations[0], "Authorization") == vector<string> {"Bearer first-token"});
+			REQUIRE(MockS3HeaderValues(observations[1], "Authorization") == vector<string> {"Bearer second-token"});
+			REQUIRE(MockS3HeaderValues(observations[2], "Authorization").empty());
+			REQUIRE(MockS3HeaderValues(observations[3], "Authorization") == vector<string> {"Bearer first-token"});
+			REQUIRE(MockS3HeaderValues(observations[0], "X-Connection") == vector<string> {"first"});
+			REQUIRE(MockS3HeaderValues(observations[1], "X-Connection") == vector<string> {"second"});
+			REQUIRE(MockS3HeaderValues(observations[2], "X-Connection").empty());
+			REQUIRE(MockS3HeaderValues(observations[3], "X-Connection") == vector<string> {"first"});
+			auto ports = HTTPTestHelper::RequestPorts(observations, "HEAD", 200);
+			REQUIRE(ports.size() == 4);
+			REQUIRE(ports[0] != 0);
+			REQUIRE(ports[0] == ports[3]);
+			REQUIRE(ports[1] == ports[2]);
+			REQUIRE((ports[0] == ports[1]) == (string(backend) == "curl"));
+			HTTPTestHelper::RequireQueryOk(first, "ROLLBACK");
+			HTTPTestHelper::RequireQueryOk(second, "ROLLBACK");
+		}
+	}
 }
 
 TEST_CASE("HTTP metadata cache mode controls query-end clearing", "[httpfs][metadata-cache]") {

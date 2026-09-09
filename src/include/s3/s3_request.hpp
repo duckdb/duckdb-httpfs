@@ -181,7 +181,8 @@ struct S3RequestExecutor {
 
 	static bool SetSessionRegion(HTTPRequestSession &session, const string &correct_region, string &previous_region);
 	static bool CredentialRefreshEnabled(optional_ptr<FileOpener> opener);
-	static S3RefreshableHTTPParams ReadRefreshableHTTPParams(optional_ptr<FileOpener> opener, const string &path);
+	static S3RefreshableHTTPParams ReadRefreshableHTTPParams(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,
+	                                                         const string &path);
 	static shared_ptr<HTTPRequestSession> CreateSession(optional_ptr<FileOpener> opener, const string &path,
 	                                                    const S3AuthParams &auth_params);
 	static unique_ptr<HTTPResponse> SendSessionRequest(HTTPRequestSession &session, S3RequestData &request_data,
@@ -199,7 +200,7 @@ private:
 	                           const SetRegionCallback &set_region, const FreshConnectionCallback &fresh_connection,
 	                           const ReceivedResponseCallback &response_callback = {});
 	static bool TryRefreshSession(HTTPRequestSession &session, const S3RequestData &request_data);
-	static void InvalidateSessionConnections(HTTPRequestSession &session, HTTPFSParams &params);
+	static void InvalidateSessionConnections(HTTPRequestSession &session);
 	static S3RequestData CreateRequestData(EncryptionUtil &encryption_util, const CapturedHTTPRequestSnapshot &captured,
 	                                       const S3RequestSpec &spec, HTTPRetryBudget &retry_budget);
 };

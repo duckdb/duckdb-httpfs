@@ -67,7 +67,7 @@ TEST_CASE("Explicit cache settings preserve legacy reuse", "[httpfs][cache]") {
 	REQUIRE(HTTPTestHelper::CountRangeRequests(observations, 206) == 1);
 }
 
-TEST_CASE("Per-file cache validation option overrides response policy", "[httpfs][cache]") {
+TEST_CASE("HTTP cache validation follows file options and session settings", "[httpfs][cache]") {
 	MockS3ServerConfig config;
 	config.metadata.response_headers = {{"Cache-Control", "no-store, max-age=0"}, {"Vary", "*"}};
 	MockS3Server server(std::move(config));
@@ -78,9 +78,32 @@ TEST_CASE("Per-file cache validation option overrides response policy", "[httpfs
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	OpenFileInfo file(server.HTTPPath());
 	file.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
-	file.extended_info->options["validate_external_file_cache"] = Value::BOOLEAN(false);
+	bool can_reuse = true;
+	bool invalid_option = false;
+	SECTION("per-file validation is disabled") {
+		file.extended_info->options["validate_external_file_cache"] = Value::BOOLEAN(false);
+	}
+	SECTION("session validation is disabled") {
+		HTTPTestHelper::RequireQueryOk(con, "SET validate_external_file_cache='NO_VALIDATION'");
+	}
+	SECTION("per-file validation overrides the session") {
+		HTTPTestHelper::RequireQueryOk(con, "SET validate_external_file_cache='NO_VALIDATION'");
+		file.extended_info->options["validate_external_file_cache"] = Value::BOOLEAN(true);
+		can_reuse = false;
+	}
+	SECTION("NULL per-file validation is rejected") {
+		file.extended_info->options["validate_external_file_cache"] = Value();
+		invalid_option = true;
+	}
+	if (invalid_option) {
+		REQUIRE_THROWS_WITH(fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO),
+		                    Catch::Contains("validate_external_file_cache") && Catch::Contains("expected a BOOLEAN"));
+		REQUIRE(server.Observations().empty());
+		HTTPTestHelper::RequireQueryOk(con, "ROLLBACK");
+		return;
+	}
 	auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
-	REQUIRE(handle->Cast<HTTPFileHandle>().CanReuseCachedData());
+	REQUIRE(handle->Cast<HTTPFileHandle>().CanReuseCachedData() == can_reuse);
 	handle.reset();
 	HTTPTestHelper::RequireQueryOk(con, "ROLLBACK");
 }

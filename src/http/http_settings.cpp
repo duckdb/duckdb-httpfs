@@ -2,6 +2,7 @@
 
 #include "http/httpfs_client.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/config.hpp"
 
@@ -10,6 +11,28 @@
 #endif
 
 namespace duckdb {
+
+static void RequireGlobalScope(SetScope scope, const char *setting) {
+	if (scope == SetScope::SESSION) {
+		throw InvalidInputException("%s can only be set globally", setting);
+	}
+}
+
+static bool ConnectionCachingEnabled(const ClientContext &context) {
+	Value current_value;
+	if (context.TryGetCurrentSetting("httpfs_connection_caching", current_value)) {
+		return BooleanValue::Get(current_value);
+	}
+	return true;
+}
+
+static bool ConnectionCachingEnabled(const DBConfig &config) {
+	Value current_value;
+	if (config.TryGetCurrentSetting("httpfs_connection_caching", current_value)) {
+		return BooleanValue::Get(current_value);
+	}
+	return true;
+}
 
 static void SetCACertFile(ClientContext &context, SetScope, Value &parameter) {
 	if (parameter.IsNull()) {
@@ -38,7 +61,8 @@ static void SetExtraHTTPHeaders(ClientContext &, SetScope, Value &parameter) {
 	}
 }
 
-static void SetHTTPClientImplementation(ClientContext &context, SetScope, Value &parameter) {
+static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, Value &parameter) {
+	RequireGlobalScope(scope, "httpfs_client_implementation");
 	auto &config = DBConfig::GetConfig(context);
 	auto value = StringValue::Get(parameter);
 	auto &http_util = config.GetHTTPUtil();
@@ -51,7 +75,7 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope, Value 
 	}
 #ifndef EMSCRIPTEN
 	if (value == "curl" || value == "default") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>());
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(context)));
 		return;
 	}
 	if (value == "httplib") {
@@ -63,12 +87,13 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope, Value 
 	                            "and `default` are currently supported");
 }
 
-static void SetHTTPConnectionCaching(ClientContext &context, SetScope, Value &parameter) {
+static void SetHTTPConnectionCaching(ClientContext &context, SetScope scope, Value &parameter) {
+	RequireGlobalScope(scope, "httpfs_connection_caching");
 #ifndef EMSCRIPTEN
-	auto &http_util = DBConfig::GetConfig(context).GetHTTPUtil();
+	auto &config = DBConfig::GetConfig(context);
+	auto &http_util = config.GetHTTPUtil();
 	if (http_util.GetName() == "HTTPFS-Curl") {
-		auto &curl_util = http_util.Cast<HTTPFSCurlUtil>();
-		curl_util.SetConnectionCachingEnabled(BooleanValue::Get(parameter));
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(BooleanValue::Get(parameter)));
 	}
 #endif
 }
@@ -111,9 +136,9 @@ void HTTPSettings::Register(DBConfig &config) {
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 	config.AddExtensionOption("httpfs_client_implementation", "Select which HTTP client implementation is used",
-	                          LogicalType::VARCHAR, "default", SetHTTPClientImplementation);
+	                          LogicalType::VARCHAR, "default", SetHTTPClientImplementation, SetScope::GLOBAL);
 	config.AddExtensionOption("httpfs_connection_caching", "Enable connection caching for HTTP requests",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), SetHTTPConnectionCaching);
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), SetHTTPConnectionCaching, SetScope::GLOBAL);
 }
 
 void HTTPSettings::Initialize(DBConfig &config) {
@@ -122,7 +147,7 @@ void HTTPSettings::Initialize(DBConfig &config) {
 		return;
 	}
 #ifndef EMSCRIPTEN
-	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>());
+	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(config)));
 #else
 	config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
 #endif

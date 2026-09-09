@@ -46,23 +46,33 @@ TEST_CASE("Hugging Face list status errors preserve HTTP metadata", "[httpfs][hf
 		using HuggingFaceFileSystem::ListHFRequest;
 	};
 
-	MockS3Server server {MockS3ServerConfig()};
+	MockS3ServerConfig config;
+	config.failures.transient_get_failures = 1;
+	MockS3Server server(std::move(config));
 	HTTPFSUtil http_util;
 	auto params = http_util.InitializeParameters(nullptr, nullptr);
 	auto &httpfs_params = params->Cast<HTTPFSParams>();
+	httpfs_params.retries = 0;
+	httpfs_params.user_agent = "hf-list-test";
+	httpfs_params.extra_headers["X-HF-Test"] = "present";
+	auto session = make_shared_ptr<HTTPRequestSession>(make_shared_ptr<HTTPRequestSnapshot>(httpfs_params));
 	ParsedHFUrl url;
-	url.endpoint = server.Endpoint();
-	string next_page_url = url.endpoint + "/missing-hugging-face-page";
+	url.endpoint = "http://" + server.Endpoint();
+	string next_page_url = server.HTTPPath();
 
 	try {
-		TestHuggingFaceFileSystem::ListHFRequest(url, httpfs_params, next_page_url);
+		TestHuggingFaceFileSystem::ListHFRequest(url, *session, next_page_url);
 		FAIL("Expected the missing page to fail");
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		CHECK(error.Type() == ExceptionType::HTTP);
-		CHECK(error.ExtraInfo().at("status_code") == "404");
+		CHECK(error.ExtraInfo().at("status_code") == "400");
 		CHECK(StringUtil::Contains(error.RawMessage(), "HTTP GET error listing"));
 	}
+	auto observations = server.Observations();
+	REQUIRE(observations.size() == 1);
+	CHECK(MockS3HeaderValues(observations[0], "User-Agent") == vector<string> {"hf-list-test"});
+	CHECK(MockS3HeaderValues(observations[0], "X-HF-Test") == vector<string> {"present"});
 }
 
 } // namespace duckdb

@@ -58,14 +58,14 @@ private:
 	};
 
 public:
-	S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags, unique_ptr<HTTPParams> http_params_p,
-	             const S3AuthParams &auth_params_p, const S3UploadConfig &upload_config,
-	             optional<S3MultipartUploadPolicy> multipart_upload_policy);
+	S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+	             shared_ptr<HTTPRequestSession> request_session, const S3AuthParams &auth_params_p,
+	             const S3UploadConfig &upload_config, optional<S3MultipartUploadPolicy> multipart_upload_policy);
 	~S3FileHandle() override;
 
 public:
 	void Close() override;
-	void Initialize(optional_ptr<FileOpener> opener) override;
+	void Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) override;
 	void FinalizeUpload();
 	void AbortUpload();
 
