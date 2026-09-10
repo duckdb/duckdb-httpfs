@@ -93,7 +93,7 @@ AESStateSSL::AESStateSSL(unique_ptr<EncryptionStateMetadata> metadata)
 }
 
 AESStateSSL::~AESStateSSL() {
-	// Clean up
+	// Clean up!
 	EVP_CIPHER_CTX_free(context);
 }
 
