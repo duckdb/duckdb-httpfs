@@ -122,6 +122,8 @@ CURLHandle::CURLHandle() {
 
 CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
 	SetOption(CURLOPT_SHARE, GetCurlDNSShare());
+	// Bound how long clients stay pinned to one cached address.
+	SetOption(CURLOPT_DNS_CACHE_TIMEOUT, 5L);
 	SetOption(CURLOPT_MAXCONNECTS, 1L);
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
 	if (use_native_ca) {
