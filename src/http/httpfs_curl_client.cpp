@@ -5,6 +5,7 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
 #include <curl/curl.h>
+#include <mutex>
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
 
@@ -85,6 +86,33 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	return total_size;
 }
 
+// Share DNS entries across curl clients.
+static CURLSH *GetCurlDNSShare() {
+	static std::mutex share_locks[CURL_LOCK_DATA_LAST];
+	static CURLSH *share = [] {
+		auto sh = curl_share_init();
+		if (!sh) {
+			throw OutOfMemoryException("Failed to initialize curl DNS sharing");
+		}
+		auto check_result = [sh](CURLSHcode result) {
+			if (result != CURLSHE_OK) {
+				curl_share_setopt(sh, CURLSHOPT_LOCKFUNC, nullptr);
+				curl_share_setopt(sh, CURLSHOPT_UNLOCKFUNC, nullptr);
+				curl_share_cleanup(sh);
+				throw IOException("Failed to configure curl DNS sharing (%s)", curl_share_strerror(result));
+			}
+		};
+		check_result(curl_share_setopt(sh, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS));
+		check_result(curl_share_setopt(
+		    sh, CURLSHOPT_LOCKFUNC,
+		    +[](CURL *, curl_lock_data data, curl_lock_access, void *) { share_locks[data].lock(); }));
+		check_result(curl_share_setopt(
+		    sh, CURLSHOPT_UNLOCKFUNC, +[](CURL *, curl_lock_data data, void *) { share_locks[data].unlock(); }));
+		return sh;
+	}();
+	return share;
+}
+
 CURLHandle::CURLHandle() {
 	curl = curl_easy_init();
 	if (!curl) {
@@ -93,6 +121,7 @@ CURLHandle::CURLHandle() {
 }
 
 CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
+	SetOption(CURLOPT_SHARE, GetCurlDNSShare());
 	SetOption(CURLOPT_MAXCONNECTS, 1L);
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
 	if (use_native_ca) {
