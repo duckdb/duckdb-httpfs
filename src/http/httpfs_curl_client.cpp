@@ -86,6 +86,12 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	return total_size;
 }
 
+// How long a shared DNS entry may be reused. Object stores such as S3 answer with a rotating set of
+// front-end addresses, and every client and every retry reuses whichever address the shared cache holds.
+// Curl's default of 60 seconds keeps a stalled request on the same address for the whole minute, while a
+// burst of parallel requests still resolves a host only once at this bound.
+static constexpr long SHARED_DNS_CACHE_TIMEOUT_SECONDS = 5;
+
 // Share DNS entries across curl clients.
 static CURLSH *GetCurlDNSShare() {
 	static std::mutex share_locks[CURL_LOCK_DATA_LAST];
@@ -124,6 +130,7 @@ CURLHandle::CURLHandle() {
 
 CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
 	SetOption(CURLOPT_SHARE, GetCurlDNSShare());
+	SetOption(CURLOPT_DNS_CACHE_TIMEOUT, SHARED_DNS_CACHE_TIMEOUT_SECONDS);
 	SetOption(CURLOPT_MAXCONNECTS, 1L);
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
 	if (use_native_ca) {
