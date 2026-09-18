@@ -118,6 +118,8 @@ CURLHandle::CURLHandle() {
 	if (!curl) {
 		throw InternalException("Failed to initialize curl");
 	}
+	// Avoid changing signal handlers during concurrent requests.
+	SetOption(CURLOPT_NOSIGNAL, 1L);
 }
 
 CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
