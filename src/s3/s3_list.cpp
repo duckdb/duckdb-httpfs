@@ -2,12 +2,16 @@
 
 #include "s3/s3fs.hpp"
 
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/logging/file_system_logger.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/parallel/task_executor.hpp"
+
+#include <exception>
 
 namespace duckdb {
 
@@ -60,12 +64,31 @@ protected:
 	bool ExpandNextPath() const override;
 
 private:
-	void ScanCurrentCommonPrefix(vector<OpenFileInfo> &s3_keys) const;
-	void ScanTopLevel(vector<OpenFileInfo> &s3_keys) const;
+	struct PrefixResult {
+		S3ListObjectsV2Result response;
+		std::exception_ptr error;
+	};
+	struct Prefix {
+		string continuation_token;
+		optional<PrefixResult> result;
+	};
+	struct Entry {
+		OpenFileInfo file;
+		unique_ptr<Prefix> prefix;
+	};
+	class ListPrefixTask;
+
+	idx_t GetConcurrency() const;
+	void PrefetchPrefixes() const;
+	void ScanPrefix() const;
+	S3ListObjectsV2Result ListPrefix(const Entry &entry) const;
+	S3ListObjectsV2Result Request(const string &path, const string &continuation_token, S3ListMode mode,
+	                              optional_ptr<const string> prefix = nullptr) const;
+	void AppendPage(const S3ListObjectsV2Result &response) const;
+	void ScanTopLevel() const;
 	bool ShouldInvestigateRecursiveGlob() const;
 	void SelectGlobType(S3ListObjectsV2Result &response, string &continuation_token) const;
-	static bool ContainsDenseDirectories(const vector<OpenFileInfo> &s3_keys);
-	void SelectNextCommonPrefix() const;
+	bool ContainsDenseDirectories(const vector<OpenFileInfo> &s3_keys) const;
 	void AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const;
 
 private:
@@ -77,10 +100,30 @@ private:
 	string shared_path;
 	optional<ParsedS3Url> parsed_s3_url;
 	mutable string main_continuation_token;
-	mutable string current_common_prefix;
-	mutable string common_prefix_continuation_token;
-	mutable vector<string> common_prefixes;
+	mutable vector<Entry> entries;
+	mutable idx_t prefetched_count = 0;
 	mutable GlobType glob_type {UNKNOWN};
+};
+
+class S3GlobResult::ListPrefixTask : public BaseExecutorTask {
+public:
+	ListPrefixTask(TaskExecutor &executor, const S3GlobResult &glob_p, const Entry &entry_p, PrefixResult &result_p)
+	    : BaseExecutorTask(executor), glob(glob_p), entry(entry_p), result(result_p) {
+	}
+
+	void ExecuteTask() override {
+		try {
+			result.response = glob.ListPrefix(entry);
+		} catch (...) {
+			// Report prefetched failures when their prefix is consumed.
+			result.error = std::current_exception();
+		}
+	}
+
+private:
+	const S3GlobResult &glob;
+	const Entry &entry;
+	PrefixResult &result;
 };
 
 S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, optional_ptr<FileOpener> opener)
@@ -126,58 +169,129 @@ bool S3GlobResult::ExpandNextPath() const {
 		return false;
 	}
 
-	vector<OpenFileInfo> s3_keys;
-	if (!current_common_prefix.empty()) {
-		ScanCurrentCommonPrefix(s3_keys);
-	} else {
-		ScanTopLevel(s3_keys);
+	if (entries.empty()) {
+		ScanTopLevel();
+	} else if (entries.back().prefix) {
+		ScanPrefix();
 	}
 
-	if (main_continuation_token.empty() && current_common_prefix.empty()) {
+	vector<OpenFileInfo> s3_keys;
+	while (!entries.empty() && !entries.back().prefix) {
+		s3_keys.push_back(std::move(entries.back().file));
+		entries.pop_back();
+	}
+	if (main_continuation_token.empty() && entries.empty()) {
 		finished = true;
 	}
 	AppendMatchingFiles(s3_keys);
 	return true;
 }
 
-void S3GlobResult::ScanCurrentCommonPrefix(vector<OpenFileInfo> &s3_keys) const {
-	auto prefix_path = parsed_s3_url->GetPrefix() + parsed_s3_url->GetBucket() + '/' + current_common_prefix;
-	current_common_prefix = S3Url::Decode(current_common_prefix);
-	auto key_splits = StringUtil::Split(current_common_prefix, "/");
-	auto pattern_splits = StringUtil::Split(parsed_s3_url->GetKey(), "/");
-	if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
-	          S3GlobMatchMode::PREFIX)) {
-		prefix_path = S3Url::Decode(prefix_path);
-		auto response = AWSListObjectV2::Request(fs.GetEncryptionUtil(), *request_session, prefix_path,
-		                                         common_prefix_continuation_token, S3ListMode::HIERARCHICAL);
-		AWSListObjectV2::AppendFileList(response, s3_keys);
-		common_prefixes.insert(common_prefixes.end(), response.common_prefixes.begin(), response.common_prefixes.end());
-		common_prefix_continuation_token = response.continuation_token;
+S3ListObjectsV2Result S3GlobResult::Request(const string &path, const string &continuation_token, S3ListMode mode,
+                                            optional_ptr<const string> prefix) const {
+	if (context && context->IsInterrupted()) {
+		throw InterruptException();
 	}
-	if (common_prefix_continuation_token.empty()) {
-		SelectNextCommonPrefix();
-	}
+	return AWSListObjectV2::Request(fs.GetEncryptionUtil(), *request_session, path, continuation_token, mode, {},
+	                                prefix);
 }
 
-void S3GlobResult::ScanTopLevel(vector<OpenFileInfo> &s3_keys) const {
-	if (!common_prefixes.empty()) {
-		throw InternalException("We have common prefixes but we are doing a top-level request");
+S3ListObjectsV2Result S3GlobResult::ListPrefix(const Entry &entry) const {
+	auto path = parsed_s3_url->GetPrefix() + parsed_s3_url->GetBucket() + '/';
+	return Request(path, entry.prefix->continuation_token, S3ListMode::HIERARCHICAL, &entry.file.path);
+}
+
+void S3GlobResult::AppendPage(const S3ListObjectsV2Result &response) const {
+	const auto start = entries.size();
+	vector<OpenFileInfo> files;
+	AWSListObjectV2::AppendFileList(response, files);
+	for (auto &file : files) {
+		entries.push_back({std::move(file), nullptr});
+	}
+	auto pattern_splits = StringUtil::Split(parsed_s3_url->GetKey(), "/");
+	for (const auto &prefix : response.common_prefixes) {
+		auto path = S3Url::Decode(prefix);
+		auto key_splits = StringUtil::Split(path, "/");
+		if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
+		          S3GlobMatchMode::PREFIX)) {
+			entries.push_back({OpenFileInfo(std::move(path)), make_uniq<Prefix>()});
+		}
+	}
+	// Merge files and prefixes by decoded key before descending into subdirectories.
+	std::sort(entries.begin() + NumericCast<int64_t>(start), entries.end(),
+	          [](const Entry &left, const Entry &right) { return left.file.path > right.file.path; });
+}
+
+idx_t S3GlobResult::GetConcurrency() const {
+	auto client_context = context;
+	return client_context ? TaskScheduler::GetScheduler(*client_context).NumberOfAsyncThreads() + 1 : 1;
+}
+
+void S3GlobResult::PrefetchPrefixes() const {
+	const auto concurrency = GetConcurrency();
+	const auto available = concurrency > prefetched_count ? concurrency - prefetched_count : 1;
+	vector<idx_t> pending;
+	for (idx_t i = entries.size(); i > 0 && pending.size() < available; --i) {
+		const auto &prefix = entries[i - 1].prefix;
+		if (prefix && !prefix->result) {
+			pending.push_back(i - 1);
+		}
+	}
+	const auto count = pending.size();
+	D_ASSERT(count > 0);
+	vector<PrefixResult> results(count);
+	if (count == 1) {
+		results[0].response = ListPrefix(entries[pending[0]]);
+	} else {
+		auto client_context = context;
+		TaskExecutor executor(*client_context, TaskSchedulerType::ASYNC);
+		for (idx_t i = 0; i < count; i++) {
+			executor.ScheduleTask(make_uniq<ListPrefixTask>(executor, *this, entries[pending[i]], results[i]));
+		}
+		executor.WorkOnTasks();
+	}
+	for (idx_t i = 0; i < count; i++) {
+		entries[pending[i]].prefix->result = std::move(results[i]);
+	}
+	prefetched_count += count;
+}
+
+void S3GlobResult::ScanPrefix() const {
+	if (!entries.back().prefix->result) {
+		PrefetchPrefixes();
+	}
+	if (entries.back().prefix->result->error) {
+		std::rethrow_exception(entries.back().prefix->result->error);
+	}
+	auto entry = std::move(entries.back());
+	entries.pop_back();
+	D_ASSERT(prefetched_count > 0);
+	--prefetched_count;
+	auto response = std::move(entry.prefix->result->response);
+	if (!response.continuation_token.empty()) {
+		entry.prefix->continuation_token = std::move(response.continuation_token);
+		entry.prefix->result.reset();
+		entries.push_back(std::move(entry));
+	}
+	AppendPage(response);
+}
+
+void S3GlobResult::ScanTopLevel() const {
+	if (!entries.empty()) {
+		throw InternalException("Cannot perform a top-level S3 list request with pending entries");
 	}
 	const auto list_mode = glob_type == GlobType::HIERARCHICAL ? S3ListMode::HIERARCHICAL : S3ListMode::FLAT;
-	auto response = AWSListObjectV2::Request(fs.GetEncryptionUtil(), *request_session, shared_path,
-	                                         main_continuation_token, list_mode);
+	auto response = Request(shared_path, main_continuation_token, list_mode);
 	auto continuation_token = response.continuation_token;
 	if (ShouldInvestigateRecursiveGlob() && !continuation_token.empty()) {
 		SelectGlobType(response, continuation_token);
 	}
 	main_continuation_token = continuation_token;
-	AWSListObjectV2::AppendFileList(response, s3_keys);
-	common_prefixes = response.common_prefixes;
-	SelectNextCommonPrefix();
+	AppendPage(response);
 }
 
 bool S3GlobResult::ShouldInvestigateRecursiveGlob() const {
-	if (glob_type != GlobType::UNKNOWN || StringUtil::Contains(parsed_s3_url->GetKey(), "**")) {
+	if (glob_type != GlobType::UNKNOWN) {
 		return false;
 	}
 	Value value;
@@ -194,33 +308,21 @@ void S3GlobResult::SelectGlobType(S3ListObjectsV2Result &response, string &conti
 		glob_type = GlobType::LISTING;
 		return;
 	}
-	response = AWSListObjectV2::Request(fs.GetEncryptionUtil(), *request_session, shared_path, main_continuation_token,
-	                                    S3ListMode::HIERARCHICAL);
+	response = Request(shared_path, main_continuation_token, S3ListMode::HIERARCHICAL);
 	continuation_token = response.continuation_token;
 	glob_type = GlobType::HIERARCHICAL;
 }
 
-bool S3GlobResult::ContainsDenseDirectories(const vector<OpenFileInfo> &s3_keys) {
+bool S3GlobResult::ContainsDenseDirectories(const vector<OpenFileInfo> &s3_keys) const {
 	unordered_set<string> directories;
 	for (const auto &s3_key : s3_keys) {
-		auto key_splits = StringUtil::Split(s3_key.path, "/");
-		key_splits.pop_back();
-		string directory;
-		for (const auto &split : key_splits) {
-			directory += split + "/";
-		}
-		directories.insert(std::move(directory));
+		auto slash = s3_key.path.find_last_of('/');
+		directories.insert(slash == string::npos ? "" : s3_key.path.substr(0, slash + 1));
 	}
-	return directories.size() * 100 < s3_keys.size();
-}
-
-void S3GlobResult::SelectNextCommonPrefix() const {
-	if (common_prefixes.empty()) {
-		current_common_prefix.clear();
-		return;
+	if (directories.size() * 100 < s3_keys.size()) {
+		return true;
 	}
-	current_common_prefix = common_prefixes.back();
-	common_prefixes.pop_back();
+	return !s3_keys.empty() && directories.size() * 1000 <= s3_keys.size() * GetConcurrency();
 }
 
 void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
@@ -292,7 +394,7 @@ struct S3ListRequest {
 		return std::move(*result);
 	}
 
-	static S3RequestQuery BuildQuery(const ParsedS3Url &parsed_url, const string &continuation_token, S3ListMode mode,
+	static S3RequestQuery BuildQuery(const string &prefix, const string &continuation_token, S3ListMode mode,
 	                                 optional_idx max_keys) {
 		vector<pair<string, string>> request_params;
 		if (!continuation_token.empty()) {
@@ -306,20 +408,21 @@ struct S3ListRequest {
 		if (max_keys.IsValid()) {
 			request_params.emplace_back("max-keys", to_string(max_keys.GetIndex()));
 		}
-		request_params.emplace_back("prefix", parsed_url.GetKey());
+		request_params.emplace_back("prefix", prefix);
 		return S3RequestQuery(std::move(request_params));
 	}
 };
 
 S3ListObjectsV2Result AWSListObjectV2::Request(EncryptionUtil &encryption_util, HTTPRequestSession &session,
                                                const string &path, const string &continuation_token, S3ListMode mode,
-                                               optional_idx max_keys) {
+                                               optional_idx max_keys, optional_ptr<const string> prefix) {
 	optional<S3ListObjectsV2Result> parsed_result;
 	auto request_result = S3RequestExecutor::RunSession(
 	    encryption_util, session,
 	    S3RequestSpec {path, S3RequestOperation::LIST_OBJECTS,
 	                   [&](const ParsedS3Url &parsed_url) {
-		                   return S3ListRequest::BuildQuery(parsed_url, continuation_token, mode, max_keys);
+		                   return S3ListRequest::BuildQuery(prefix ? *prefix : parsed_url.GetKey(), continuation_token,
+		                                                    mode, max_keys);
 	                   },
 	                   "", "", ""},
 	    [&](S3RequestData &request_data) {
