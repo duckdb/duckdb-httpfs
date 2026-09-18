@@ -31,6 +31,7 @@ class HTTPState;
 class HTTPFSUtil;
 class HTTPException;
 class HTTPRequestSession;
+class CurlCertificateStoreCache;
 struct HTTPFSParams;
 
 struct HTTPFSHeaderValue {
@@ -143,6 +144,8 @@ private:
 
 private:
 	const bool connection_caching_enabled;
+	//! Parsed CA bundles shared by this provider's clients.
+	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 };
 
 #endif

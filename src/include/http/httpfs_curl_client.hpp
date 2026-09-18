@@ -11,6 +11,7 @@ class FileOpener;
 struct FileOpenerInfo;
 class HTTPState;
 class HTTPFSCurlClient;
+class CurlCertificateStoreCache;
 
 class CURLURLHandle {
 private:
@@ -37,7 +38,8 @@ private:
 	CURLHandle();
 
 public:
-	explicit CURLHandle(bool use_native_ca);
+	CURLHandle(bool use_native_ca, const string &cert_path,
+	           shared_ptr<CurlCertificateStoreCache> certificate_store_cache = nullptr);
 	~CURLHandle();
 
 public:
@@ -55,9 +57,18 @@ public:
 		}
 	}
 	uint16_t GetResponseCode();
+	void SetVerifySSL(bool verify_ssl);
+
+private:
+	static CURLcode ConfigureSSLContext(CURL *curl, void *ssl_context, void *user_data);
 
 private:
 	CURL *curl = nullptr;
+	//! Curl transport and the immutable CA bundle selection.
+	string cert_path;
+	//! A non-null cache selects callback-based verification; otherwise curl handles it.
+	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
+	bool verify_server_certificate = true;
 };
 
 class CURLRequestHeaders {
