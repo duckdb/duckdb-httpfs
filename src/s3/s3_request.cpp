@@ -691,6 +691,7 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 			}
 		}
 	});
+	result.context.throttled_retries = retry_budget.ThrottledRetries();
 	return result;
 }
 

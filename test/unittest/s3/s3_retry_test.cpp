@@ -3,11 +3,14 @@
 #include "s3/mock_s3_server.hpp"
 #include "s3/s3_test_helper.hpp"
 
+#include "crypto.hpp"
+#include "s3/s3_list.hpp"
 #include "s3/s3fs.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/http/http_retry_budget.hpp"
 
 namespace duckdb {
@@ -972,6 +975,39 @@ static void RunExhaustedListRetryTest(const string &client_implementation, int s
 	REQUIRE(CountListObservations(observations, 200) == 0);
 }
 
+static void RunThrottledListSignalTest(const string &client_implementation, idx_t transient_503_lists,
+                                       idx_t transient_400_lists) {
+	MockS3ServerConfig config;
+	config.failures.transient_503_lists = transient_503_lists;
+	config.failures.transient_400_lists = transient_400_lists;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureListRetryTest(db, con, server, client_implementation, 2);
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	ClientContextFileOpener opener(*con.context);
+	FileOpenerInfo info = {S3TestHelper::S3_PATH};
+	auto auth_params = S3AuthResolver::Resolve(opener, info);
+	auto session = S3RequestExecutor::CreateSession(opener, S3TestHelper::S3_PATH, auth_params);
+	::AESStateSSLFactory encryption_util;
+	auto result = AWSListObjectV2::Request(encryption_util, *session, "s3://refresh-bucket/", "", S3ListMode::FLAT);
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE_FALSE(result.objects.empty());
+	REQUIRE(CountListObservations(observations, 503) == transient_503_lists);
+	REQUIRE(CountListObservations(observations, 400) == transient_400_lists);
+	REQUIRE(CountListObservations(observations, 200) == 1);
+	REQUIRE(result.throttled_retries == transient_503_lists);
+
+	auto next_result =
+	    AWSListObjectV2::Request(encryption_util, *session, "s3://refresh-bucket/", "", S3ListMode::FLAT);
+	REQUIRE_FALSE(next_result.objects.empty());
+	REQUIRE(next_result.throttled_retries == 0);
+}
+
 static void RunGeneric400ListTest(const string &client_implementation) {
 	MockS3ServerConfig config;
 	config.failures.transient_400_lists = 1000;
@@ -1049,6 +1085,28 @@ TEST_CASE("S3 glob exhausts retries for persistent transient ListObjectsV2 error
 	}
 	SECTION("curl exhausts 400 RequestTimeout retries") {
 		RunExhaustedListRetryTest("curl", 400);
+	}
+}
+
+TEST_CASE("S3 ListObjectsV2 reports throttled retries", "[httpfs][s3][retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client) {
+			SECTION("counts a 503 SlowDown retry") {
+				RunThrottledListSignalTest(client, 1, 0);
+			}
+			SECTION("counts every 503 SlowDown retry") {
+				RunThrottledListSignalTest(client, 2, 0);
+			}
+			SECTION("reports no throttling for a clean listing") {
+				RunThrottledListSignalTest(client, 0, 0);
+			}
+			SECTION("does not count a 400 RequestTimeout retry") {
+				RunThrottledListSignalTest(client, 0, 1);
+			}
+			SECTION("counts only throttling in mixed retries") {
+				RunThrottledListSignalTest(client, 1, 1);
+			}
+		}
 	}
 }
 
