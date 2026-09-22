@@ -32,6 +32,8 @@ struct S3ListObjectsV2Result {
 	vector<S3ListObjectsV2Object> objects;
 	vector<string> common_prefixes;
 	string continuation_token;
+	//! Retries admitted for HTTP 429 or 503 responses.
+	idx_t throttled_retries = 0;
 };
 
 struct S3DeleteObjectsError {
