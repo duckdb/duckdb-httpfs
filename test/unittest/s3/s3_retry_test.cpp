@@ -1234,4 +1234,201 @@ TEST_CASE("S3 response and transport failures share a DELETE budget", "[httpfs][
 	}
 }
 
+//===--------------------------------------------------------------------===//
+// Parallel glob throttling
+//===--------------------------------------------------------------------===//
+
+static constexpr idx_t TREE_DIRECTORIES = 32;
+static constexpr idx_t TREE_FILES_PER_DIRECTORY = 200;
+
+static MockS3ServerConfig MakeTreeListConfig() {
+	MockS3ServerConfig config;
+	config.list.tree_prefix = "tree/";
+	config.list.tree_directories = TREE_DIRECTORIES;
+	config.list.tree_files_per_directory = TREE_FILES_PER_DIRECTORY;
+	return config;
+}
+
+static void ConfigureParallelGlobTest(DuckDB &db, Connection &con, MockS3Server &server,
+                                      const string &client_implementation, idx_t retry_wait_ms) {
+	ConfigureListRetryTest(db, con, server, client_implementation, 2);
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=" + to_string(retry_wait_ms));
+	S3TestHelper::RequireQueryOk(con, "SET async_threads=16");
+	S3TestHelper::RequireQueryOk(con, "CALL enable_logging()");
+}
+
+static vector<MockS3RequestObservation> GetPrefixListObservations(const vector<MockS3RequestObservation> &observations,
+                                                                  const string &prefix) {
+	vector<MockS3RequestObservation> result;
+	for (auto &observation : GetListObservations(observations)) {
+		// The curl client percent-encodes the prefix, httplib sends it verbatim.
+		auto target = StringUtil::Replace(observation.target, "%2F", "/");
+		if (target.find("prefix=" + prefix) != string::npos) {
+			result.push_back(observation);
+		}
+	}
+	return result;
+}
+
+static idx_t MaxInFlightLists(const vector<MockS3RequestObservation> &lists, idx_t skip) {
+	idx_t result = 0;
+	for (idx_t i = skip; i < lists.size(); i++) {
+		result = MaxValue<idx_t>(result, lists[i].in_flight_lists);
+	}
+	return result;
+}
+
+static vector<string> GetShrinkWarnings(Connection &con) {
+	auto result = con.Query("SELECT message FROM duckdb_logs WHERE message LIKE '%reducing concurrent list requests%' "
+	                        "ORDER BY timestamp");
+	REQUIRE(result);
+	REQUIRE_FALSE(result->HasError());
+	vector<string> messages;
+	for (idx_t i = 0; i < result->RowCount(); i++) {
+		messages.push_back(result->GetValue(0, i).ToString());
+	}
+	return messages;
+}
+
+static idx_t CountShrinkWarnings(Connection &con) {
+	return GetShrinkWarnings(con).size();
+}
+
+static void RunParallelGlobBaselineTest(const string &client_implementation) {
+	auto config = MakeTreeListConfig();
+	config.failures.list_delay_ms = 10;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureParallelGlobTest(db, con, server, client_implementation, 1);
+
+	auto result = con.Query("SELECT count(*) FROM glob('s3://refresh-bucket/tree/*/*.bin')");
+	REQUIRE(result);
+	auto observations = server.Observations();
+	INFO((result->HasError() ? result->GetError() : string()));
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
+
+	auto lists = GetListObservations(observations);
+	// One flat page, one hierarchical top-level page, then one page per directory.
+	REQUIRE(lists.size() == 2 + TREE_DIRECTORIES);
+	REQUIRE(CountListObservations(observations, 503) == 0);
+	REQUIRE(MaxInFlightLists(lists, 0) > 1);
+	REQUIRE(MaxInFlightLists(lists, 0) <= 16);
+	REQUIRE(CountShrinkWarnings(con) == 0);
+}
+
+static void RunParallelGlobAdaptsToThrottlingTest(const string &client_implementation) {
+	auto config = MakeTreeListConfig();
+	config.failures.max_concurrent_lists = 2;
+	config.failures.list_delay_ms = 10;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureParallelGlobTest(db, con, server, client_implementation, 20);
+
+	auto result = con.Query("SELECT count(*) FROM glob('s3://refresh-bucket/tree/*/*.bin')");
+	REQUIRE(result);
+	auto observations = server.Observations();
+	INFO((result->HasError() ? result->GetError() : string()));
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
+
+	REQUIRE(CountListObservations(observations, 503) > 0);
+	REQUIRE(CountListObservations(observations, 200) == 2 + TREE_DIRECTORIES);
+	// The first wave opens at full width and is throttled; the window then halves until the server stops throttling.
+	auto shrinks = GetShrinkWarnings(con);
+	REQUIRE(shrinks.size() >= 2);
+	REQUIRE(StringUtil::Contains(shrinks[0], "from 16 to 8"));
+	REQUIRE(StringUtil::Contains(shrinks[1], "from 8 to 4"));
+}
+
+static void RunParallelGlobReissuesThrottledPrefixTest(const string &client_implementation) {
+	auto config = MakeTreeListConfig();
+	config.failures.transient_503_list_prefix = "tree/d05/";
+	// Two retries plus core's five extra throttle retries: eight attempts exhaust one request's budget.
+	config.failures.transient_503_prefix_lists = 8;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureParallelGlobTest(db, con, server, client_implementation, 1);
+
+	auto result = con.Query("SELECT count(*) FROM glob('s3://refresh-bucket/tree/*/*.bin')");
+	REQUIRE(result);
+	auto observations = server.Observations();
+	INFO((result->HasError() ? result->GetError() : string()));
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
+
+	REQUIRE(CountListObservations(observations, 503) == 8);
+	REQUIRE(CountListObservations(observations, 200) == 2 + TREE_DIRECTORIES);
+	auto throttled_lists = GetPrefixListObservations(observations, "tree/d05/");
+	REQUIRE(throttled_lists.size() == 9);
+	REQUIRE(throttled_lists.back().status == 200);
+	// The re-issued request runs alone.
+	REQUIRE(throttled_lists.back().in_flight_lists == 1);
+	REQUIRE(CountShrinkWarnings(con) >= 1);
+}
+
+static void RunParallelGlobExhaustedThrottlingTest(const string &client_implementation) {
+	auto config = MakeTreeListConfig();
+	config.failures.transient_503_list_prefix = "tree/d";
+	config.failures.transient_503_prefix_lists = 100000;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureParallelGlobTest(db, con, server, client_implementation, 1);
+
+	auto result = con.Query("SELECT count(*) FROM glob('s3://refresh-bucket/tree/*/*.bin')");
+	REQUIRE(result);
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "503"));
+
+	// A full first wave of sixteen exhausted requests, then a single sequential re-issue before failing.
+	REQUIRE(CountListObservations(observations, 200) == 2);
+	REQUIRE(CountListObservations(observations, 503) == 16 * 8 + 8);
+	REQUIRE(CountShrinkWarnings(con) >= 1);
+}
+
+TEST_CASE("S3 parallel glob lists prefixes concurrently", "[httpfs][s3][retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client) {
+			RunParallelGlobBaselineTest(client);
+		}
+	}
+}
+
+TEST_CASE("S3 parallel glob adapts list concurrency to throttling", "[httpfs][s3][retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client) {
+			RunParallelGlobAdaptsToThrottlingTest(client);
+		}
+	}
+}
+
+TEST_CASE("S3 parallel glob re-issues a throttled prefix listing before failing", "[httpfs][s3][retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client) {
+			RunParallelGlobReissuesThrottledPrefixTest(client);
+		}
+	}
+}
+
+TEST_CASE("S3 parallel glob fails in bounded time when listing stays throttled", "[httpfs][s3][retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client) {
+			RunParallelGlobExhaustedThrottlingTest(client);
+		}
+	}
+}
+
 } // namespace duckdb
