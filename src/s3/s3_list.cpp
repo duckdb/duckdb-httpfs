@@ -3,6 +3,7 @@
 #include "s3/s3fs.hpp"
 
 #include "duckdb/common/algorithm.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -56,6 +57,9 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 
 enum GlobType { HIERARCHICAL, LISTING, UNKNOWN };
 
+//! Upper bound on concurrent prefix listings, independent of async_threads: S3 throttles LIST well before GET.
+static constexpr idx_t MAX_LIST_CONCURRENCY = 16;
+
 struct S3GlobResult : public LazyMultiFileList {
 public:
 	S3GlobResult(S3FileSystem &fs_p, const string &path, optional_ptr<FileOpener> opener);
@@ -71,6 +75,8 @@ private:
 	struct Prefix {
 		string continuation_token;
 		optional<PrefixResult> result;
+		//! A throttled prefix is re-issued once, alone, before its failure is reported.
+		bool reissued = false;
 	};
 	struct Entry {
 		OpenFileInfo file;
@@ -79,7 +85,9 @@ private:
 	class ListPrefixTask;
 
 	idx_t GetConcurrency() const;
-	void PrefetchPrefixes() const;
+	void PrefetchPrefixes(idx_t limit) const;
+	void AdaptListWindow(const vector<PrefixResult> &results) const;
+	static bool IsThrottledError(const std::exception_ptr &error);
 	void ScanPrefix() const;
 	S3ListObjectsV2Result ListPrefix(const Entry &entry) const;
 	S3ListObjectsV2Result Request(const string &path, const string &continuation_token, S3ListMode mode,
@@ -102,6 +110,8 @@ private:
 	mutable string main_continuation_token;
 	mutable vector<Entry> entries;
 	mutable idx_t prefetched_count = 0;
+	//! Additive-increase/multiplicative-decrease bound on concurrent prefix listings, driven by throttling.
+	mutable idx_t list_window = 0;
 	mutable GlobType glob_type {UNKNOWN};
 };
 
@@ -224,12 +234,46 @@ void S3GlobResult::AppendPage(const S3ListObjectsV2Result &response) const {
 
 idx_t S3GlobResult::GetConcurrency() const {
 	auto client_context = context;
-	return client_context ? TaskScheduler::GetScheduler(*client_context).NumberOfAsyncThreads() + 1 : 1;
+	const auto threads = client_context ? TaskScheduler::GetScheduler(*client_context).NumberOfAsyncThreads() + 1 : 1;
+	return MinValue<idx_t>(threads, MAX_LIST_CONCURRENCY);
 }
 
-void S3GlobResult::PrefetchPrefixes() const {
-	const auto concurrency = GetConcurrency();
-	const auto available = concurrency > prefetched_count ? concurrency - prefetched_count : 1;
+bool S3GlobResult::IsThrottledError(const std::exception_ptr &error) {
+	try {
+		std::rethrow_exception(error);
+	} catch (std::exception &ex) {
+		return S3RequestUtil::IsThrottledError(ErrorData(ex));
+	} catch (...) {
+		return false;
+	}
+}
+
+void S3GlobResult::AdaptListWindow(const vector<PrefixResult> &results) const {
+	bool throttled = false;
+	for (const auto &result : results) {
+		throttled |= result.error ? IsThrottledError(result.error) : result.response.throttled_retries > 0;
+	}
+	const auto previous_window = list_window;
+	if (throttled) {
+		list_window = MaxValue<idx_t>(list_window / 2, 1);
+	} else {
+		list_window = MinValue<idx_t>(list_window + 1, GetConcurrency());
+	}
+	if (list_window < previous_window && context) {
+		DUCKDB_LOG_WARNING(*context,
+		                   "S3 throttled listing requests for glob \"%s\" - reducing concurrent list requests from "
+		                   "%llu to %llu",
+		                   glob_pattern, static_cast<unsigned long long>(previous_window),
+		                   static_cast<unsigned long long>(list_window));
+	}
+}
+
+void S3GlobResult::PrefetchPrefixes(idx_t limit) const {
+	if (list_window == 0) {
+		list_window = GetConcurrency();
+	}
+	const auto window = MinValue<idx_t>(list_window, limit);
+	const auto available = window > prefetched_count ? window - prefetched_count : 1;
 	vector<idx_t> pending;
 	for (idx_t i = entries.size(); i > 0 && pending.size() < available; --i) {
 		const auto &prefix = entries[i - 1].prefix;
@@ -250,6 +294,7 @@ void S3GlobResult::PrefetchPrefixes() const {
 		}
 		executor.WorkOnTasks();
 	}
+	AdaptListWindow(results);
 	for (idx_t i = 0; i < count; i++) {
 		entries[pending[i]].prefix->result = std::move(results[i]);
 	}
@@ -257,11 +302,21 @@ void S3GlobResult::PrefetchPrefixes() const {
 }
 
 void S3GlobResult::ScanPrefix() const {
-	if (!entries.back().prefix->result) {
-		PrefetchPrefixes();
+	auto &prefix = *entries.back().prefix;
+	if (!prefix.result) {
+		PrefetchPrefixes(GetConcurrency());
 	}
-	if (entries.back().prefix->result->error) {
-		std::rethrow_exception(entries.back().prefix->result->error);
+	if (prefix.result->error && !prefix.reissued && IsThrottledError(prefix.result->error)) {
+		// The request exhausted its retry budget while competing with the rest of its wave.
+		// Give it one sequential attempt with a fresh budget before failing the glob.
+		prefix.reissued = true;
+		prefix.result.reset();
+		D_ASSERT(prefetched_count > 0);
+		--prefetched_count;
+		PrefetchPrefixes(1);
+	}
+	if (prefix.result->error) {
+		std::rethrow_exception(prefix.result->error);
 	}
 	auto entry = std::move(entries.back());
 	entries.pop_back();
