@@ -98,6 +98,8 @@ struct S3RequestContext {
 	S3RequestOperation operation;
 	CapturedHTTPRequestSnapshot captured;
 	string display_url;
+	//! Retries admitted for HTTP 429 or 503 responses.
+	idx_t throttled_retries = 0;
 
 	const S3AuthParams &GetAuthParams() const {
 		D_ASSERT(captured.snapshot);

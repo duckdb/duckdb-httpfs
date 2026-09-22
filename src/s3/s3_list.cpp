@@ -289,6 +289,7 @@ struct S3ListRequest {
 		if (!result) {
 			throw IOException("Malformed S3 list response for \"%s\"", request_context.display_url);
 		}
+		result->throttled_retries = request_context.throttled_retries;
 		return std::move(*result);
 	}
 
