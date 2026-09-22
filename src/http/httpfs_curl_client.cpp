@@ -1,11 +1,15 @@
 #include "http/httpfs_client.hpp"
 #include "http/http_state.hpp"
+#include "http/curl_certificate_store_cache.hpp"
 #include "duckdb/logging/logger.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
 #include <curl/curl.h>
+#include <cstdlib>
 #include <mutex>
+#include <new>
+#include <openssl/ssl.h>
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
 
@@ -128,12 +132,20 @@ CURLHandle::CURLHandle() {
 	SetOption(CURLOPT_NOSIGNAL, 1L);
 }
 
-CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
+CURLHandle::CURLHandle(bool use_native_ca, const string &cert_path_p,
+                       shared_ptr<CurlCertificateStoreCache> certificate_store_cache_p)
+    : CURLHandle() {
+	cert_path = cert_path_p;
+	if (!cert_path.empty() && certificate_store_cache_p && CurlCertificateStoreCache::IsSupported(curl)) {
+		certificate_store_cache = std::move(certificate_store_cache_p);
+		SetOption(CURLOPT_SSL_CTX_FUNCTION, ConfigureSSLContext);
+		SetOption(CURLOPT_SSL_CTX_DATA, this);
+	}
 	SetOption(CURLOPT_SHARE, GetCurlDNSShare());
 	SetOption(CURLOPT_DNS_CACHE_TIMEOUT, SHARED_DNS_CACHE_TIMEOUT_SECONDS);
 	SetOption(CURLOPT_MAXCONNECTS, 1L);
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
-	if (use_native_ca) {
+	if (use_native_ca && !certificate_store_cache) {
 		ssl_options |= CURLSSLOPT_NATIVE_CA;
 	}
 	SetOption(CURLOPT_SSL_OPTIONS, ssl_options);
@@ -142,6 +154,36 @@ CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
 
 CURLHandle::~CURLHandle() {
 	curl_easy_cleanup(curl);
+}
+
+void CURLHandle::SetVerifySSL(bool verify_ssl_p) {
+	verify_server_certificate = verify_ssl_p;
+	// The cached path verifies the chain in OpenSSL to avoid curl loading a second store before our callback.
+	const bool curl_verifies_peer = verify_server_certificate && !certificate_store_cache;
+	SetOption(CURLOPT_SSL_VERIFYPEER, curl_verifies_peer ? 1L : 0L);
+	SetOption(CURLOPT_SSL_VERIFYHOST, verify_server_certificate ? 2L : 0L);
+}
+
+CURLcode CURLHandle::ConfigureSSLContext(CURL *, void *ssl_context, void *user_data) {
+	auto &handle = *static_cast<CURLHandle *>(user_data);
+	if (!handle.verify_server_certificate) {
+		return CURLE_OK;
+	}
+	try {
+		X509_STORE *store = nullptr;
+		auto result = handle.certificate_store_cache->Acquire(handle.cert_path, store);
+		if (result != CURLE_OK) {
+			return result;
+		}
+		auto context = static_cast<SSL_CTX *>(ssl_context);
+		SSL_CTX_set_cert_store(context, store);
+		SSL_CTX_set_verify(context, SSL_VERIFY_PEER, nullptr);
+		return CURLE_OK;
+	} catch (std::bad_alloc &) {
+		return CURLE_OUT_OF_MEMORY;
+	} catch (...) {
+		return CURLE_SSL_CACERT_BADFILE;
+	}
 }
 
 uint16_t CURLHandle::GetResponseCode() {
@@ -200,6 +242,21 @@ private:
 		}
 
 	private:
+		static bool HasProxyConfiguration(const HTTPFSParams &params) {
+			if (!params.http_proxy.empty()) {
+				return true;
+			}
+			// Curl also discovers proxies outside HTTPParams, including for redirected requests.
+			for (auto name : {"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "ftp_proxy", "FTP_PROXY",
+			                  "ftps_proxy", "FTPS_PROXY", "all_proxy", "ALL_PROXY"}) {
+				auto value = std::getenv(name);
+				if (value && value[0]) {
+					return true;
+				}
+			}
+			return false;
+		}
+
 		static void InitializeHandle(HTTPFSCurlClient &client, const HTTPFSParams &params) {
 			const auto reuse_domain = params.GetTransportReuseDomain();
 			if (client.curl && client.transport_reuse_domain.IsValid() &&
@@ -207,9 +264,11 @@ private:
 				return;
 			}
 			HTTPFSCurlClient::InitCurlGlobal();
-			client.curl = make_uniq<CURLHandle>(params.ca_cert_file.empty());
-			client.transport_reuse_domain = reuse_domain;
 			client.resolved_cert_file_path = params.ca_cert_file.empty() ? SelectCURLCertPath() : params.ca_cert_file;
+			client.curl = make_uniq<CURLHandle>(params.ca_cert_file.empty(), client.resolved_cert_file_path,
+			                                    HasProxyConfiguration(params) ? nullptr
+			                                                                  : client.certificate_store_cache);
+			client.transport_reuse_domain = reuse_domain;
 		}
 
 		static void ConfigureCredentials(HTTPFSCurlClient &client, const HTTPFSParams &params) {
@@ -228,8 +287,7 @@ private:
 		static void ConfigureConnection(HTTPFSCurlClient &client, const HTTPFSParams &params) {
 			client.curl->SetOption(CURLOPT_FORBID_REUSE, params.keep_alive ? 0L : 1L);
 			const bool verify_ssl = params.VerifyServerCertificate();
-			client.curl->SetOption(CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
-			client.curl->SetOption(CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
+			client.curl->SetVerifySSL(verify_ssl);
 		}
 
 		static void ConfigureTimeoutsAndCallbacks(HTTPFSCurlClient &client, const HTTPFSParams &params) {
@@ -417,7 +475,9 @@ private:
 	};
 
 public:
-	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port) : HTTPClient(proto_host_port) {
+	HTTPFSCurlClient(HTTPFSParams &http_params, const string &proto_host_port,
+	                 shared_ptr<CurlCertificateStoreCache> certificate_store_cache_p)
+	    : HTTPClient(proto_host_port), certificate_store_cache(std::move(certificate_store_cache_p)) {
 		auto result = curl_url_set(curl_base_url.Get(), CURLUPART_URL, proto_host_port.c_str(), 0);
 		if (result != CURLUE_OK) {
 			throw IOException("Failed to initialize curl URL: %s", curl_url_strerror(result));
@@ -800,6 +860,8 @@ private:
 	//! Reuse domain used to configure the current connection.
 	optional_idx transport_reuse_domain;
 	string resolved_cert_file_path;
+	//! Shared cache retained across handle reconstruction.
+	shared_ptr<CurlCertificateStoreCache> certificate_store_cache;
 };
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
@@ -810,12 +872,13 @@ unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params,
 		http_params.logger->WriteLog(HTTPFSInfoLogType::NAME, HTTPFSInfoLogType::LEVEL,
 		                             HTTPFSInfoLogType::ConstructLogMessage("connection_cache_miss", proto_host_port));
 	}
-	auto client = make_uniq<HTTPFSCurlClient>(httpfs_params, proto_host_port);
+	auto client = make_uniq<HTTPFSCurlClient>(httpfs_params, proto_host_port, certificate_store_cache);
 	return std::move(client);
 }
 
 HTTPFSCurlUtil::HTTPFSCurlUtil(bool connection_caching_enabled_p)
-    : connection_caching_enabled(connection_caching_enabled_p) {
+    : connection_caching_enabled(connection_caching_enabled_p),
+      certificate_store_cache(make_shared_ptr<CurlCertificateStoreCache>()) {
 }
 
 bool HTTPFSCurlUtil::GetDefaultVerifySSL(const HTTPFSParams &params) const {
