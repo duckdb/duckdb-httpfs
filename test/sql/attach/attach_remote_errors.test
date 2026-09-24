@@ -1,0 +1,52 @@
+# name: test/sql/attach/attach_remote_errors.test
+# description: Only a missing remote database is reported as not existing, other errors are propagated
+# group: [attach]
+
+require httpfs
+
+# the errors under test mention HTTP, so only skip when the network is unavailable
+set ignore_error_messages Unable to connect
+
+statement error
+ATTACH 'https://blobs.duckdb.org/databases/does-not-exist.duckdb' AS db (READ_ONLY)
+----
+database does not exist
+
+statement error
+ATTACH 'https://no-such-host.invalid/x.duckdb' AS db (READ_ONLY)
+----
+Could not resolve hostname
+
+# the WAL of an existing remote database is missing (404), which must still read as "no WAL"
+statement ok
+ATTACH 'https://blobs.duckdb.org/databases/stations.duckdb' AS stations (READ_ONLY)
+
+query I
+SELECT count(*) FROM stations.stations
+----
+578
+
+statement ok
+DETACH stations
+
+# with force_download the existence check is a full GET instead of a HEAD
+statement ok
+SET force_download = true
+
+statement error
+ATTACH 'https://blobs.duckdb.org/databases/does-not-exist.duckdb' AS db (READ_ONLY)
+----
+database does not exist
+
+statement error
+ATTACH 'https://no-such-host.invalid/x.duckdb' AS db (READ_ONLY)
+----
+Could not resolve hostname
+
+statement ok
+ATTACH 'https://blobs.duckdb.org/databases/stations.duckdb' AS stations (READ_ONLY)
+
+query I
+SELECT count(*) FROM stations.stations
+----
+578

@@ -120,6 +120,8 @@ public:
 	bool initialized = false;
 	bool auto_fallback_to_full_file_download = true;
 	bool write_overwrite_mode = false;
+	//! Set when opened with FILE_FLAGS_NULL_IF_NOT_EXISTS and the server answered 404
+	bool file_not_found = false;
 
 	//! Per-path state shared by all handles in this query
 	shared_ptr<HTTPFileState> file_state;
