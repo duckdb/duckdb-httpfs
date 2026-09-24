@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
@@ -354,6 +355,10 @@ public:
 		if (config.metadata.exact_empty_response_headers) {
 			server.set_header_writer(WriteMockResponseHeaders);
 		}
+		// Keep-alive connections pin a worker until they close; size the pool above any client fan-out under test.
+		server.new_task_queue = [] {
+			return new httplib::ThreadPool(64);
+		};
 		RegisterRoutes();
 		port = server.bind_to_any_port("127.0.0.1");
 		if (port <= 0) {
@@ -537,6 +542,7 @@ public:
 		observation.session_header_count = CountHeader(request, "X-HTTPFS-Session");
 		observation.status = status;
 		observation.remote_port = request.remote_port;
+		observation.in_flight_lists = in_flight_lists.load();
 		{
 			annotated_lock_guard<annotated_mutex> lock(upload_lock);
 			observation.multipart_upload_published = multipart_upload_published;
@@ -870,7 +876,66 @@ public:
 		Record(request, response.status);
 	}
 
+	//! ListObjectsV2 over the generated key tree, honoring prefix, delimiter and offset-based continuation tokens.
+	void SendTreeListObjectsSuccess(const httplib::Request &request, httplib::Response &response) const {
+		const auto prefix = GetParameter(request, "prefix");
+		const auto hierarchical = GetParameter(request, "delimiter") == "/";
+		const auto continuation_token = GetParameter(request, "continuation-token");
+		idx_t offset = 0;
+		if (!continuation_token.empty()) {
+			if (!StringUtil::StartsWith(continuation_token, "offset-")) {
+				throw InternalException("Mock S3 tree listing received an unknown continuation token");
+			}
+			offset = std::stoull(continuation_token.substr(strlen("offset-")));
+		}
+		// Entries are generated in key order; a common prefix stands in for every key it covers.
+		vector<pair<string, bool>> entries;
+		for (idx_t directory = 0; directory < config.list.tree_directories; directory++) {
+			auto directory_key =
+			    StringUtil::Format("%sd%02llu/", config.list.tree_prefix, static_cast<unsigned long long>(directory));
+			if (hierarchical && StringUtil::StartsWith(directory_key, prefix) && directory_key.size() > prefix.size()) {
+				entries.emplace_back(directory_key, true);
+				continue;
+			}
+			for (idx_t file = 0; file < config.list.tree_files_per_directory; file++) {
+				auto key = StringUtil::Format("%sf%03llu.bin", directory_key, static_cast<unsigned long long>(file));
+				if (StringUtil::StartsWith(key, prefix)) {
+					entries.emplace_back(std::move(key), false);
+				}
+			}
+		}
+		const auto end = MinValue<idx_t>(offset + config.list.tree_page_size, entries.size());
+		const bool truncated = end < entries.size();
+		string body = StringUtil::Format(
+		    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+		    "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+		    "<Name>%s</Name><Prefix>%s</Prefix><KeyCount>%llu</KeyCount>"
+		    "<MaxKeys>%llu</MaxKeys><IsTruncated>%s</IsTruncated>",
+		    config.object.bucket, prefix, static_cast<unsigned long long>(end - MinValue<idx_t>(offset, end)),
+		    static_cast<unsigned long long>(config.list.tree_page_size), truncated ? "true" : "false");
+		if (truncated) {
+			body += StringUtil::Format("<NextContinuationToken>offset-%llu</NextContinuationToken>",
+			                           static_cast<unsigned long long>(end));
+		}
+		for (idx_t i = offset; i < end; i++) {
+			if (entries[i].second) {
+				body += StringUtil::Format("<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>", entries[i].first);
+			} else {
+				body += StringUtil::Format(
+				    "<Contents><Key>%s</Key><ETag>&quot;tree&quot;</ETag><Size>1</Size></Contents>", entries[i].first);
+			}
+		}
+		body += "</ListBucketResult>";
+		response.status = 200;
+		response.set_content(body, "application/xml");
+		Record(request, response.status);
+	}
+
 	void SendListObjectsSuccess(const httplib::Request &request, httplib::Response &response) const {
+		if (config.list.tree_directories > 0) {
+			SendTreeListObjectsSuccess(request, response);
+			return;
+		}
 		response.status = 200;
 		auto unquoted_etag = StringUtil::Replace(config.metadata.etag, "\"", "");
 		auto first_page = config.list.paginate && GetParameter(request, "continuation-token").empty();
@@ -1268,6 +1333,7 @@ public:
 				Record(request, response.status);
 				return;
 			}
+			InFlightList in_flight(*this);
 			if (ShouldRedirectRegion(request)) {
 				SendRegionRedirect(request, response);
 				return;
@@ -1284,6 +1350,19 @@ public:
 			    transient_503_lists_sent.fetch_add(1) < config.failures.transient_503_lists) {
 				SendSlowDown(request, response);
 				return;
+			}
+			if (config.failures.transient_503_prefix_lists > 0 &&
+			    StringUtil::StartsWith(GetParameter(request, "prefix"), config.failures.transient_503_list_prefix) &&
+			    transient_503_prefix_lists_sent.fetch_add(1) < config.failures.transient_503_prefix_lists) {
+				SendSlowDown(request, response);
+				return;
+			}
+			if (config.failures.max_concurrent_lists > 0 && in_flight.count > config.failures.max_concurrent_lists) {
+				SendSlowDown(request, response);
+				return;
+			}
+			if (config.failures.list_delay_ms > 0) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(config.failures.list_delay_ms));
 			}
 			if (config.failures.transient_400_lists > 0 &&
 			    transient_400_lists_sent.fetch_add(1) < config.failures.transient_400_lists) {
@@ -1352,8 +1431,21 @@ public:
 	std::thread server_thread;
 	int port = 0;
 
+	//! Tracks ListObjectsV2 requests in flight for the concurrency throttle and observations
+	struct InFlightList {
+		explicit InFlightList(const Impl &impl_p) : impl(impl_p), count(++impl.in_flight_lists) {
+		}
+		~InFlightList() {
+			--impl.in_flight_lists;
+		}
+		const Impl &impl;
+		const idx_t count;
+	};
+	mutable atomic<idx_t> in_flight_lists {0};
+
 	//! Injected request failures
 	mutable atomic<idx_t> transient_503_lists_sent {0};
+	mutable atomic<idx_t> transient_503_prefix_lists_sent {0};
 	mutable atomic<idx_t> transient_400_lists_sent {0};
 	mutable atomic<idx_t> malformed_success_lists_sent {0};
 	mutable atomic<idx_t> remaining_put_failures {0};
@@ -1537,7 +1629,7 @@ string MockS3DescribeObservations(const vector<MockS3RequestObservation> &observ
 		    "part_number=%s body_size=%llu delete_key_count=%llu body_digest=%s published=%s sse=%s "
 		    "kms_key_id=%s sse_customer_algorithm=%s sse_customer_key_md5=%s sse_customer_key=%s "
 		    "sse_customer_key_matches=%s user_agent=%s "
-		    "session_header=%s",
+		    "session_header=%s in_flight_lists=%llu",
 		    observation.method, observation.path, observation.status, observation.key_id, observation.region,
 		    observation.range, observation.if_match, observation.version_id, observation.target, observation.upload_id,
 		    observation.part_number.IsValid() ? std::to_string(observation.part_number.GetIndex()) : string(),
@@ -1545,8 +1637,8 @@ string MockS3DescribeObservations(const vector<MockS3RequestObservation> &observ
 		    observation.multipart_upload_published ? "true" : "false", observation.server_side_encryption,
 		    observation.kms_key_id, observation.sse_customer_algorithm, observation.sse_customer_key_md5,
 		    observation.has_sse_customer_key ? "redacted" : "absent",
-		    observation.sse_customer_key_matches ? "true" : "false", observation.user_agent,
-		    observation.session_header);
+		    observation.sse_customer_key_matches ? "true" : "false", observation.user_agent, observation.session_header,
+		    static_cast<unsigned long long>(observation.in_flight_lists));
 	}
 	return result;
 }

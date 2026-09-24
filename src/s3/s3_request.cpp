@@ -614,6 +614,12 @@ bool S3RequestUtil::IsRetryableReceivedResponse(const HTTPResponse &response) {
 	       error.code == "ServiceUnavailable" || error.code == "TooManyRequests" || error.code == "RequestTimeout";
 }
 
+bool S3RequestUtil::IsThrottledError(const ErrorData &error) {
+	auto &extra_info = error.ExtraInfo();
+	auto entry = extra_info.find("status_code");
+	return entry != extra_info.end() && (entry->second == "429" || entry->second == "503");
+}
+
 static bool IsS3RequestTimeoutError(const ErrorData &error) {
 	auto &extra_info = error.ExtraInfo();
 	auto status_entry = extra_info.find("status_code");

@@ -99,6 +99,13 @@ struct MockS3CompletionFaultConfig {
 struct MockS3FailureConfig {
 	//! Answer this many leading ListObjectsV2 requests with HTTP 503 SlowDown
 	idx_t transient_503_lists = 0;
+	//! Answer this many leading ListObjectsV2 requests whose prefix starts with the given value with HTTP 503 SlowDown
+	idx_t transient_503_prefix_lists = 0;
+	string transient_503_list_prefix;
+	//! Answer ListObjectsV2 requests with HTTP 503 SlowDown while more than this many are in flight (0 = unlimited)
+	idx_t max_concurrent_lists = 0;
+	//! Hold each successful ListObjectsV2 response this long so that concurrent requests overlap
+	idx_t list_delay_ms = 0;
 	//! Answer this many leading ListObjectsV2 requests with HTTP 400
 	idx_t transient_400_lists = 0;
 	//! Answer this many leading ListObjectsV2 requests with malformed HTTP 200 bodies
@@ -131,6 +138,12 @@ struct MockS3FailureConfig {
 struct MockS3ListConfig {
 	//! Return a truncated first page before the final object page
 	bool paginate = false;
+	//! Serve a generated tree of "<tree_prefix>d<NN>/f<NNN>.bin" keys instead of the single configured object
+	string tree_prefix;
+	idx_t tree_directories = 0;
+	idx_t tree_files_per_directory = 0;
+	//! Keys (objects plus common prefixes) per generated tree page
+	idx_t tree_page_size = 1000;
 };
 
 struct MockS3BulkDeleteConfig {
@@ -248,6 +261,8 @@ struct MockS3RequestObservation {
 	bool sse_customer_key_matches = false;
 	//! Client's ephemeral source port; a new connection shows a new port
 	int remote_port = 0;
+	//! ListObjectsV2 requests in flight when this request arrived, including itself
+	idx_t in_flight_lists = 0;
 };
 
 class MockS3Server {
