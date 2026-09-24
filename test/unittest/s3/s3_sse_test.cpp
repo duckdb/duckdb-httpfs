@@ -27,6 +27,9 @@ static constexpr const char *SSE_C_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYm
 static constexpr const char *SSE_C_KEY_MD5 = "hRasmdxgYDKV3nvbahU1MA==";
 static constexpr const char *REFRESHED_SSE_C_KEY = "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=";
 static constexpr const char *REFRESHED_SSE_C_KEY_MD5 = "dT1y7SEiqn6YCJ3QeqwoIw==";
+static constexpr const char *URL_SSE_C_KEY = "NGC+MSAeaf7aoO7ouZl/XHwpmf2v5ZMlPNZUr0361xQ=";
+static constexpr const char *URL_SSE_C_KEY_MD5 = "stVppzwFuOlcRX0E+I8krg==";
+static constexpr const char *URL_SSE_C_KEY_ENCODED = "NGC%2BMSAeaf7aoO7ouZl%2FXHwpmf2v5ZMlPNZUr0361xQ%3D";
 static constexpr const char *SSE_C_ALGORITHM_HEADER = "x-amz-server-side-encryption-customer-algorithm";
 static constexpr const char *SSE_C_KEY_HEADER = "x-amz-server-side-encryption-customer-key";
 static constexpr const char *SSE_C_KEY_MD5_HEADER = "x-amz-server-side-encryption-customer-key-md5";
@@ -427,6 +430,81 @@ CREATE SECRET refresh_sse (
 	S3TestHelper::AssertSingleRefresh(test_id);
 }
 
+static void RunSSECustomerUrlParameter(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.use_ssl = true;
+	config.auth.stale_key_id = "NEVER_STALE";
+	config.sse_customer.accepted_keys = {SSE_C_KEY, URL_SSE_C_KEY};
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+	ConfigureClient(con, client_implementation);
+	auto endpoint = "https://" + server.Endpoint();
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE OR REPLACE SECRET plain (
+	TYPE S3, SCOPE 's3://refresh-bucket/', KEY_ID 'SSE_TEST_KEY', SECRET 'SSE_TEST_SECRET', REGION 'us-east-1',
+	ENDPOINT '%s', USE_SSL false, VERIFY_SSL false, URL_STYLE 'path'
+))",
+	                                                     endpoint));
+	S3TestHelper::RequireQueryOk(con, "CALL enable_logging('HTTP')");
+	const string url_key_path = string(S3TestHelper::S3_PATH) + "?s3_sse_c_key=" + URL_SSE_C_KEY_ENCODED;
+
+	// A key passed only through the URL is sent and signed on every object request
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	REQUIRE(ReadOneByte(con, url_key_path, false) == server.ObjectData().substr(0, 1));
+	REQUIRE(ReadOneByte(con, url_key_path, true) == server.ObjectData().substr(0, 1));
+	WriteObject(con, url_key_path, 32);
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+	auto observations = server.Observations();
+	auto description = MockS3DescribeObservations(observations);
+	INFO(description);
+	REQUIRE(observations.size() >= 3);
+	REQUIRE_FALSE(StringUtil::Contains(description, URL_SSE_C_KEY));
+	bool saw_get = false;
+	bool saw_put = false;
+	for (const auto &observation : observations) {
+		RequireSSECustomerHeaders(observation, URL_SSE_C_KEY_MD5);
+		saw_get |= observation.method == "GET";
+		saw_put |= observation.method == "PUT";
+	}
+	REQUIRE(saw_get);
+	REQUIRE(saw_put);
+	REQUIRE(QueryCount(con, StringUtil::Format("SELECT count(*) FROM duckdb_logs WHERE contains(message, '%s')",
+	                                           URL_SSE_C_KEY)) == 0);
+	const auto url_only_count = observations.size();
+
+	// The URL key overrides the key of the matching secret, and an empty URL key disables it
+	CreateSSESecret(con, "plain", "s3://refresh-bucket/", endpoint);
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	REQUIRE(ReadOneByte(con, url_key_path, false) == server.ObjectData().substr(0, 1));
+	auto override_count = server.Observations().size();
+	REQUIRE(ReadOneByte(con, string(S3TestHelper::S3_PATH) + "?s3_sse_c_key=", false) ==
+	        server.ObjectData().substr(0, 1));
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+	observations = server.Observations();
+	REQUIRE(observations.size() > override_count);
+	for (idx_t i = url_only_count; i < observations.size(); i++) {
+		auto &observation = observations[i];
+		if (i < override_count) {
+			REQUIRE(observation.sse_customer_key_md5 == URL_SSE_C_KEY_MD5);
+			REQUIRE(observation.sse_customer_key_matches);
+		} else {
+			REQUIRE_FALSE(observation.has_sse_customer_key);
+			REQUIRE(observation.sse_customer_algorithm.empty());
+		}
+	}
+
+	// A malformed URL key fails before any request is dispatched
+	auto request_count = server.Observations().size();
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto error = RequireOpenError(con, string(S3TestHelper::S3_PATH) + "?s3_sse_c_key=not-a-key");
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+	REQUIRE(StringUtil::Contains(error, "s3_sse_c_key"));
+	REQUIRE(server.Observations().size() == request_count);
+}
+
 } // namespace
 
 TEST_CASE("S3 SSE-C key validation derives the required digest", "[httpfs][s3][sse-c][secret]") {
@@ -569,6 +647,14 @@ TEST_CASE("S3 SSE-C headers follow the object operation matrix", "[httpfs][s3][s
 	for (const auto client_implementation : {"curl", "httplib"}) {
 		DYNAMIC_SECTION(client_implementation) {
 			RunSSECustomerMatrix(client_implementation);
+		}
+	}
+}
+
+TEST_CASE("S3 SSE-C keys can be passed per URL as a query parameter", "[httpfs][s3][sse-c][url]") {
+	for (const auto client_implementation : {"curl", "httplib"}) {
+		DYNAMIC_SECTION(client_implementation) {
+			RunSSECustomerUrlParameter(client_implementation);
 		}
 	}
 }
