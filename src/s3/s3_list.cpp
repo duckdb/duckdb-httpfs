@@ -1,5 +1,6 @@
 #include "s3/s3_list.hpp"
 
+#include "s3/s3_settings.hpp"
 #include "s3/s3fs.hpp"
 
 #include "duckdb/common/algorithm.hpp"
@@ -57,9 +58,6 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 
 enum GlobType { HIERARCHICAL, LISTING, UNKNOWN };
 
-//! Upper bound on concurrent prefix listings, independent of async_threads: S3 throttles LIST well before GET.
-static constexpr idx_t MAX_LIST_CONCURRENCY = 16;
-
 struct S3GlobResult : public LazyMultiFileList {
 public:
 	S3GlobResult(S3FileSystem &fs_p, const string &path, optional_ptr<FileOpener> opener);
@@ -110,6 +108,7 @@ private:
 	mutable string main_continuation_token;
 	mutable vector<Entry> entries;
 	mutable idx_t prefetched_count = 0;
+	idx_t max_list_concurrency = S3Settings::DEFAULT_LIST_CONCURRENCY;
 	//! Additive-increase/multiplicative-decrease bound on concurrent prefix listings, driven by throttling.
 	mutable idx_t list_window = 0;
 	mutable GlobType glob_type {UNKNOWN};
@@ -141,6 +140,10 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
       opener(opener) {
 	if (!opener) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
+	}
+	Value list_concurrency;
+	if (FileOpener::TryGetCurrentSetting(opener, "s3_list_concurrency", list_concurrency)) {
+		max_list_concurrency = MaxValue<idx_t>(list_concurrency.GetValue<idx_t>(), 1);
 	}
 	FileOpenerInfo info = {glob_pattern};
 
@@ -235,7 +238,7 @@ void S3GlobResult::AppendPage(const S3ListObjectsV2Result &response) const {
 idx_t S3GlobResult::GetConcurrency() const {
 	auto client_context = context;
 	const auto threads = client_context ? TaskScheduler::GetScheduler(*client_context).NumberOfAsyncThreads() + 1 : 1;
-	return MinValue<idx_t>(threads, MAX_LIST_CONCURRENCY);
+	return MinValue<idx_t>(threads, max_list_concurrency);
 }
 
 bool S3GlobResult::IsThrottledError(const std::exception_ptr &error) {

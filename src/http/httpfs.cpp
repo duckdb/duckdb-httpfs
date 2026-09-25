@@ -1175,6 +1175,12 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 		const auto should_full_download = has_cache_state || meets_threshold || always_download;
 
 		if (should_full_download) {
+			// Nothing was read under the ETag of the HEAD, the download is the version this handle reads: servers may
+			// answer HEAD and GET with different ETags (content negotiation, compression suffixes, CDNs)
+			read_config.etag.clear();
+			if (read_config.condition.type == HTTPReadConditionType::ETAG) {
+				read_config.condition = HTTPReadCondition();
+			}
 			length = hfs.FullDownload(*this, GetReadConfig(), should_write_cache)->GetSize();
 		}
 		if (should_write_cache && (cache->OverridesResponseCachePolicy() || CanReuseCachedData())) {

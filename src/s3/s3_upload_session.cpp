@@ -460,7 +460,8 @@ S3RequestResult S3UploadSession::RunUploadRequest(S3RequestOperation operation, 
                                                   const S3RequestQuery &query) {
 	auto result = s3fs.get().PutRequest(*request_session, operation, path, data, size, query);
 	if (result.response->HasRequestError()) {
-		throw IOException("S3 upload request for \"%s\" could not be completed", result.context.display_url);
+		throw IOException("S3 upload request for \"%s\" could not be completed: %s", result.context.display_url,
+		                  result.response->GetRequestError());
 	}
 	return result;
 }
