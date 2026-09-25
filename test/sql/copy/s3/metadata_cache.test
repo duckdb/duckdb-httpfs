@@ -29,6 +29,11 @@ set ignore_error_messages
 statement ok
 set enable_external_file_cache=false;
 
+# Writing a new object issues one more HEAD than overwriting an existing one, so start from an
+# empty prefix to keep the request counts below stable across runs against the same bucket.
+statement ok
+COPY (SELECT 0 AS i, 0 AS value WHERE false) TO 's3://test-bucket-public/root-dir/metadata_cache' (FORMAT PARQUET, PARTITION_BY (i), OVERWRITE);
+
 statement ok
 CREATE TABLE test as SELECT * FROM range(0,10) tbl(i);
 

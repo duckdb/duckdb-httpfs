@@ -9,6 +9,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/extension_helper.hpp"
 
 #include <atomic>
 
@@ -126,6 +127,11 @@ S3ProviderRefreshHook::~S3ProviderRefreshHook() {
 }
 
 void S3TestHelper::LoadExtension(DuckDB &db) {
+	// MAP literals in the secret statements need core_functions since DuckDB v2.0; it is linked into the test
+	// binary, so a load by name resolves to the static extension.
+	if (!db.ExtensionIsLoaded("core_functions")) {
+		ExtensionHelper::LoadExtension(db, "core_functions");
+	}
 	if (db.ExtensionIsLoaded("httpfs")) {
 		return;
 	}

@@ -16,6 +16,12 @@
         "test/sql/connection_caching_disable.test",
         "test/sql/s3/connection_caching_s3.test"
       ]
+    },
+    {
+      "reason": "The httplib client opens a connection per request; this test's thousands of uploads under the parallel runner make MinIO drop connections mid-request (\"Failed to read connection\"). The listing behavior it covers is client-independent and runs under the other configurations.",
+      "paths": [
+        "test/sql/copy/s3/glob_s3_parallel.test_slow"
+      ]
     }
   ]
 }
