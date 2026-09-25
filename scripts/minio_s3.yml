@@ -1,7 +1,11 @@
 services:
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+    # MinIO's own registries (quay.io/minio, docker.io/minio) started requiring
+    # authentication in September 2026; Bitnami's frozen legacy archive still
+    # serves the last community builds.
+    image: docker.io/bitnamilegacy/minio:2025.7.23-debian-12-r5
     hostname: duckdb-minio.com
+    user: root
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -15,10 +19,12 @@ services:
       - MINIO_DOMAIN=duckdb-minio.com
       - MINIO_ACCESS_KEY=duckdb_minio_admin
       - MINIO_SECRET_KEY=duckdb_minio_admin_password
+    entrypoint: ["/opt/bitnami/minio/bin/minio"]
     command: server /data --console-address ":9001"
 
   minio_setup:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z-cpuv1
+    image: docker.io/bitnamilegacy/minio-client:2025.7.21-debian-12-r3
+    user: root
     depends_on:
       - minio
     links:
@@ -29,6 +35,7 @@ services:
 
     entrypoint: >
       /bin/sh -c "
+        ln -sf /opt/bitnami/minio-client/bin/mc /usr/bin/mc
         until (
           /usr/bin/mc alias set myminio http://duckdb-minio.com:9000 duckdb_minio_admin duckdb_minio_admin_password
         ) do
