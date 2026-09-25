@@ -34,6 +34,8 @@ public:
 };
 
 struct S3Settings {
+	static constexpr idx_t DEFAULT_LIST_CONCURRENCY = 256;
+
 	static void Register(DBConfig &config);
 	static void Initialize(DBConfig &config);
 };

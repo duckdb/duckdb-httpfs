@@ -212,6 +212,16 @@ void S3Settings::Register(DBConfig &config) {
 	    "s3_allow_recursive_globbing",
 	    "Whether globs on S3-like storage are optimized with recursive strategy (alternative is listing)",
 	    LogicalType::BOOLEAN, Value(true));
+	config.AddExtensionOption(
+	    "s3_list_concurrency",
+	    "Maximum number of concurrent LIST requests issued while expanding an S3 glob. The window is also bounded "
+	    "by async_threads + 1 and shrinks automatically when the server throttles.",
+	    LogicalType::UBIGINT, Value::UBIGINT(S3Settings::DEFAULT_LIST_CONCURRENCY),
+	    [](ClientContext &, SetScope, Value &parameter) {
+		    if (parameter.IsNull() || parameter.GetValue<uint64_t>() == 0) {
+			    throw InvalidInputException("s3_list_concurrency must be at least 1");
+		    }
+	    });
 	config.AddExtensionOption("s3_uploader_max_filesize", "Maximum size of an S3 upload", LogicalType::VARCHAR, "80GB");
 	config.AddExtensionOption("s3_uploader_max_parts_per_file", "Maximum number of parts in an S3 multipart upload",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10000));
