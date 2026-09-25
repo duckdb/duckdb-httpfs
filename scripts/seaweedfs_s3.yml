@@ -13,10 +13,9 @@ services:
 
   s3_setup:
     image: docker.io/bitnamilegacy/minio-client:2025.7.21-debian-12-r3
+    # root so the mc symlink below can be created and the fixture mounts are readable
+    user: root
     depends_on:
-      - seaweedfs
-    # The link makes the server's hostname resolvable from this container.
-    links:
       - seaweedfs
     volumes:
       - ${PWD}/duckdb/data:/duckdb/data
