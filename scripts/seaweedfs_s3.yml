@@ -1,38 +1,26 @@
 services:
-  minio:
-    # MinIO's own registries (quay.io/minio, docker.io/minio) started requiring
-    # authentication in September 2026; Bitnami's frozen legacy archive still
-    # serves the last community builds.
-    image: docker.io/bitnamilegacy/minio:2025.7.23-debian-12-r5
+  seaweedfs:
+    image: docker.io/chrislusf/seaweedfs:4.47
     hostname: duckdb-minio.com
-    user: root
     ports:
       - "9000:9000"
-      - "9001:9001"
     volumes:
       - /tmp/minio_test_data:/data
-      - /tmp/minio_root_data:/root/.minio
-    environment:
-      - MINIO_ROOT_USER=duckdb_minio_admin
-      - MINIO_ROOT_PASSWORD=duckdb_minio_admin_password
-      - MINIO_REGION_NAME=eu-west-1
-      - MINIO_DOMAIN=duckdb-minio.com
-      - MINIO_ACCESS_KEY=duckdb_minio_admin
-      - MINIO_SECRET_KEY=duckdb_minio_admin_password
-    entrypoint: ["/opt/bitnami/minio/bin/minio"]
-    command: server /data --console-address ":9001"
+      - ./seaweedfs_s3_config.json:/etc/seaweedfs/s3_config.json:ro
+    command: >
+      server -dir=/data -ip=duckdb-minio.com -ip.bind=0.0.0.0 -master.volumeSizeLimitMB=1024
+      -s3 -s3.port=9000 -s3.domainName=duckdb-minio.com -s3.config=/etc/seaweedfs/s3_config.json
 
-  minio_setup:
+  s3_setup:
     image: docker.io/bitnamilegacy/minio-client:2025.7.21-debian-12-r3
-    user: root
     depends_on:
-      - minio
-    links:
-      - minio
+      - seaweedfs
     volumes:
       - ${PWD}/duckdb/data:/duckdb/data
       - ${PWD}/test/test_data:/duckdb/test_data
 
+    # The MinIO client is only used as a generic S3 client here: users and anonymous access come from
+    # seaweedfs_s3_config.json, so there are no admin commands.
     entrypoint: >
       /bin/sh -c "
         ln -sf /opt/bitnami/minio-client/bin/mc /usr/bin/mc
@@ -42,29 +30,12 @@ services:
           echo '...waiting...' && sleep 1;
         done;
 
-        /usr/bin/mc admin user add myminio minio_duckdb_user minio_duckdb_user_password
-        /usr/bin/mc admin user list myminio
-        /usr/bin/mc admin user info myminio minio_duckdb_user
-        /usr/bin/mc admin policy attach myminio readwrite --user minio_duckdb_user
-
-        /usr/bin/mc admin user add myminio minio_duckdb_user_2 minio_duckdb_user_2_password
-        /usr/bin/mc admin user list myminio
-        /usr/bin/mc admin user info myminio minio_duckdb_user_2
-        /usr/bin/mc admin policy attach myminio readwrite --user minio_duckdb_user_2
-
-        /usr/bin/mc rb --force myminio/test-bucket
         /usr/bin/mc mb myminio/test-bucket
         /usr/bin/mc version enable myminio/test-bucket
-        /usr/bin/mc policy get myminio/test-bucket
 
-        /usr/bin/mc rb --force myminio/test-bucket-2
         /usr/bin/mc mb myminio/test-bucket-2
-        /usr/bin/mc policy get myminio/test-bucket-2
 
-        /usr/bin/mc rb --force myminio/test-bucket-public
         /usr/bin/mc mb myminio/test-bucket-public
-        /usr/bin/mc anonymous set public myminio/test-bucket-public
-        /usr/bin/mc policy get myminio/test-bucket-public
 
         # This is for the test of presigned URLs
         # !!! When missing, be sure that you have ran 'scripts/generate_presigned_url.sh' !!!
@@ -76,10 +47,10 @@ services:
         # large file upload
         /usr/bin/mc cp /duckdb/test_data/presigned-url-lineitem.parquet myminio/test-bucket/presigned/lineitem_large.parquet
 
-        # Upload the db for the attach 
+        # Upload the db for the attach
         /usr/bin/mc cp /duckdb/test_data/attach.db myminio/test-bucket/presigned/attach.db
         /usr/bin/mc cp /duckdb/test_data/lineitem_sf1.db myminio/test-bucket/presigned/lineitem_sf1.db
-    
+
         /usr/bin/mc share download myminio/test-bucket/presigned/phonenumbers.csv
         /usr/bin/mc share download myminio/test-bucket/presigned/t1.parquet
         /usr/bin/mc share download myminio/test-bucket/presigned/lineitem_large.parquet

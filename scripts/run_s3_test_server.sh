@@ -9,7 +9,7 @@ else
   "${HTTPFS_SCRIPT_DIR}/cleanup_s3_test_server.sh"
   mkdir -p /tmp/minio_test_data
   mkdir -p /tmp/minio_root_data
-  docker compose -f "${HTTPFS_SCRIPT_DIR}/minio_s3.yml" -p duckdb-minio up -d
+  docker compose -f "${HTTPFS_SCRIPT_DIR}/seaweedfs_s3.yml" -p duckdb-minio up -d
 
   # for testing presigned url
   container_name=$(docker ps -a --format '{{.Names}}' | grep -m 1 "duckdb-minio")
