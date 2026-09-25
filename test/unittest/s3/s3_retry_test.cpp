@@ -1250,10 +1250,12 @@ static MockS3ServerConfig MakeTreeListConfig() {
 }
 
 static void ConfigureParallelGlobTest(DuckDB &db, Connection &con, MockS3Server &server,
-                                      const string &client_implementation, idx_t retry_wait_ms) {
+                                      const string &client_implementation, idx_t retry_wait_ms,
+                                      idx_t list_concurrency = 16, idx_t async_threads = 16) {
 	ConfigureListRetryTest(db, con, server, client_implementation, 2);
 	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=" + to_string(retry_wait_ms));
-	S3TestHelper::RequireQueryOk(con, "SET async_threads=16");
+	S3TestHelper::RequireQueryOk(con, "SET async_threads=" + to_string(async_threads));
+	S3TestHelper::RequireQueryOk(con, "SET s3_list_concurrency=" + to_string(list_concurrency));
 	S3TestHelper::RequireQueryOk(con, "CALL enable_logging()");
 }
 
@@ -1294,14 +1296,15 @@ static idx_t CountShrinkWarnings(Connection &con) {
 	return GetShrinkWarnings(con).size();
 }
 
-static void RunParallelGlobBaselineTest(const string &client_implementation) {
+static void RunParallelGlobConcurrencyTest(const string &client_implementation, idx_t list_concurrency = 16,
+                                           idx_t async_threads = 16) {
 	auto config = MakeTreeListConfig();
 	config.failures.list_delay_ms = 10;
 	MockS3Server server(std::move(config));
 
 	DuckDB db(nullptr);
 	Connection con(db);
-	ConfigureParallelGlobTest(db, con, server, client_implementation, 1);
+	ConfigureParallelGlobTest(db, con, server, client_implementation, 1, list_concurrency, async_threads);
 
 	auto result = con.Query("SELECT count(*) FROM glob('s3://refresh-bucket/tree/*/*.bin')");
 	REQUIRE(result);
@@ -1315,8 +1318,14 @@ static void RunParallelGlobBaselineTest(const string &client_implementation) {
 	// One flat page, one hierarchical top-level page, then one page per directory.
 	REQUIRE(lists.size() == 2 + TREE_DIRECTORIES);
 	REQUIRE(CountListObservations(observations, 503) == 0);
-	REQUIRE(MaxInFlightLists(lists, 0) > 1);
-	REQUIRE(MaxInFlightLists(lists, 0) <= 16);
+	auto concurrency = MinValue<idx_t>(list_concurrency, async_threads + 1);
+	auto max_in_flight = MaxInFlightLists(lists, 0);
+	if (concurrency == 1) {
+		REQUIRE(max_in_flight == 1);
+	} else {
+		REQUIRE(max_in_flight > 1);
+		REQUIRE(max_in_flight <= concurrency);
+	}
 	REQUIRE(CountShrinkWarnings(con) == 0);
 }
 
@@ -1402,7 +1411,46 @@ static void RunParallelGlobExhaustedThrottlingTest(const string &client_implemen
 TEST_CASE("S3 parallel glob lists prefixes concurrently", "[httpfs][s3][retry]") {
 	for (const auto &client : {"httplib", "curl"}) {
 		DYNAMIC_SECTION(client) {
-			RunParallelGlobBaselineTest(client);
+			RunParallelGlobConcurrencyTest(client);
+		}
+	}
+}
+
+TEST_CASE("S3 glob validates and resets s3_list_concurrency", "[httpfs][s3][retry]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::LoadExtension(db);
+
+	for (const auto &value : {"0", "NULL"}) {
+		CAPTURE(value);
+		auto invalid = con.Query(string("SET s3_list_concurrency=") + value);
+		REQUIRE(invalid->HasError());
+		REQUIRE(StringUtil::Contains(invalid->GetError(), "s3_list_concurrency must be at least 1"));
+	}
+	REQUIRE(con.Query("SET s3_list_concurrency=-1")->HasError());
+	S3TestHelper::RequireQueryOk(con, "SET s3_list_concurrency=1");
+	S3TestHelper::RequireQueryOk(con, "RESET s3_list_concurrency");
+	auto result = con.Query("SELECT value::UBIGINT FROM duckdb_settings() WHERE name = 's3_list_concurrency'");
+	INFO((result->HasError() ? result->GetError() : string()));
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == 256);
+}
+
+TEST_CASE("S3 parallel glob respects s3_list_concurrency", "[httpfs][s3][retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client) {
+			SECTION("serial listing") {
+				RunParallelGlobConcurrencyTest(client, 1);
+			}
+			SECTION("setting limits parallel listing") {
+				RunParallelGlobConcurrencyTest(client, 4);
+			}
+			SECTION("scheduler limits parallel listing") {
+				RunParallelGlobConcurrencyTest(client, 16, 1);
+			}
+			SECTION("no async threads") {
+				RunParallelGlobConcurrencyTest(client, 16, 0);
+			}
 		}
 	}
 }
