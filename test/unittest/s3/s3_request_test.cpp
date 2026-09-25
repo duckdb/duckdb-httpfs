@@ -1515,6 +1515,85 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		REQUIRE(auth_params.GetCredentials().secret_access_key.empty());
 	}
 
+	SECTION("s3_sse_c_key applies a customer-provided encryption key") {
+		auto config = TestAuthConfig();
+		config.endpoint = "s3.amazonaws.com";
+		config.credentials.access_key_id = "key";
+		config.credentials.secret_access_key = "secret";
+		auto auth_params = ResolveTestAuth(
+		    std::move(config), "s3://bucket/key?s3_sse_c_key=NGC%2BMSAeaf7aoO7ouZl%2FXHwpmf2v5ZMlPNZUr0361xQ%3D");
+		auto &sse_customer_key = auth_params.GetRequestOptions().sse_customer_key;
+		REQUIRE(sse_customer_key);
+		REQUIRE(sse_customer_key->GetKey() == "NGC+MSAeaf7aoO7ouZl/XHwpmf2v5ZMlPNZUr0361xQ=");
+		REQUIRE(sse_customer_key->GetKeyMD5() == "stVppzwFuOlcRX0E+I8krg==");
+	}
+
+	SECTION("an unencoded '+' in s3_sse_c_key is restored after URL decoding") {
+		auto config = TestAuthConfig();
+		config.endpoint = "s3.amazonaws.com";
+		config.credentials.access_key_id = "key";
+		config.credentials.secret_access_key = "secret";
+		auto auth_params = ResolveTestAuth(std::move(config),
+		                                   "s3://bucket/key?s3_sse_c_key=NGC+MSAeaf7aoO7ouZl/XHwpmf2v5ZMlPNZUr0361xQ=");
+		REQUIRE(auth_params.GetRequestOptions().sse_customer_key);
+		REQUIRE(auth_params.GetRequestOptions().sse_customer_key->GetKeyMD5() == "stVppzwFuOlcRX0E+I8krg==");
+	}
+
+	SECTION("an empty s3_sse_c_key clears a key configured through a secret") {
+		auto config = TestAuthConfig();
+		config.endpoint = "s3.amazonaws.com";
+		config.request_options.sse_customer_key =
+		    S3SSECustomerKey::Create("NGC+MSAeaf7aoO7ouZl/XHwpmf2v5ZMlPNZUr0361xQ=");
+		auto auth_params = ResolveTestAuth(std::move(config), "s3://bucket/key?s3_sse_c_key=");
+		REQUIRE_FALSE(auth_params.GetRequestOptions().sse_customer_key);
+	}
+
+	SECTION("an invalid s3_sse_c_key is rejected without echoing the value") {
+		auto config = TestAuthConfig();
+		config.endpoint = "s3.amazonaws.com";
+		config.credentials.access_key_id = "key";
+		config.credentials.secret_access_key = "secret";
+		string error;
+		try {
+			ResolveTestAuth(std::move(config), "s3://bucket/key?s3_sse_c_key=SSE_SENTINEL_NOT_A_KEY");
+		} catch (std::exception &ex) {
+			error = ex.what();
+		}
+		REQUIRE(StringUtil::Contains(error, "s3_sse_c_key"));
+		REQUIRE(StringUtil::Contains(error, "%2B"));
+		REQUIRE_FALSE(StringUtil::Contains(error, "SSE_SENTINEL_NOT_A_KEY"));
+	}
+
+	SECTION("s3_sse_c_key follows the secret validation rules") {
+		auto gcs = TestAuthConfig(S3ProviderType::GCS);
+		gcs.credentials.access_key_id = "key";
+		gcs.credentials.secret_access_key = "secret";
+		REQUIRE_THROWS_WITH(
+		    ResolveTestAuth(std::move(gcs),
+		                    "gcs://bucket/key?s3_sse_c_key=NGC%2BMSAeaf7aoO7ouZl%2FXHwpmf2v5ZMlPNZUr0361xQ%3D"),
+		    Catch::Contains("only supported for S3-compatible endpoints"));
+		auto plain_http = TestAuthConfig();
+		plain_http.endpoint = "s3.amazonaws.com";
+		plain_http.use_ssl = false;
+		plain_http.credentials.access_key_id = "key";
+		plain_http.credentials.secret_access_key = "secret";
+		REQUIRE_THROWS_WITH(
+		    ResolveTestAuth(std::move(plain_http),
+		                    "s3://bucket/key?s3_sse_c_key=NGC%2BMSAeaf7aoO7ouZl%2FXHwpmf2v5ZMlPNZUr0361xQ%3D"),
+		    Catch::Contains("requires an HTTPS endpoint"));
+		auto anonymous = TestAuthConfig();
+		anonymous.endpoint = "s3.amazonaws.com";
+		REQUIRE_THROWS_WITH(
+		    ResolveTestAuth(std::move(anonymous),
+		                    "s3://bucket/key?s3_sse_c_key=NGC%2BMSAeaf7aoO7ouZl%2FXHwpmf2v5ZMlPNZUr0361xQ%3D"),
+		    Catch::Contains("requires both KEY_ID and SECRET"));
+	}
+
+	SECTION("unsupported parameters list s3_sse_c_key") {
+		REQUIRE_THROWS_WITH(ResolveTestAuth(TestAuthConfig(), "s3://bucket/key?s3_bogus=1"),
+		                    Catch::Contains("'s3_sse_c_key'"));
+	}
+
 	SECTION("duplicate decoded keys are rejected") {
 		REQUIRE_THROWS(ResolveTestAuth(TestAuthConfig(), "s3://bucket/key?s3_region=one&s3%5Fregion=two"));
 	}

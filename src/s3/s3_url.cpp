@@ -91,6 +91,23 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthConfig &config)
 		}
 		query_params.erase(found_requester_pays_param);
 	}
+	string sse_c_key;
+	if (GetQueryParam("s3_sse_c_key", sse_c_key, query_params)) {
+		if (sse_c_key.empty()) {
+			// An empty override clears any key configured through a secret.
+			request_options.sse_customer_key.reset();
+		} else {
+			// Base64 keys contain '+', which URL decoding turns into a space unless it was percent-encoded.
+			// A valid key never contains a space, so restore the '+' before validating.
+			sse_c_key = StringUtil::Replace(sse_c_key, " ", "+");
+			try {
+				request_options.sse_customer_key = S3SSECustomerKey::Create(sse_c_key);
+			} catch (InvalidInputException &) {
+				throw IOException("Incorrect setting found for s3_sse_c_key, expected a base64-encoded 256-bit key "
+				                  "(percent-encode '+' as %2B, '/' as %2F and '=' as %3D)");
+			}
+		}
+	}
 	if (config.route.type == S3ProviderType::GCS) {
 		GetQueryParam("gcs_user_project", request_options.user_project, query_params);
 	}
@@ -99,7 +116,7 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthConfig &config)
 	if (!query_params.empty()) {
 		auto supported_parameters =
 		    string("'s3_region', 's3_access_key_id', 's3_secret_access_key', 's3_session_token',\n's3_endpoint', "
-		           "'s3_url_style', 's3_use_ssl', 's3_requester_pays'");
+		           "'s3_url_style', 's3_use_ssl', 's3_requester_pays', 's3_sse_c_key'");
 		supported_parameters +=
 		    ", '" + string(S3Provider::GetVersionParameterName(HTTPObjectVersionType::S3_VERSION_ID)) + "'";
 		if (config.route.type == S3ProviderType::GCS) {
