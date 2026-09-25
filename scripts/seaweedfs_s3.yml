@@ -15,6 +15,9 @@ services:
     image: docker.io/bitnamilegacy/minio-client:2025.7.21-debian-12-r3
     depends_on:
       - seaweedfs
+    # The link makes the server's hostname resolvable from this container.
+    links:
+      - seaweedfs
     volumes:
       - ${PWD}/duckdb/data:/duckdb/data
       - ${PWD}/test/test_data:/duckdb/test_data
