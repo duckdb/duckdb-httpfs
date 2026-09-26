@@ -84,6 +84,11 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRequest(HTTPFileHandle &hfh, cons
 		        read_config.condition.type != HTTPReadConditionType::NONE) {
 			    return false;
 		    }
+		    if (response.status == HTTPStatusCode::NotFound_404 && !hfh.initialized &&
+		        hfh.flags.ReturnNullIfNotExists()) {
+			    // Let FullDownload report the missing file while opening
+			    return false;
+		    }
 		    if (static_cast<int>(response.status) >= 400) {
 			    throw get_error(response);
 		    }

@@ -329,16 +329,6 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
                                                         optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
-	if (flags.ReturnNullIfNotExists()) {
-		try {
-			auto handle = CreateHandle(file, flags, opener);
-			handle->Initialize(file, opener);
-			return std::move(handle);
-		} catch (...) {
-			return nullptr;
-		}
-	}
-
 	auto handle = CreateHandle(file, flags, opener);
 
 	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
@@ -346,6 +336,9 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 	}
 
 	handle->Initialize(file, opener);
+	if (handle->file_not_found) {
+		return nullptr;
+	}
 
 	DUCKDB_LOG_FILE_SYSTEM_OPEN((*handle));
 
@@ -694,6 +687,11 @@ unique_ptr<CachedFileHandle> HTTPFileSystem::FullDownload(HTTPFileHandle &hfh, c
 		if (full_download_result->HasRequestError()) {
 			ErrorData(full_download_result->GetRequestError()).Throw();
 		}
+		if (!hfh.initialized && hfh.flags.ReturnNullIfNotExists() &&
+		    full_download_result->status == HTTPStatusCode::NotFound_404) {
+			hfh.file_not_found = true;
+			return nullptr;
+		}
 		if (full_download_result->status != HTTPStatusCode::OK_200) {
 			throw GetHTTPError(hfh, *full_download_result, RequestType::GET_REQUEST, hfh.path);
 		}
@@ -993,6 +991,10 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RequestFileInfo(HTTPFileSystem &hfs, ti
 	if (response->status == HTTPStatusCode::OK_200) {
 		return response;
 	}
+	if (flags.ReturnNullIfNotExists() && response->status == HTTPStatusCode::NotFound_404) {
+		file_not_found = true;
+		return nullptr;
+	}
 	if (flags.OpenForWriting() && response->status == HTTPStatusCode::NotFound_404) {
 		if (!flags.CreateFileIfNotExists() && !flags.OverwriteExistingFile()) {
 			throw IOException("Unable to open URL \"%s\" for writing: file does not exist and CREATE flag is not set",
@@ -1021,6 +1023,10 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &
 	if (RespondedWithRangeRequestNotSupported(*response) && config.auto_fallback_to_full_download) {
 		force_full_download = true;
 		return response;
+	}
+	if (flags.ReturnNullIfNotExists() && response->status == HTTPStatusCode::NotFound_404) {
+		file_not_found = true;
+		return nullptr;
 	}
 	throw hfs.GetHTTPError(*this, *response, RequestType::GET_REQUEST, path);
 }
@@ -1146,7 +1152,10 @@ bool HTTPFileHandle::TryInitializeRead(HTTPFileSystem &hfs, optional_ptr<HTTPMet
 	auto request_snapshot = request_session->Capture().snapshot;
 	if (request_snapshot->Params().force_download) {
 		FinalizeReadConfig();
-		length = hfs.FullDownload(*this, GetReadConfig(), should_write_cache)->GetSize();
+		auto cached_file = hfs.FullDownload(*this, GetReadConfig(), should_write_cache);
+		if (cached_file) {
+			length = cached_file->GetSize();
+		}
 		return true;
 	}
 
@@ -1165,6 +1174,9 @@ bool HTTPFileHandle::TryInitializeRead(HTTPFileSystem &hfs, optional_ptr<HTTPMet
 void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMetadataCache> cache,
                                         bool should_write_cache) {
 	LoadFileInfo();
+	if (file_not_found) {
+		return;
+	}
 	FinalizeReadConfig();
 
 	if (flags.OpenForReading()) {
