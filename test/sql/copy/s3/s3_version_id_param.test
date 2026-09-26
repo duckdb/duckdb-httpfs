@@ -22,6 +22,10 @@ require-env DUCKDB_S3_USE_SSL
 set ignore_error_messages
 
 # Different versions must remain separate in both caches.
+# Header names arrive in whatever case the server sends them (MinIO: x-amz-version-id, SeaweedFS: X-Amz-Version-Id).
+statement ok
+CREATE MACRO http_header(h, name) AS (SELECT any_value(e.value) FROM unnest(map_entries(h)) AS t(e) WHERE lower(e.key) = lower(name));
+
 statement ok
 SET enable_external_file_cache=true;
 
@@ -46,7 +50,7 @@ statement ok
 COPY T1 TO 's3://test-bucket/root-dir/version_id_param/test.parquet';
 
 statement ok
-SET VARIABLE v1 = (SELECT response.headers['x-amz-version-id'] FROM duckdb_logs_parsed('HTTP') WHERE request.type='PUT' AND request.url LIKE '%version_id_param%' LIMIT 1);
+SET VARIABLE v1 = (SELECT http_header(response.headers, 'x-amz-version-id') FROM duckdb_logs_parsed('HTTP') WHERE request.type='PUT' AND request.url LIKE '%version_id_param%' LIMIT 1);
 
 statement ok
 CALL truncate_duckdb_logs();
@@ -56,7 +60,7 @@ statement ok
 COPY T2 TO 's3://test-bucket/root-dir/version_id_param/test.parquet';
 
 statement ok
-SET VARIABLE v2 = (SELECT response.headers['x-amz-version-id'] FROM duckdb_logs_parsed('HTTP') WHERE request.type='PUT' AND request.url LIKE '%version_id_param%' LIMIT 1);
+SET VARIABLE v2 = (SELECT http_header(response.headers, 'x-amz-version-id') FROM duckdb_logs_parsed('HTTP') WHERE request.type='PUT' AND request.url LIKE '%version_id_param%' LIMIT 1);
 
 # A plain read returns the latest version
 query I

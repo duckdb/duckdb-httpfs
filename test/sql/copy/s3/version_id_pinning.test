@@ -22,6 +22,10 @@ require-env DUCKDB_S3_USE_SSL
 set ignore_error_messages
 
 # disable external file cache to avoid interference from locally cached file content
+# Header names arrive in whatever case the server sends them (MinIO: x-amz-version-id, SeaweedFS: X-Amz-Version-Id).
+statement ok
+CREATE MACRO http_header(h, name) AS (SELECT any_value(e.value) FROM unnest(map_entries(h)) AS t(e) WHERE lower(e.key) = lower(name));
+
 statement ok
 SET enable_external_file_cache=false;
 
@@ -55,7 +59,7 @@ SELECT COUNT(*) FROM 's3://test-bucket/root-dir/version_pinning/test.parquet';
 100
 
 query I
-SELECT request.type FROM duckdb_logs_parsed('HTTP') WHERE response.headers['x-amz-version-id'] IS NOT NULL
+SELECT request.type FROM duckdb_logs_parsed('HTTP') WHERE http_header(response.headers, 'x-amz-version-id') IS NOT NULL
 ----
 HEAD
 GET
@@ -116,7 +120,7 @@ SELECT * FROM 's3://test-bucket/root-dir/version_pinning/test.parquet' LIMIT 5;
 16
 
 query I
-SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE response.headers['x-amz-version-id'] IS NOT NULL);
+SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE http_header(response.headers, 'x-amz-version-id') IS NOT NULL);
 ----
 HEAD
 GET
