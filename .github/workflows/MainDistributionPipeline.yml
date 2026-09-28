@@ -20,21 +20,21 @@ jobs:
     steps:
       - name: Detect runners
         id: runners
-        uses: duckdb/duckdb-ci/detect-runners@main
+        uses: duckdb/duckdb-ci/detect-runners@v1.5.6
 
   duckdb-submodule-version:
-    uses: duckdb/extension-ci-tools/.github/workflows/_submodule_version.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_submodule_version.yml@v1.5.6
 
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.6
     needs:
       - prepare
       - duckdb-submodule-version
     with:
       extension_name: httpfs
-      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
-      ci_tools_version: main
+      duckdb_version: v1.5.6 needs.duckdb-submodule-version.outputs.version }}
+      ci_tools_version: v1.5.6
       runners: ${{ needs.prepare.outputs.runners }}
 
   duckdb-stable-deploy:
@@ -43,12 +43,12 @@ jobs:
       - prepare
       - duckdb-stable-build
       - duckdb-submodule-version
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.5.6
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
-      ci_tools_version: main
+      duckdb_version: v1.5.6 needs.duckdb-submodule-version.outputs.version }}
+      ci_tools_version: v1.5.6
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
 
@@ -56,11 +56,11 @@ jobs:
     name: Code Quality
     needs:
       - duckdb-submodule-version
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5.6
     with:
       extension_name: httpfs
-      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
-      ci_tools_version: main
+      duckdb_version: v1.5.6 needs.duckdb-submodule-version.outputs.version }}
+      ci_tools_version: v1.5.6
       extra_toolchains: 'python3'
       format_checks: 'format'
 
@@ -74,7 +74,7 @@ jobs:
       TIDY_THREADS: 4
       TIDY_CHECKS: readability-convert-member-functions-to-static
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v1.5.6
         with:
           fetch-depth: 0
           submodules: 'recursive'
@@ -100,7 +100,7 @@ jobs:
       ASAN_OPTIONS: "detect_leaks=1:halt_on_error=1:abort_on_error=0"
       UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v1.5.6
         with:
           fetch-depth: 0
           submodules: 'true'
@@ -117,12 +117,12 @@ jobs:
             sudo ln -sf "${asan_static_target}" "${asan_static_dir}/libclang_rt.asan_static.a"
           fi
       - name: Setup Ccache
-        uses: hendrikmuhs/ccache-action@main
+        uses: hendrikmuhs/ccache-action@v1.5.6
         with:
           max-size: 5GB
           evict-old-files: job
       - name: Build (relassert → ASan + UBSan + LSan)
-        uses: duckdb/duckdb-ci/build-duckdb@main
+        uses: duckdb/duckdb-ci/build-duckdb@v1.5.6
         with:
           build-type: relassert
           build: python3 duckdb/scripts/ci/retry.py -- make relassert
