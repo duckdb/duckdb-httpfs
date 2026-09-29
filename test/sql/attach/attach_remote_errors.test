@@ -15,7 +15,7 @@ database does not exist
 statement error
 ATTACH 'https://no-such-host.invalid/x.duckdb' AS db (READ_ONLY)
 ----
-Could not resolve hostname
+error for HTTP
 
 # the WAL of an existing remote database is missing (404), which must still read as "no WAL"
 statement ok
@@ -41,7 +41,7 @@ database does not exist
 statement error
 ATTACH 'https://no-such-host.invalid/x.duckdb' AS db (READ_ONLY)
 ----
-Could not resolve hostname
+error for HTTP
 
 statement ok
 ATTACH 'https://blobs.duckdb.org/databases/stations.duckdb' AS stations (READ_ONLY)
