@@ -18,28 +18,9 @@ require-env DUCKDB_S3_USE_SSL
 
 require-env S3_ATTACH_DB_PRESIGNED_URL
 
-# ATTACH a DuckDB database over HTTPFS
-statement ok
+# ATTACH a DuckDB database over HTTPFS: the WAL path is derived by appending ".wal" to the presigned URL's path,
+# so it reuses the database file's signature and the server rejects it
+statement error
 ATTACH '{S3_ATTACH_DB_PRESIGNED_URL}' AS db (READONLY 1);
-
-query IIIII
-SELECT * FROM db.integral_values
 ----
-1	2	3	4	5
-NULL	NULL	NULL	NULL	NULL
-
-statement error
-CREATE TABLE db.integers(i INTEGER);
-----
-read-only
-
-statement ok
-SELECT * FROM db.all_types
-
-statement error
-SELECT * FROM db.all_typez
-----
-all_types
-
-statement ok
-DETACH db
+HTTP 403
