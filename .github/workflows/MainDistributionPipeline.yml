@@ -33,7 +33,6 @@ jobs:
       - duckdb-submodule-version
     with:
       extension_name: httpfs
-      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
       ci_tools_version: main
       runners: ${{ needs.prepare.outputs.runners }}
 
@@ -47,7 +46,6 @@ jobs:
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
       ci_tools_version: main
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
