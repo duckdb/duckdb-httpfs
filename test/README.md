@@ -1,5 +1,5 @@
 
-In order to test these locally, `minio` is used. This requires Docker to be installed.
+In order to test these locally, [SeaweedFS](https://github.com/seaweedfs/seaweedfs) serves the S3 API. This requires Docker to be installed.
 
 ### Installing Docker on MacOS
 
@@ -44,14 +44,14 @@ Now set up the following environment variables using the `set_s3_test_server_var
 source scripts/set_s3_test_server_variables.sh
 ```
 
-Now you should be able to run the S3 tests using minio, e.g.:
+Now you should be able to run the S3 tests against SeaweedFS, e.g.:
 
 ```bash
 build/debug/test/unittest test/sql/copy/s3/s3_hive_partition.test
 ```
 
-> minio uses port 9000. Clickhouse also uses port 9000. If the tests are not working and you have a running Clickhouse service - try killing it first, e.g. using `killall -9 clickhouse`
+> The S3 gateway uses port 9000. Clickhouse also uses port 9000. If the tests are not working and you have a running Clickhouse service - try killing it first, e.g. using `killall -9 clickhouse`
 
 #### Test Data
 
-The configuration for minio is stored in `scripts/minio_s3.yml`. Data is stored in `/tmp/minio_test_data`.
+The configuration for SeaweedFS is stored in `scripts/seaweedfs_s3.yml`; users and anonymous access are defined in `scripts/seaweedfs_s3_config.json`. Data is stored in `/tmp/minio_test_data`. The hostnames, credentials and paths keep their `minio` names so the tests and CI environment stay unchanged.

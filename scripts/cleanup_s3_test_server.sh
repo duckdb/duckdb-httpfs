@@ -4,7 +4,7 @@ set -e
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-docker compose -f "${SCRIPT_DIR}/minio_s3.yml" -p duckdb-minio down --volumes --remove-orphans
+docker compose -f "${SCRIPT_DIR}/seaweedfs_s3.yml" -p duckdb-minio down --volumes --remove-orphans
 
 # MinIO runs as root and can leave root-owned files in the bind-mounted data
 # directories. GitHub-hosted runners provide passwordless sudo, so avoid a
