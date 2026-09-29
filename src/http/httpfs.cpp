@@ -1024,6 +1024,17 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &
 		force_full_download = true;
 		return response;
 	}
+	if (response->HasRequestError()) {
+		// The range handler turns error statuses into exceptions, which the request reports as a request error with
+		// no status - recover the original error (and its status) instead of reporting HTTP 0
+		ErrorData error(response->GetRequestError());
+		auto status_entry = error.ExtraInfo().find("status_code");
+		if (flags.ReturnNullIfNotExists() && status_entry != error.ExtraInfo().end() && status_entry->second == "404") {
+			file_not_found = true;
+			return nullptr;
+		}
+		error.Throw();
+	}
 	if (flags.ReturnNullIfNotExists() && response->status == HTTPStatusCode::NotFound_404) {
 		file_not_found = true;
 		return nullptr;
