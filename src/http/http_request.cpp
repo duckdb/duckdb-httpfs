@@ -35,6 +35,39 @@ static HTTPHeaders PrepareFullGetHeaders(const HTTPHeaders &headers, const HTTPR
 	return result;
 }
 
+//! Parses the byte span `<first>-<last>` of a `Content-Range: bytes <first>-<last>/<total>` response header
+//! (RFC 7233 §4.2) and returns its length. Returns an unset index when the header is absent or malformed.
+static optional_idx TryParseContentRangeSpan(const HTTPHeaders &headers) {
+	if (!headers.HasHeader("Content-Range")) {
+		return {};
+	}
+	const auto content_range = headers.GetHeaderValue("Content-Range");
+	const auto unit_separator = content_range.find(' ');
+	if (unit_separator == string::npos || unit_separator + 1 >= content_range.size()) {
+		return {};
+	}
+	const auto range_value = content_range.substr(unit_separator + 1);
+	const auto slash = range_value.find('/');
+	if (slash == string::npos) {
+		return {};
+	}
+	const auto byte_range = range_value.substr(0, slash);
+	const auto dash = byte_range.find('-');
+	if (dash == string::npos || dash == 0 || dash + 1 >= byte_range.size()) {
+		return {};
+	}
+	try {
+		const auto first = std::stoull(byte_range.substr(0, dash));
+		const auto last = std::stoull(byte_range.substr(dash + 1));
+		if (last < first) {
+			return {};
+		}
+		return NumericCast<idx_t>(last - first + 1);
+	} catch (const std::exception &) {
+		return {};
+	}
+}
+
 unique_ptr<HTTPResponse> HTTPFileSystem::RunHeadRequest(const string &url, const HTTPHeaders &header_map,
                                                         HTTPFSParams &http_params,
                                                         const HTTPSendCallback &send_request) {
@@ -155,7 +188,7 @@ public:
 
 		out_offset = 0;
 		validate_response(response);
-		if (!ValidateContentLength(response)) {
+		if (!ValidateRangeResponse(response)) {
 			return false;
 		}
 		if (response.status == HTTPStatusCode::PartialContent_206) {
@@ -192,22 +225,32 @@ public:
 	}
 
 private:
-	bool ValidateContentLength(const HTTPResponse &response) {
-		if (!response.HasHeader("Content-Length")) {
-			return true;
-		}
-		try {
-			auto content_length = NumericCast<idx_t>(stoull(response.GetHeaderValue("Content-Length")));
-			if (content_length == buffer_out_len) {
-				return true;
+	bool ValidateRangeResponse(const HTTPResponse &response) {
+		// Content-Length, when present, must equal the requested range length.
+		if (response.HasHeader("Content-Length")) {
+			try {
+				auto content_length = NumericCast<idx_t>(stoull(response.GetHeaderValue("Content-Length")));
+				if (content_length != buffer_out_len) {
+					range_request_not_supported = true;
+					range_request.MarkNotSupported();
+					return false;
+				}
+			} catch (const std::exception &) {
+				// A malformed Content-Length cannot be used to validate range support.
 			}
-			range_request_not_supported = true;
-			range_request.MarkNotSupported();
-			return false;
-		} catch (const std::exception &) {
-			// A malformed Content-Length cannot be used to validate range support.
-			return true;
 		}
+		// A 206 response must carry a Content-Range header whose span matches the request
+		// (RFC 7233 §4.1). A server that omits it or reports a different span did not honor
+		// the Range header; fall back to a full download instead of overflowing the buffer.
+		if (response.status == HTTPStatusCode::PartialContent_206) {
+			auto range_span = TryParseContentRangeSpan(response.headers);
+			if (!range_span.IsValid() || range_span.GetIndex() != buffer_out_len) {
+				range_request_not_supported = true;
+				range_request.MarkNotSupported();
+				return false;
+			}
+		}
+		return true;
 	}
 
 	void ValidateReadLength(const unique_ptr<HTTPResponse> &response) const {
