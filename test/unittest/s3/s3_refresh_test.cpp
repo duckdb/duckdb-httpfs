@@ -258,7 +258,7 @@ static void RunListGlobRefreshScenario(const string &client_implementation, bool
 		                       INFO((result->HasError() ? result->GetError() : string()));
 		                       REQUIRE_FALSE(result->HasError());
 		                       REQUIRE(result->RowCount() == 1);
-		                       REQUIRE(result->GetValue(0, 0).ToString() == S3TestHelper::S3_PATH);
+		                       REQUIRE(result->Collection().GetValue(0, 0).ToString() == S3TestHelper::S3_PATH);
 	                       });
 	REQUIRE(MockS3HasObservation(observations, "GET", S3TestHelper::STALE_KEY_ID, 403, string(), "list-type=2"));
 	REQUIRE(MockS3HasObservation(observations, "GET", S3TestHelper::FRESH_KEY_ID, 200, string(), "list-type=2"));

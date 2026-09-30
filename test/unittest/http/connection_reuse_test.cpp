@@ -66,7 +66,7 @@ static void RunCurlTerminalTransportErrorIsNotReused() {
 	auto hits = con.Query("SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%'");
 	REQUIRE(hits);
 	REQUIRE_FALSE(hits->HasError());
-	REQUIRE(hits->GetValue(0, 0).GetValue<idx_t>() == 0);
+	REQUIRE(hits->Collection().GetValue(0, 0).GetValue<idx_t>() == 0);
 
 	HeadRequestInfo reused_error_request(server.HTTPPath(), HTTPHeaders(), params);
 	auto reused_error_response = session.Request(reused_error_request);
@@ -77,7 +77,7 @@ static void RunCurlTerminalTransportErrorIsNotReused() {
 	hits = con.Query("SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%'");
 	REQUIRE(hits);
 	REQUIRE_FALSE(hits->HasError());
-	REQUIRE(hits->GetValue(0, 0).GetValue<idx_t>() == 1);
+	REQUIRE(hits->Collection().GetValue(0, 0).GetValue<idx_t>() == 1);
 	HTTPTestHelper::RequireQueryOk(con, "COMMIT");
 }
 

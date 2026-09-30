@@ -29,7 +29,7 @@ static string RouteError(Connection &con) {
 static string AliasSetting(Connection &con) {
 	auto result = con.Query("SELECT current_setting('s3_url_scheme_aliases')");
 	REQUIRE_FALSE(result->HasError());
-	return result->GetValue(0, 0).ToString();
+	return result->Collection().GetValue(0, 0).ToString();
 }
 
 } // namespace

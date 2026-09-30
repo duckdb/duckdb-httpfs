@@ -1560,12 +1560,12 @@ TEST_CASE("S3 upload defaults use DuckDB scheduling", "[httpfs][s3][upload]") {
 	auto thread_setting = con.Query("SELECT count(*) FROM duckdb_settings() WHERE name = 's3_uploader_thread_limit'");
 	REQUIRE(thread_setting);
 	REQUIRE_FALSE(thread_setting->HasError());
-	REQUIRE(thread_setting->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(thread_setting->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	auto max_filesize = con.Query("SELECT value FROM duckdb_settings() WHERE name = 's3_uploader_max_filesize'");
 	REQUIRE(max_filesize);
 	REQUIRE_FALSE(max_filesize->HasError());
-	REQUIRE(max_filesize->GetValue(0, 0).ToString() == "80GB");
+	REQUIRE(max_filesize->Collection().GetValue(0, 0).ToString() == "80GB");
 }
 
 } // namespace duckdb

@@ -58,7 +58,7 @@ static int64_t QueryCount(Connection &con, const string &query) {
 	INFO((result->HasError() ? result->GetError() : string()));
 	REQUIRE_FALSE(result->HasError());
 	REQUIRE(result->RowCount() == 1);
-	return result->GetValue(0, 0).GetValue<int64_t>();
+	return result->Collection().GetValue(0, 0).GetValue<int64_t>();
 }
 
 static void ConfigureClient(Connection &con, const string &client_implementation) {

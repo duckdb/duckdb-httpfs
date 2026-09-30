@@ -440,7 +440,7 @@ CREATE SECRET s3_region_redirect (
 	REQUIRE(logs);
 	INFO((logs->HasError() ? logs->GetError() : string()));
 	REQUIRE_FALSE(logs->HasError());
-	REQUIRE(logs->GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(logs->Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
 }
 
 static void ConfigureGCSClient(Connection &con, const string &client_implementation) {
