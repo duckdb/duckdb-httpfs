@@ -1434,7 +1434,7 @@ TEST_CASE("S3 glob validates and resets s3_list_concurrency", "[httpfs][s3][retr
 	auto result = con.Query("SELECT value::UBIGINT FROM duckdb_settings() WHERE name = 's3_list_concurrency'");
 	INFO((result->HasError() ? result->GetError() : string()));
 	REQUIRE_FALSE(result->HasError());
-	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == 256);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<idx_t>() == 256);
 }
 
 TEST_CASE("S3 parallel glob respects s3_list_concurrency", "[httpfs][s3][retry]") {
