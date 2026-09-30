@@ -549,6 +549,53 @@ static void RunDisconnectedDeleteRetryScenario(const string &client_implementati
 	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 204) == 1);
 }
 
+static void RunBulkDeleteRetryScenario(const string &client, bool caching, MockS3BulkDeleteConfig faults, idx_t retries,
+                                       idx_t expected_attempts, bool succeeds) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.auth.refresh_target = MockS3RefreshTarget::PUT;
+	config.bulk_delete = std::move(faults);
+	MockS3Server server(std::move(config));
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::ConfigureRefresh(db, con, server, client, caching, false);
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=" + to_string(retries));
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=1");
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_backoff=2");
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto remove = [&]() {
+		auto &fs = FileSystem::GetFileSystem(*con.context);
+		fs.RemoveFiles(S3TestHelper::CreateBulkDeletePaths("s3", 2));
+	};
+	if (succeeds) {
+		remove();
+	} else {
+		auto error = RequireError(remove);
+		REQUIRE(StringUtil::Contains(error, "bulk"));
+	}
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(observations.size() == expected_attempts);
+	REQUIRE(observations.front().body_size > 0);
+	REQUIRE_FALSE(observations.front().body_digest.empty());
+	auto content_md5 = MockS3HeaderValues(observations.front(), "Content-MD5");
+	REQUIRE(content_md5.size() == 1);
+	for (const auto &observation : observations) {
+		REQUIRE(observation.method == "POST");
+		REQUIRE(StringUtil::Contains(observation.target, "delete="));
+		REQUIRE(observation.target == observations.front().target);
+		REQUIRE(observation.delete_key_count == 2);
+		REQUIRE(observation.body_size == observations.front().body_size);
+		REQUIRE(observation.body_digest == observations.front().body_digest);
+		REQUIRE(MockS3HeaderValues(observation, "Content-MD5") == content_md5);
+	}
+	if (succeeds) {
+		REQUIRE(observations.back().status == 200);
+	}
+}
+
 // HEAD responses carry no body, so a RequestTimeout 400 cannot be classified as transient:
 // the HEAD is not retried and the open recovers through httpfs's range-GET fallback instead.
 static void RunHeadNotRetriedScenario(const string &client_implementation) {
@@ -1055,6 +1102,52 @@ TEST_CASE("HTTPFS retries disconnected S3 DELETE responses", "[httpfs][s3][delet
 	}
 	SECTION("curl") {
 		RunDisconnectedDeleteRetryScenario("curl");
+	}
+}
+
+TEST_CASE("S3 bulk delete retries received transient errors", "[httpfs][s3][delete][retry][bulk_delete_retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		for (bool caching : {false, true}) {
+			DYNAMIC_SECTION(client << ", caching=" << caching) {
+				MockS3BulkDeleteConfig faults;
+				faults.failure_count = 2;
+				SECTION("received throttle and server errors recover with the same delete payload") {
+					for (auto status : {429, 500, 503}) {
+						CAPTURE(status);
+						faults.failure_status = status;
+						RunBulkDeleteRetryScenario(client, caching, faults, 2, 3, true);
+					}
+				}
+				SECTION("received RequestTimeout recovers") {
+					faults.failure_status = 400;
+					faults.failure_body = "<Error><Code>RequestTimeout</Code></Error>";
+					RunBulkDeleteRetryScenario(client, caching, faults, 2, 3, true);
+				}
+				SECTION("persistent failures exhaust the configured retry budget") {
+					faults.failure_count = 1000;
+					RunBulkDeleteRetryScenario(client, caching, faults, 2, 3, false);
+				}
+				SECTION("zero retries makes only the original request") {
+					RunBulkDeleteRetryScenario(client, caching, faults, 0, 1, false);
+				}
+				SECTION("permanent errors are not retried") {
+					faults.failure_status = 400;
+					faults.failure_body = "<Error><Code>InvalidRequest</Code></Error>";
+					RunBulkDeleteRetryScenario(client, caching, faults, 2, 1, false);
+				}
+				SECTION("per-object errors remain visible") {
+					faults.failure_status = 200;
+					faults.failure_body = "<DeleteResult><Error><Key>object-0.bin</Key>"
+					                      "<Code>AccessDenied</Code></Error></DeleteResult>";
+					RunBulkDeleteRetryScenario(client, caching, faults, 2, 1, false);
+				}
+				SECTION("disconnected responses are not retried") {
+					faults.failure_status = 200;
+					faults.disconnect = true;
+					RunBulkDeleteRetryScenario(client, caching, faults, 2, 1, false);
+				}
+			}
+		}
 	}
 }
 
