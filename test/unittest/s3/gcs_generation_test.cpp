@@ -32,7 +32,7 @@ static string ReadObject(Connection &con, const string &path) {
 	REQUIRE(result);
 	INFO((result->HasError() ? result->GetError() : ""));
 	REQUIRE_FALSE(result->HasError());
-	return result->GetValue(0, 0).ToString();
+	return result->Collection().GetValue(0, 0).ToString();
 }
 
 } // namespace
