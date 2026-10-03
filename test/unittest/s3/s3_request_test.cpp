@@ -1904,7 +1904,7 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 	     false},
 	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true, false, false,
 	     false},
-	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, false, false,
+	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, true, false,
 	     false},
 	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, false,
 	     true, true},

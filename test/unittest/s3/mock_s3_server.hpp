@@ -149,6 +149,11 @@ struct MockS3ListConfig {
 struct MockS3BulkDeleteConfig {
 	//! Reject DeleteObjects requests containing more than this many keys
 	optional_idx maximum_key_count;
+	//! Replace this many leading DeleteObjects responses
+	idx_t failure_count = 0;
+	int failure_status = 503;
+	string failure_body = "<Error><Code>SlowDown</Code><Message>Injected bulk delete failure</Message></Error>";
+	bool disconnect = false;
 };
 
 struct MockS3RangeConfig {
