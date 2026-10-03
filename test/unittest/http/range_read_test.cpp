@@ -198,7 +198,73 @@ static void RunFullDownloadSingleFlight(const string &client_implementation, boo
 	HTTPTestHelper::RequireQueryOk(con, "COMMIT");
 }
 
+static void RunFullDownloadAcceptsPartialStatus(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.object.data = "partial-content-full-body";
+	config.full_get.status = 206;
+	auto expected = config.object.data;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	HTTPTestHelper::Configure(db, con, 0, client_implementation);
+	HTTPTestHelper::RequireQueryOk(con, "SET force_download=true");
+	HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+
+	REQUIRE(HTTPTestHelper::ReadRange(con, server.HTTPPath(), 0, expected.size()) == expected);
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(HTTPTestHelper::CountRequests(observations, "GET", 206) == 1);
+	HTTPTestHelper::RequireQueryOk(con, "COMMIT");
+}
+
+static void RunNoncompliantPartialRangeFallsBack(const string &client_implementation) {
+	static constexpr idx_t READ_OFFSET = 113;
+	static constexpr idx_t READ_LENGTH = 1024;
+
+	MockS3ServerConfig config;
+	config.object.data = HTTPTestHelper::CreateObjectData(8192);
+	auto expected = config.object.data;
+	config.range.behavior = MockS3RangeBehavior::NONCOMPLIANT_PARTIAL;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	HTTPTestHelper::Configure(db, con, 0, client_implementation);
+	HTTPTestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
+	HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+
+	REQUIRE(HTTPTestHelper::ReadRange(con, server.HTTPPath(), READ_OFFSET, READ_LENGTH) ==
+	        expected.substr(READ_OFFSET, READ_LENGTH));
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	// The non-compliant 206 range GET is abandoned and a single full 200 GET serves the read.
+	REQUIRE(HTTPTestHelper::CountRangeRequests(observations, 206) == 1);
+	REQUIRE(HTTPTestHelper::CountRequests(observations, "GET", 200) == 1);
+	HTTPTestHelper::RequireQueryOk(con, "COMMIT");
+}
+
 } // namespace
+
+TEST_CASE("HTTP full download accepts a 206 full GET response", "[httpfs][full-download][noncompliant-206]") {
+	SECTION("curl") {
+		RunFullDownloadAcceptsPartialStatus("curl");
+	}
+	SECTION("httplib") {
+		RunFullDownloadAcceptsPartialStatus("httplib");
+	}
+}
+
+TEST_CASE("HTTP range reads fall back on a non-compliant 206", "[httpfs][full-download][noncompliant-206]") {
+	SECTION("curl") {
+		RunNoncompliantPartialRangeFallsBack("curl");
+	}
+	SECTION("httplib") {
+		RunNoncompliantPartialRangeFallsBack("httplib");
+	}
+}
 
 TEST_CASE("HTTP range reads reject truncated response bodies", "[httpfs][short-read]") {
 	SECTION("persistent transfer truncation exhausts retries") {
