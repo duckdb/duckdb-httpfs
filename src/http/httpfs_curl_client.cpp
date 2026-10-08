@@ -7,7 +7,6 @@
 
 #include <curl/curl.h>
 #include <mutex>
-#include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
 
 #ifndef EMSCRIPTEN
@@ -15,32 +14,6 @@
 #endif
 
 namespace duckdb {
-
-// we statically compile in libcurl, which means the cert file location of the build machine is the
-// place curl will look. But not every distro has this file in the same location, so we search a
-// number of common locations and use the first one we find.
-static constexpr const char *CERT_FILE_LOCATIONS[] = {
-    // Arch, Debian-based, Gentoo
-    "/etc/ssl/certs/ca-certificates.crt",
-    // RedHat 7 based
-    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
-    // Redhat 6 based
-    "/etc/pki/tls/certs/ca-bundle.crt",
-    // OpenSUSE
-    "/etc/ssl/ca-bundle.pem",
-    // Alpine
-    "/etc/ssl/cert.pem"};
-
-//! Grab the first path that exists, from a list of well-known locations
-static string SelectCURLCertPath() {
-	for (const auto &ca_file : CERT_FILE_LOCATIONS) {
-		struct stat buf;
-		if (stat(ca_file, &buf) == 0) {
-			return ca_file;
-		}
-	}
-	return string();
-}
 
 static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 	auto total_size = size * nmemb;
@@ -149,6 +122,9 @@ CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
 	}
 	SetOption(CURLOPT_SSL_OPTIONS, ssl_options);
 	SetOption(CURLOPT_PATH_AS_IS, 1L);
+	// only the protocols httpfs speaks, whatever the library was built with
+	SetOption(CURLOPT_PROTOCOLS_STR, "http,https");
+	SetOption(CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
 }
 
 CURLHandle::~CURLHandle() {
@@ -220,7 +196,10 @@ private:
 			HTTPFSCurlClient::InitCurlGlobal();
 			client.curl = make_uniq<CURLHandle>(params.ca_cert_file.empty());
 			client.transport_reuse_domain = reuse_domain;
-			client.resolved_cert_file_path = params.ca_cert_file.empty() ? SelectCURLCertPath() : params.ca_cert_file;
+			client.ca_cert_bundle.reset();
+			if (params.VerifyServerCertificate() && HTTPFSUtil::IsSecureConnection(client.GetBaseUrl())) {
+				client.ca_cert_bundle = params.http_util.Cast<HTTPFSUtil>().GetCertificateBundle(params.ca_cert_file);
+			}
 		}
 
 		static void ConfigureCredentials(HTTPFSCurlClient &client, const HTTPFSParams &params) {
@@ -231,9 +210,17 @@ private:
 				client.curl->SetOption(CURLOPT_XOAUTH2_BEARER, params.bearer_token.c_str());
 				client.curl->SetOption(CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
 			}
-			client.curl->SetOption(CURLOPT_CAINFO, client.resolved_cert_file_path.empty()
-			                                           ? nullptr
-			                                           : client.resolved_cert_file_path.c_str());
+			// the bundle is handed over as bytes: the library never opens a file itself
+			client.curl->SetOption(CURLOPT_CAINFO, nullptr);
+			if (client.ca_cert_bundle) {
+				curl_blob blob;
+				blob.data = reinterpret_cast<void *>(const_cast<char *>(client.ca_cert_bundle->data()));
+				blob.len = client.ca_cert_bundle->size();
+				blob.flags = CURL_BLOB_NOCOPY;
+				client.curl->SetOption(CURLOPT_CAINFO_BLOB, &blob);
+			} else {
+				client.curl->SetOption(CURLOPT_CAINFO_BLOB, nullptr);
+			}
 		}
 
 		static void ConfigureConnection(HTTPFSCurlClient &client, const HTTPFSParams &params) {
@@ -698,6 +685,7 @@ public:
 				curl->SetOption(CURLOPT_XOAUTH2_BEARER, nullptr);
 				curl->SetOption(CURLOPT_HTTPAUTH, CURLAUTH_NONE);
 				curl->SetOption(CURLOPT_CAINFO, nullptr);
+				curl->SetOption(CURLOPT_CAINFO_BLOB, nullptr);
 				curl->SetOption(CURLOPT_PROXY, nullptr);
 				curl->SetOption(CURLOPT_PROXYUSERNAME, nullptr);
 				curl->SetOption(CURLOPT_PROXYPASSWORD, nullptr);
@@ -810,7 +798,8 @@ private:
 	CURLURLHandle curl_base_url;
 	//! Reuse domain used to configure the current connection.
 	optional_idx transport_reuse_domain;
-	string resolved_cert_file_path;
+	//! Kept alive for as long as the handle refers to it
+	shared_ptr<const string> ca_cert_bundle;
 };
 
 unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params, const string &proto_host_port) {
@@ -825,8 +814,8 @@ unique_ptr<HTTPClient> HTTPFSCurlUtil::InitializeClient(HTTPParams &http_params,
 	return std::move(client);
 }
 
-HTTPFSCurlUtil::HTTPFSCurlUtil(bool connection_caching_enabled_p)
-    : connection_caching_enabled(connection_caching_enabled_p) {
+HTTPFSCurlUtil::HTTPFSCurlUtil(bool connection_caching_enabled_p, optional_ptr<DatabaseInstance> db_p)
+    : HTTPFSUtil(db_p), connection_caching_enabled(connection_caching_enabled_p) {
 }
 
 bool HTTPFSCurlUtil::GetDefaultVerifySSL(const HTTPFSParams &params) const {

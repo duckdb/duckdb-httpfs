@@ -12,7 +12,16 @@ require httpfs
 statement ok
 SET disabled_filesystems='LocalFileSystem';
 
-# httpfs works
+# the CA certificate bundle is read through the local file system, so HTTPS needs it
+statement error
+from read_csv_auto('https://github.com/duckdb/duckdb/raw/main/data/csv/customer.csv');
+----
+<REGEX>:.*Cannot read a CA certificate bundle.*
+
+# without server certificate verification no bundle is needed and httpfs works
+statement ok
+SET enable_curl_server_cert_verification = false;
+
 statement maybe
 from read_csv_auto('https://github.com/duckdb/duckdb/raw/main/data/csv/customer.csv');
 ----
