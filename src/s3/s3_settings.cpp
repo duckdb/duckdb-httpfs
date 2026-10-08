@@ -156,7 +156,23 @@ S3UploadConfig S3UploadConfig::ReadFrom(optional_ptr<FileOpener> opener, const S
 	} else {
 		max_parts_per_file = S3UploadConfig::DEFAULT_MAX_PARTS_PER_FILE;
 	}
-	return Create(uploader_max_filesize, max_parts_per_file, policy);
+	auto upload_policy = policy;
+	if (FileOpener::TryGetCurrentSetting(opener, "s3_uploader_min_part_size", value)) {
+		auto minimum_part_size = DBConfig::ParseMemoryLimit(value.GetValue<string>());
+		if (minimum_part_size != 0) {
+			if (minimum_part_size < policy.minimum_part_size || minimum_part_size > policy.maximum_part_size) {
+				throw InvalidInputException("s3_uploader_min_part_size must be between %llu and %llu bytes",
+				                            policy.minimum_part_size, policy.maximum_part_size);
+			}
+			const auto block_size = Storage::DEFAULT_BLOCK_SIZE + Storage::DEFAULT_BLOCK_HEADER_SIZE;
+			if (policy.part_size_strategy == S3MultipartPartSizeStrategy::ADAPTIVE &&
+			    minimum_part_size % block_size != 0) {
+				minimum_part_size += block_size - minimum_part_size % block_size;
+			}
+			upload_policy.minimum_part_size = NumericCast<idx_t>(minimum_part_size);
+		}
+	}
+	return Create(uploader_max_filesize, max_parts_per_file, upload_policy);
 }
 
 idx_t S3UploadConfig::TargetPartSize(idx_t reserved_parts) const {
@@ -222,6 +238,9 @@ void S3Settings::Register(DBConfig &config) {
 			    throw InvalidInputException("s3_list_concurrency must be at least 1");
 		    }
 	    });
+	config.AddExtensionOption("s3_uploader_min_part_size",
+	                          "Minimum S3 upload part size and single-PUT threshold (0 uses the provider default)",
+	                          LogicalType::VARCHAR, "0B");
 	config.AddExtensionOption("s3_uploader_max_filesize", "Maximum size of an S3 upload", LogicalType::VARCHAR, "80GB");
 	config.AddExtensionOption("s3_uploader_max_parts_per_file", "Maximum number of parts in an S3 multipart upload",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10000));

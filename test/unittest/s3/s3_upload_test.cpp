@@ -394,6 +394,44 @@ CREATE SECRET refresh_upload_policy (
 		}
 	}
 
+	static void RunConfiguredPartSize(const string &client_implementation, idx_t payload_size) {
+		MockS3ServerConfig config;
+		config.object.bucket = S3TestHelper::BUCKET;
+		config.object.key = S3TestHelper::OBJECT_KEY;
+		config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+		MockS3Server server(std::move(config));
+		DuckDB db(nullptr);
+		Connection con(db);
+		Configure(db, con, server, client_implementation);
+		S3TestHelper::RequireQueryOk(con, "SET s3_uploader_min_part_size='16MiB'");
+		auto payload = CreatePayload(payload_size);
+		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto handle = OpenWriter(con);
+		for (idx_t offset = 0; offset < payload.size();) {
+			auto write_size = MinValue<idx_t>(1024 * 1024, payload.size() - offset);
+			handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()) + offset, write_size);
+			offset += write_size;
+		}
+		handle->Close();
+		handle.reset();
+		S3TestHelper::RequireQueryOk(con, "COMMIT");
+		auto observations = server.Observations();
+		INFO(MockS3DescribeObservations(observations));
+		REQUIRE(server.UploadedObject() == payload);
+		if (payload_size <= 16ULL * 1024 * 1024) {
+			REQUIRE(Count(observations, "PUT") == 1);
+			REQUIRE(Count(observations, "POST") == 0);
+		} else {
+			REQUIRE(Count(observations, "POST", "uploads") == 1);
+			REQUIRE(Count(observations, "POST", "uploadId") == 1);
+			vector<idx_t> expected_sizes(payload_size / (16ULL * 1024 * 1024), 16ULL * 1024 * 1024);
+			if (payload_size % (16ULL * 1024 * 1024)) {
+				expected_sizes.push_back(payload_size % (16ULL * 1024 * 1024));
+			}
+			RequirePartSizes(observations, expected_sizes);
+		}
+	}
+
 	static void RunEmpty(const string &client_implementation) {
 		MockS3ServerConfig config;
 		config.object.bucket = S3TestHelper::BUCKET;
@@ -1502,6 +1540,17 @@ public:
 };
 
 } // namespace
+
+TEST_CASE("S3 upload uses configured minimum part size", "[httpfs][s3][upload]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (const idx_t size :
+		     {16ULL * 1024 * 1024 - 1, 16ULL * 1024 * 1024, 16ULL * 1024 * 1024 + 1, 32ULL * 1024 * 1024 + 1}) {
+			DYNAMIC_SECTION(client << " payload " << size) {
+				S3UploadTest::RunConfiguredPartSize(client, size);
+			}
+		}
+	}
+}
 
 TEST_CASE("S3 upload request geometry", "[httpfs][s3][upload]") {
 	SECTION("curl") {
