@@ -43,9 +43,7 @@ static void SetCACertFile(ClientContext &context, SetScope, Value &parameter) {
 		parameter = Value("");
 		return;
 	}
-	LocalFileSystem fs;
-	ClientContextFileOpener opener(context);
-	parameter = Value(fs.CanonicalizePath(value, opener));
+	parameter = Value(FileSystem::GetFileSystem(context).CanonicalizePath(value));
 }
 
 static void SetExtraHTTPHeaders(ClientContext &, SetScope, Value &parameter) {
@@ -75,11 +73,11 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 	}
 #ifndef EMSCRIPTEN
 	if (value == "curl" || value == "default") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(context)));
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(context), context.db.get()));
 		return;
 	}
 	if (value == "httplib") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>(context.db.get()));
 		return;
 	}
 #endif
@@ -93,7 +91,7 @@ static void SetHTTPConnectionCaching(ClientContext &context, SetScope scope, Val
 	auto &config = DBConfig::GetConfig(context);
 	auto &http_util = config.GetHTTPUtil();
 	if (http_util.GetName() == "HTTPFS-Curl") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(BooleanValue::Get(parameter)));
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(BooleanValue::Get(parameter), context.db.get()));
 	}
 #endif
 }
@@ -141,15 +139,16 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), SetHTTPConnectionCaching, SetScope::GLOBAL);
 }
 
-void HTTPSettings::Initialize(DBConfig &config) {
+void HTTPSettings::Initialize(DatabaseInstance &db) {
+	auto &config = DBConfig::GetConfig(db);
 	auto &http_util = config.GetHTTPUtil();
 	if (http_util.GetName() == "WasmHTTPUtils") {
 		return;
 	}
 #ifndef EMSCRIPTEN
-	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(config)));
+	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(config), db));
 #else
-	config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
+	config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>(db));
 #endif
 }
 

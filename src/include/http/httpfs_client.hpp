@@ -2,6 +2,7 @@
 
 #include "duckdb/main/http/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "http/httpfs_transport.hpp"
 
@@ -92,6 +93,9 @@ private:
 
 class HTTPFSUtil : public HTTPUtil {
 public:
+	explicit HTTPFSUtil(optional_ptr<DatabaseInstance> db = nullptr);
+
+public:
 	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	//! Read HTTPFS settings without publishing a transport reuse domain.
@@ -109,6 +113,15 @@ public:
 
 	string GetName() const override;
 
+	//! The PEM bundle used to verify server certificates: the ca_cert_file setting, or else the first bundle found
+	//! at a well-known location. It is read through the database's file system, so allowed_paths applies to it.
+	//! Returns nullptr when no bundle is available, in which case the client relies on the platform's own store.
+	shared_ptr<const string> GetCertificateBundle(const string &ca_cert_file);
+	static bool IsSecureConnection(const string &proto_host_port);
+
+protected:
+	optional_ptr<DatabaseInstance> db;
+
 private:
 	friend struct HTTPFSParams;
 
@@ -122,6 +135,10 @@ private:
 	annotated_mutex transport_reuse_lock;
 	//! Exact reusable configurations retained by this provider.
 	vector<HTTPFSConnectionConfig> transport_reuse_domains DUCKDB_GUARDED_BY(transport_reuse_lock);
+	//! Protects the certificate bundle cache.
+	mutex certificate_lock;
+	//! Bundles read so far, by ca_cert_file setting (the empty string for the default locations).
+	unordered_map<string, shared_ptr<const string>> certificate_bundles;
 	//! Next non-recycled transport domain identity.
 	idx_t next_transport_reuse_domain DUCKDB_GUARDED_BY(transport_reuse_lock) = 1;
 };
@@ -130,7 +147,7 @@ private:
 
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
-	explicit HTTPFSCurlUtil(bool connection_caching_enabled_p = true);
+	explicit HTTPFSCurlUtil(bool connection_caching_enabled_p = true, optional_ptr<DatabaseInstance> db = nullptr);
 
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
