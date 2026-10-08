@@ -2,9 +2,13 @@
 
 #include "s3/s3_auth.hpp"
 #include "s3/s3_settings.hpp"
+#include "s3/s3_test_helper.hpp"
+
+#include "duckdb.hpp"
 
 #include "duckdb/common/array.hpp"
 #include "duckdb/common/limits.hpp"
+#include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/storage/storage_info.hpp"
 
 namespace duckdb {
@@ -197,6 +201,36 @@ TEST_CASE("R2 upload config uses fixed part sizes", "[httpfs][s3][upload]") {
 		    S3UploadConfig::Create(policy.maximum_object_size.GetIndex() + 1, policy.maximum_part_count, policy));
 		REQUIRE_THROWS(S3UploadConfig::Create(policy.maximum_object_size.GetIndex(), 1023, policy));
 	}
+}
+
+TEST_CASE("S3 upload minimum part size is configurable", "[httpfs][s3][upload]") {
+	DuckDB db(nullptr);
+	S3TestHelper::LoadExtension(db);
+	Connection con(db);
+	ClientContextFileOpener opener(*con.context);
+	for (auto provider : {S3ProviderType::S3, S3ProviderType::R2}) {
+		auto policy = GetUploadPolicy(provider);
+		S3TestHelper::RequireQueryOk(con, "SET s3_uploader_min_part_size='128MiB'");
+		auto config = S3UploadConfig::ReadFrom(&opener, policy);
+		REQUIRE(config.TargetPartSize(0) == 128 * MIB);
+		REQUIRE(config.max_file_size == S3UploadConfig::DEFAULT_MAX_FILESIZE);
+		REQUIRE(config.max_parts == S3UploadConfig::DEFAULT_MAX_PARTS_PER_FILE);
+		REQUIRE(config.part_size_strategy == policy.part_size_strategy);
+		for (const string invalid : {"1MiB", "6GiB", "-1", "unlimited"}) {
+			S3TestHelper::RequireQueryOk(con, "SET s3_uploader_min_part_size='" + invalid + "'");
+			REQUIRE_THROWS(S3UploadConfig::ReadFrom(&opener, policy));
+		}
+		S3TestHelper::RequireQueryOk(con, "RESET s3_uploader_min_part_size");
+		auto defaults = S3UploadConfig::Create(S3UploadConfig::DEFAULT_MAX_FILESIZE,
+		                                       S3UploadConfig::DEFAULT_MAX_PARTS_PER_FILE, policy);
+		REQUIRE(S3UploadConfig::ReadFrom(&opener, policy).initial_part_size == defaults.initial_part_size);
+	}
+	S3TestHelper::RequireQueryOk(con, "SET s3_uploader_min_part_size='100MB'");
+	auto config = S3UploadConfig::ReadFrom(&opener, GetUploadPolicy(S3ProviderType::S3));
+	const auto block_size = Storage::DEFAULT_BLOCK_SIZE + Storage::DEFAULT_BLOCK_HEADER_SIZE;
+	REQUIRE(config.initial_part_size >= 100000000);
+	REQUIRE(config.initial_part_size < 100000000 + block_size);
+	REQUIRE(config.initial_part_size % block_size == 0);
 }
 
 } // namespace duckdb

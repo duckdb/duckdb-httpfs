@@ -36,3 +36,11 @@ Some tests querying remote resources can be run already without further setup:
 ./build/release/test/unittest
 ```
 Further integration testing uses a local MinIO setup using Docker. See the [testing documentation for more information on how to set this up locally](test).
+
+## S3 upload sizing
+
+`SET s3_uploader_min_part_size = '128MiB';` raises the minimum upload-part size
+and the single-PUT threshold. The default, `0B`, uses the provider's existing
+sizing policy. Adaptive uploads round this setting up to a DuckDB storage block
+and can grow parts further to respect upload limits. Larger values reduce S3
+request costs but require more buffering per open writer.
