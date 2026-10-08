@@ -13,8 +13,7 @@ set_target_properties(unittest_httpfs PROPERTIES RUNTIME_OUTPUT_DIRECTORY
                                                  ${CMAKE_BINARY_DIR}/test)
 
 target_link_libraries(unittest_httpfs test_helpers duckdb_static)
-link_extension_libraries(unittest_httpfs "")
-# By name as well: since DuckDB v2.0, link_extension_libraries only links what DuckDB itself links statically, which
-# leaves out httpfs. core_functions holds the MAP literals the tests create secrets with.
-target_link_libraries(unittest_httpfs httpfs_extension core_functions_extension)
+# By name: since DuckDB v2.0, link_extension_libraries only links what DuckDB itself links statically, which leaves
+# out httpfs. core_functions holds the MAP literals the tests create secrets with.
+duckdb_link_extensions(unittest_httpfs json parquet core_functions httpfs)
 link_threads(unittest_httpfs "")
