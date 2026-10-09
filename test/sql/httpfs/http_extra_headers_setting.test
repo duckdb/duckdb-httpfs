@@ -26,6 +26,10 @@ COPY (SELECT 1 AS a) TO '{PYTHON_HTTP_SERVER_DIR}/extra_http_headers.csv';
 statement ok
 SET extra_http_headers = MAP {'X-Setting-One': 'one', 'X-Setting-Two': 'two'};
 
+# The test reads headers that DuckDB v2.0 redacts in the logs by default
+statement ok
+SET redact_http_logs = false;
+
 statement ok
 CALL enable_logging('HTTP');
 

@@ -80,4 +80,4 @@ WHERE request.headers['User-Agent'] IS NULL
 query IIIIIIIIIIIIIIII
 select count(distinct columns(*)) from lineitem;
 ----
-1500000	200000	10000	7	50	933900	11	9	3	2	2526	2466	2554	4	7	3610733
+1500000	200000	10000	7	50	933900	11	9	3	2	2526	2466	2554	4	7	4580667

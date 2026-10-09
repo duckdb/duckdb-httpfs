@@ -51,6 +51,8 @@ CREATE OR REPLACE TABLE expected AS
 SELECT 's3://test-bucket/glob_parallel/sparse/d' || d || '/f' || i || '.parquet' AS file
 FROM range(14) dirs(d), range({key_count}) files(i)
 UNION ALL SELECT 's3://test-bucket/glob_parallel/sparse/z.parquet';
+-- The test reads URLs that DuckDB v2.0 redacts in the logs by default
+SET redact_http_logs = false;
 CALL enable_logging('HTTP');
 
 foreach async_threads 0 2 16
