@@ -40,6 +40,10 @@ CREATE TABLE T2 AS SELECT i*i FROM range(200) tbl(i);
 statement ok
 COPY T1 TO 's3://test-bucket/root-dir/version_pinning/test.parquet';
 
+# The test reads URLs and headers that DuckDB v2.0 redacts in the logs by default
+statement ok
+SET redact_http_logs = false;
+
 statement ok
 CALL enable_logging('HTTP');
 
