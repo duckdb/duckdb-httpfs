@@ -147,7 +147,7 @@ S3UploadConfig S3UploadConfig::ReadFrom(optional_ptr<FileOpener> opener, const S
 	Value value;
 
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_uploader_max_filesize", value)) {
-		uploader_max_filesize = DBConfig::ParseMemoryLimit(value.GetValue<string>());
+		uploader_max_filesize = DBConfig::ParseMemoryLimitOrMaximum(value.GetValue<string>());
 	} else {
 		uploader_max_filesize = S3UploadConfig::DEFAULT_MAX_FILESIZE;
 	}
