@@ -110,6 +110,7 @@ public:
 	bool ShouldRetry(const BaseRequest &request, const HTTPResponse &response) override;
 	//! Tags S3 requests with the attempt number so the service can tell retries apart.
 	void PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) override;
+	bool ShouldRetry(const BaseRequest &request, const HTTPResponse &response) override;
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
