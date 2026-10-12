@@ -12,6 +12,7 @@
 #include "duckdb/main/http/http_util.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/function/scalar/strftime_format.hpp"
 #include "duckdb/logging/file_system_logger.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -91,10 +92,10 @@ const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation
 	                            false},
 	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true, false, false,
 	                            false},
-	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, false,
+	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", true, true,
 	                            false, false},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "initializing multipart upload for",
-	                            false, false, true, true},
+	                            true, true, true, true},
 	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, false,
 	                            true},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "completing multipart upload for",
@@ -650,11 +651,14 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 	bool retried_auth_refresh = false;
 	bool retried_region = false;
 	HTTPRetryBudget retry_budget(session.Capture().snapshot->Params());
+	// One id for the whole operation lets S3 correlate every attempt of it.
+	const auto invocation_id = UUID::ToString(UUID::GenerateRandomUUID());
 	S3RequestResult result {};
 	retry_budget.Run([&]() {
 		// Only bounded auth/region corrections bypass transient retry admission.
 		for (;;) {
 			auto request_data = CreateRequestData(encryption_util, session.Capture(), spec, retry_budget);
+			request_data.headers.Insert(HTTPFSUtil::S3_INVOCATION_ID_HEADER, invocation_id);
 			try {
 				auto response = request(request_data);
 				auto received_response = response && !response->HasRequestError();
@@ -677,10 +681,19 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 					fresh_connection(request_data);
 					should_retry = true;
 				}
+				// Throttling responses get the throttle schedule, including any Retry-After.
+				const bool throttled = should_retry && (response->status == HTTPStatusCode::TooManyRequests_429 ||
+				                                        response->status == HTTPStatusCode::ServiceUnavailable_503);
+				const auto retry_after = throttled && response->HasHeader("Retry-After")
+				                             ? response->GetHeaderValue("Retry-After")
+				                             : string();
 				result = {std::move(response),
 				          S3RequestContext {request_data.operation, std::move(request_data.captured),
 				                            std::move(request_data.display_url)}};
-				return should_retry ? HTTPRetryDecision::Retry() : HTTPRetryDecision::Finish();
+				if (!should_retry) {
+					return HTTPRetryDecision::Finish();
+				}
+				return throttled ? HTTPRetryDecision::Throttled(retry_after) : HTTPRetryDecision::Retry();
 			} catch (std::exception &ex) {
 				ErrorData error(ex);
 				if (!retried_auth_refresh && IsAuthRefreshStatus(error) && refresh_auth_params(request_data)) {

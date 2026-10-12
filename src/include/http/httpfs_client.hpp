@@ -92,6 +92,11 @@ private:
 
 class HTTPFSUtil : public HTTPUtil {
 public:
+	//! Unsigned S3 headers identifying one logical request and its attempt, as sent by the AWS SDKs.
+	static constexpr const char *S3_INVOCATION_ID_HEADER = "amz-sdk-invocation-id";
+	static constexpr const char *S3_ATTEMPT_HEADER = "amz-sdk-request";
+
+public:
 	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	//! Read HTTPFS settings without publishing a transport reuse domain.
@@ -99,6 +104,8 @@ public:
 	                                                        optional_ptr<FileOpenerInfo> info);
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
+	//! Tags S3 requests with the attempt number so the service can tell retries apart.
+	void PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) override;
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);

@@ -55,6 +55,14 @@ void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> res
 	HTTPUtil::LogRequest(sanitized_request, response);
 }
 
+void HTTPFSUtil::PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) {
+	// Only S3 requests carry an invocation id; the attempt header is unsigned, like in the AWS SDKs.
+	if (!request.headers.HasHeader(S3_INVOCATION_ID_HEADER)) {
+		return;
+	}
+	request.headers[S3_ATTEMPT_HEADER] = StringUtil::Format("attempt=%llu; max=%llu", attempt, max_attempts);
+}
+
 struct HTTPParametersInitializer {
 private:
 	HTTPParametersInitializer(HTTPUtil &http_util, optional_ptr<FileOpener> opener_p,

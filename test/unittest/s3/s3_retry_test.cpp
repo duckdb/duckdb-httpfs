@@ -316,8 +316,8 @@ static void RunTruncatedErrorBodyScenario(const string &client_implementation) {
 	REQUIRE(S3TestHelper::CountObservations(observations, "PUT", S3TestHelper::STALE_KEY_ID, 400) == 1);
 }
 
-// Even a retryable RequestTimeout must NOT replay a multipart-init POST (it would orphan an upload id).
-static void RunMultipartInitNotRetriedScenario(const string &client_implementation) {
+// A received RequestTimeout means S3 never created the upload, so the init POST is replayed like the AWS SDKs do.
+static void RunMultipartInitRetriedScenario(const string &client_implementation) {
 	MockS3ServerConfig config;
 	config.object.bucket = S3TestHelper::BUCKET;
 	config.object.key = S3TestHelper::OBJECT_KEY;
@@ -338,7 +338,7 @@ static void RunMultipartInitNotRetriedScenario(const string &client_implementati
 
 	auto observations = server.Observations();
 	INFO(MockS3DescribeObservations(observations));
-	REQUIRE(CountObservationsTarget(observations, "POST", 400, "uploads") == 1);
+	REQUIRE(CountObservationsTarget(observations, "POST", 400, "uploads") == 4);
 }
 
 // A RequestTimeout retry must run on a fresh connection instead of the stalled one.
@@ -637,7 +637,8 @@ static void RunMultipartInitializationThrottleScenario(const string &client_impl
 
 	auto observations = server.Observations();
 	INFO(MockS3DescribeObservations(observations));
-	REQUIRE(CountObservationsTarget(observations, "POST", 429, "uploads") == 1);
+	// http_retries=3 plus the five extra throttle retries
+	REQUIRE(CountObservationsTarget(observations, "POST", 429, "uploads") == 9);
 	REQUIRE(CountObservationsTarget(observations, "POST", 200, "uploadId") == 0);
 	REQUIRE(CountObservationsTarget(observations, "DELETE", 204, "uploadId") == 0);
 }
@@ -696,10 +697,10 @@ static void RunAllTransientRetryScenarios(const string &client_implementation) {
 	SECTION("a truncated error body is not retried and does not invalidate the database") {
 		RunTruncatedErrorBodyScenario(client_implementation);
 	}
-	SECTION("multipart initialization does not retry a received RequestTimeout") {
-		RunMultipartInitNotRetriedScenario(client_implementation);
+	SECTION("multipart initialization retries a received RequestTimeout within the configured budget") {
+		RunMultipartInitRetriedScenario(client_implementation);
 	}
-	SECTION("multipart initialization does not receive core throttle retries") {
+	SECTION("multipart initialization retries throttling with the extra throttle retries") {
 		RunMultipartInitializationThrottleScenario(client_implementation);
 	}
 	SECTION("multipart completion retries a received RequestTimeout within the configured budget") {
@@ -1403,9 +1404,11 @@ static void RunParallelGlobExhaustedThrottlingTest(const string &client_implemen
 	REQUIRE(result->HasError());
 	REQUIRE(StringUtil::Contains(result->GetError(), "503"));
 
-	// A full first wave of sixteen exhausted requests, then a single sequential re-issue before failing.
+	// A full first wave of sixteen requests whose retries drain the host's retry quota, then a single sequential
+	// re-issue that gets no retry because the quota is empty.
+	const idx_t quota_retries = HTTPRetryQuota::INITIAL_CAPACITY / HTTPRetryQuota::RETRY_COST;
 	REQUIRE(CountListObservations(observations, 200) == 2);
-	REQUIRE(CountListObservations(observations, 503) == 16 * 8 + 8);
+	REQUIRE(CountListObservations(observations, 503) == 16 + quota_retries + 1);
 	REQUIRE(CountShrinkWarnings(con) >= 1);
 }
 
