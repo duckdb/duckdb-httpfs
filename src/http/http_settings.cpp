@@ -134,9 +134,11 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(HTTPParams::DEFAULT_TIMEOUT_SECONDS));
 	config.AddExtensionOption("http_retries", "HTTP retries on I/O error", LogicalType::UBIGINT,
 	                          Value::UBIGINT(HTTPParams::DEFAULT_RETRIES));
-	config.AddExtensionOption("http_retry_wait_ms", "Time between retries", LogicalType::UBIGINT,
-	                          Value::UBIGINT(HTTPParams::DEFAULT_RETRY_WAIT_MS));
-	config.AddExtensionOption("http_retry_backoff", "Backoff factor for exponentially increasing retry wait time",
+	config.AddExtensionOption("http_retry_wait_ms",
+	                          "Base wait before the first retry; each retry waits a random time between 0 and the "
+	                          "base, which grows by http_retry_backoff per retry and is capped at 20 seconds",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HTTPParams::DEFAULT_RETRY_WAIT_MS));
+	config.AddExtensionOption("http_retry_backoff", "Factor by which the retry wait window grows after every retry",
 	                          LogicalType::FLOAT, Value(HTTPParams::DEFAULT_RETRY_BACKOFF));
 	config.AddExtensionOption(
 	    "http_keep_alive",
