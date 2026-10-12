@@ -464,7 +464,7 @@ static void RunSharedReadBudgetScenario(const string &client, bool range, bool c
 		handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 7);
 		REQUIRE(buffer == data.substr(7, buffer.size()));
 	};
-	if (failures > retries || auth_status) {
+	if (failures > retries) {
 		auto error = RequireError(read);
 		REQUIRE(StringUtil::Contains(error, "RequestTimeout"));
 	} else {
@@ -480,10 +480,13 @@ static void RunSharedReadBudgetScenario(const string &client, bool range, bool c
 		}
 	}
 	if (auth_status) {
+		// A denied request is final, so the stale credentials are corrected after a single attempt and the fresh
+		// request still has the whole retry budget for its transient failures.
 		S3TestHelper::AssertSingleRefresh(test_id);
-		REQUIRE(gets.size() == retries + 2);
-		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::STALE_KEY_ID, auth_status) == retries + 1);
-		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::FRESH_KEY_ID, 400) == 1);
+		REQUIRE(gets.size() == 1 + MinValue(failures, retries) + 1);
+		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::STALE_KEY_ID, auth_status) == 1);
+		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::FRESH_KEY_ID, 400) ==
+		        MinValue(failures, retries + 1));
 	} else {
 		REQUIRE(gets.size() == MinValue(failures, retries) + 1);
 	}
@@ -1187,12 +1190,14 @@ TEST_CASE("S3 reads share core's retry budget", "[httpfs][s3][retry][shared_retr
 	}
 }
 
-TEST_CASE("S3 credential correction retains spent GET retries", "[httpfs][s3][retry][shared_retry]") {
+TEST_CASE("S3 credential correction does not spend GET retries on denied requests",
+          "[httpfs][s3][retry][shared_retry]") {
 	for (const auto &client : {"httplib", "curl"}) {
 		for (bool range : {false, true}) {
 			for (int status : {401, 403}) {
 				CAPTURE(client, range, status);
 				RunSharedReadBudgetScenario(client, range, true, 2, 1, status);
+				RunSharedReadBudgetScenario(client, range, true, 1, 2, status);
 			}
 		}
 	}

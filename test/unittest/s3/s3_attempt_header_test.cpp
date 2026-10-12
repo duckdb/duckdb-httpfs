@@ -7,6 +7,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/http/http_retry_budget.hpp"
 
 namespace duckdb {
 
@@ -47,14 +48,16 @@ static void RunAttemptHeaderScenario(const string &client_implementation) {
 			part_uploads.push_back(observation);
 		}
 	}
-	// Two RequestTimeouts and the success are three attempts of one logical request
+	// Two RequestTimeouts and the success are three attempts of one logical request; the maximum counts the first
+	// attempt, http_retries and the extra retries a throttling server is granted
 	REQUIRE(part_uploads.size() == 3);
+	const auto max_attempts = 1 + 3 + HTTPRetryBudget::THROTTLE_EXTRA_RETRIES;
 	auto invocation_id = HeaderValue(part_uploads[0], HTTPFSUtil::S3_INVOCATION_ID_HEADER);
 	REQUIRE_FALSE(invocation_id.empty());
 	for (idx_t i = 0; i < part_uploads.size(); i++) {
 		REQUIRE(HeaderValue(part_uploads[i], HTTPFSUtil::S3_INVOCATION_ID_HEADER) == invocation_id);
 		REQUIRE(HeaderValue(part_uploads[i], HTTPFSUtil::S3_ATTEMPT_HEADER) ==
-		        StringUtil::Format("attempt=%llu; max=4", i + 1));
+		        StringUtil::Format("attempt=%llu; max=%llu", i + 1, max_attempts));
 	}
 	// Other operations of the same upload carry their own invocation ids
 	idx_t other_operations = 0;
