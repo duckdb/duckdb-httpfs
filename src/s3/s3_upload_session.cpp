@@ -26,6 +26,25 @@ static bool IsSuccessfulStatus(HTTPStatusCode status) {
 	return status_code >= 200 && status_code < 300;
 }
 
+//! The handler's reading of a multipart initialization or completion response, run by the request executor before
+//! the retry quota is settled: only the document the operation expects is a success; an S3 error document and a
+//! final status are failures; an empty or malformed body and any other document are an unknown outcome, which the
+//! handler goes on to report to its caller (see InitializeMultipartUpload / CompleteMultipartUpload) and which must
+//! not refund the retry that led to it.
+static S3OperationOutcome ValidateMultipartResponse(const HTTPResponse &response, S3XMLResponseType expected) {
+	if (response.HasRequestError() || !IsSuccessfulStatus(response.status)) {
+		return S3OperationOutcome::FAILURE;
+	}
+	S3XMLResponse parsed_response;
+	if (!S3XMLResponseParser::TryParse(response.body, parsed_response)) {
+		return S3OperationOutcome::UNKNOWN;
+	}
+	if (parsed_response.type == S3XMLResponseType::ERROR) {
+		return S3OperationOutcome::FAILURE;
+	}
+	return parsed_response.type == expected ? S3OperationOutcome::SUCCESS : S3OperationOutcome::UNKNOWN;
+}
+
 } // namespace
 
 S3UploadSession::WriteClaim::WriteClaim(S3UploadSession &session_p) : session(session_p) {
@@ -351,8 +370,11 @@ S3UploadSession::PreparedWrite S3UploadSession::PrepareWrite(const_data_ptr_t da
 
 string S3UploadSession::InitializeMultipartUpload() {
 	string result;
-	auto request_result = s3fs.get().PostRequest(*request_session, S3RequestOperation::CREATE_MULTIPART_UPLOAD, path,
-	                                             result, nullptr, 0, S3RequestQuery({{"uploads", ""}}));
+	auto request_result = s3fs.get().PostRequest(
+	    *request_session, S3RequestOperation::CREATE_MULTIPART_UPLOAD, path, result, nullptr, 0,
+	    S3RequestQuery({{"uploads", ""}}), [](const S3RequestData &, const HTTPResponse &response) {
+		    return ValidateMultipartResponse(response, S3XMLResponseType::MULTIPART_INITIALIZATION);
+	    });
 	auto &response = request_result.response;
 	auto &request_context = request_result.context;
 	if (response->HasRequestError()) {
@@ -532,7 +554,10 @@ void S3UploadSession::CompleteMultipartUpload() {
 	string result;
 	auto request_result =
 	    s3fs.get().PostRequest(*request_session, S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, path, result,
-	                           const_data_ptr_cast(completion_body.data()), completion_body.size(), query);
+	                           const_data_ptr_cast(completion_body.data()), completion_body.size(), query,
+	                           [](const S3RequestData &, const HTTPResponse &response) {
+		                           return ValidateMultipartResponse(response, S3XMLResponseType::MULTIPART_COMPLETION);
+	                           });
 	auto &response = request_result.response;
 	auto &request_context = request_result.context;
 	if (response->HasRequestError()) {
