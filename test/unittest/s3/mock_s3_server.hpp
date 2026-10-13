@@ -94,12 +94,20 @@ struct MockS3MetadataConfig {
 	vector<pair<string, string>> redirect_response_headers;
 };
 
+struct MockS3CompletionFault {
+	int status = 200;
+	string code = "InternalError";
+	string message = "Injected multipart completion failure";
+};
+
 struct MockS3CompletionFaultConfig {
 	//! Number of leading multipart-completion responses to replace
 	idx_t count = 0;
 	int status = 200;
 	string code = "InternalError";
 	string message = "Injected multipart completion failure";
+	//! Faults served after the leading ones, one response each in order
+	vector<MockS3CompletionFault> then;
 };
 
 struct MockS3FailureConfig {
@@ -139,6 +147,8 @@ struct MockS3FailureConfig {
 	bool failure_is_request_timeout = true;
 	//! Whether injected 400 bodies are truncated mid-XML (an open <Code> with no closing tag)
 	bool truncated_failure_body = false;
+	//! Whether injected 400 error documents use a namespace prefix and a CDATA code, as some S3-compatible stores do
+	bool namespaced_failure_body = false;
 };
 
 struct MockS3ListConfig {

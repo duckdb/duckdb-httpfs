@@ -348,7 +348,8 @@ public:
 		remaining_delete_failures = config.failures.transient_delete_failures;
 		remaining_delete_disconnects = config.failures.transient_delete_disconnects;
 		remaining_post_failures = config.failures.transient_post_failures;
-		remaining_completion_faults = config.failures.completion_fault.count;
+		remaining_completion_faults =
+		    config.failures.completion_fault.count + config.failures.completion_fault.then.size();
 		if (config.range.behavior == MockS3RangeBehavior::SHORT_SUCCESS && config.range.behavior_requests > 0) {
 			server.set_keep_alive_max_count(1);
 		}
@@ -674,6 +675,13 @@ public:
 		if (config.failures.truncated_failure_body) {
 			response.set_content("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>RequestTimeout",
 			                     "application/xml");
+		} else if (request_timeout && config.failures.namespaced_failure_body) {
+			response.set_content("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+			                     "<s3:Error xmlns:s3=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+			                     "<s3:Code><![CDATA[RequestTimeout]]></s3:Code><s3:Message>Your socket connection to "
+			                     "the server was not read from or written to within the timeout period.</s3:Message>"
+			                     "</s3:Error>",
+			                     "application/xml");
 		} else if (request_timeout) {
 			response.set_content("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 			                     "<Error><Code>RequestTimeout</Code><Message>Your socket connection to the server "
@@ -687,8 +695,17 @@ public:
 		Record(request, response.status);
 	}
 
-	void SendCompletionFault(const httplib::Request &request, httplib::Response &response) const {
-		auto &fault = config.failures.completion_fault;
+	void SendCompletionFault(const httplib::Request &request, httplib::Response &response, idx_t index) const {
+		auto &faults = config.failures.completion_fault;
+		// The leading `count` faults repeat the configured one, then the scripted sequence follows in order
+		MockS3CompletionFault fault;
+		if (index < faults.count) {
+			fault.status = faults.status;
+			fault.code = faults.code;
+			fault.message = faults.message;
+		} else {
+			fault = faults.then[index - faults.count];
+		}
 		response.status = fault.status;
 		response.set_content(StringUtil::Format("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 		                                        "<Error><Code>%s</Code><Message>%s</Message></Error>",
@@ -1047,7 +1064,7 @@ public:
 		}
 		if (request.target.find("uploadId") != string::npos && remaining_completion_faults.load() > 0) {
 			remaining_completion_faults--;
-			SendCompletionFault(request, response);
+			SendCompletionFault(request, response, served_completion_faults++);
 			return;
 		}
 		SendMultipartPost(request, response);
@@ -1495,6 +1512,7 @@ public:
 	mutable atomic<idx_t> remaining_delete_disconnects {0};
 	mutable atomic<idx_t> remaining_post_failures {0};
 	mutable atomic<idx_t> remaining_completion_faults {0};
+	mutable atomic<idx_t> served_completion_faults {0};
 
 	//! Request observations
 	mutable annotated_mutex observation_lock;

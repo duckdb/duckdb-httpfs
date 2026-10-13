@@ -12,6 +12,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/http/http_retry_budget.hpp"
+#include "duckdb/main/http/http_util.hpp"
 
 namespace duckdb {
 
@@ -249,6 +250,94 @@ static void RunFailedCompletionFaultScenario(const string &client_implementation
 	REQUIRE(StringUtil::Contains(error.ExtraInfo().at("response_body"), expected_code));
 	REQUIRE(CountObservationsTarget(observations, "DELETE", 204, "uploadId") == 1);
 	REQUIRE(server.UploadedObject() == "existing object");
+}
+
+// HTTP 500, then HTTP 200 with an InvalidPart error document: core's loop retries the 500 and sees a 2xx, the S3
+// executor reads the body and declares the operation failed. The retry stays charged to the host's quota.
+static void RunTerminalEmbeddedErrorAfterServerErrorScenario(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+	config.upload.initial_published_object = "existing object";
+	config.failures.completion_fault.count = 1;
+	config.failures.completion_fault.status = 500;
+	config.failures.completion_fault.code = "InternalError";
+	MockS3CompletionFault invalid_part;
+	invalid_part.status = 200;
+	invalid_part.code = "InvalidPart";
+	invalid_part.message = "One or more of the specified parts could not be found.";
+	config.failures.completion_fault.then.push_back(invalid_part);
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureUploadTest(db, con, server, client_implementation, 3);
+	auto &http_util = HTTPUtil::Get(*db.instance);
+	auto quota = http_util.GetRetryQuota("http://" + server.Endpoint());
+	REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY);
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto handle = OpenWriter(con);
+	auto payload = MultipartPayload();
+	handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+	ErrorData error;
+	RequireError([&]() { handle->Sync(); }, error);
+	RequireError([&]() { handle->Close(); });
+	handle.reset();
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	// The 500 was retried once; the 200 that followed carried the terminal error and was not
+	S3TestHelper::RequireCompletionIdentity(observations, 2);
+	auto completions = S3TestHelper::CompletionObservations(observations);
+	REQUIRE(completions[0].status == 500);
+	REQUIRE(completions[1].status == 200);
+	REQUIRE_FALSE(completions[1].multipart_upload_published);
+	REQUIRE(error.Type() == ExceptionType::HTTP);
+	REQUIRE(error.ExtraInfo().at("status_code") == "200");
+	REQUIRE(StringUtil::Contains(error.ExtraInfo().at("response_body"), "InvalidPart"));
+	REQUIRE(CountObservationsTarget(observations, "DELETE", 204, "uploadId") == 1);
+	REQUIRE(server.UploadedObject() == "existing object");
+	// The retry the 500 consumed is not refunded by the 2xx that carried the error document; the only refund after
+	// it is the single token of the abort request, which never retried
+	REQUIRE(quota->Available() ==
+	        HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST + HTTPRetryQuota::NO_RETRY_REFUND);
+}
+
+// A 400 RequestTimeout in the namespaced, CDATA form some stores emit is still the S3 parser's RequestTimeout: the
+// GET handler turns the status into an exception, core asks the provider, and the read is retried.
+static void RunNamespacedRequestTimeoutGetScenario(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+	config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+	config.failures.transient_get_failures = 2;
+	config.failures.namespaced_failure_body = true;
+	auto object_data = config.object.data;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::ConfigureRefresh(db, con, server, client_implementation, false);
+
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=3");
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=1");
+	S3TestHelper::RequireQueryOk(con, "SET force_download=true");
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	auto handle = fs.OpenFile(S3TestHelper::S3_PATH, FileFlags::FILE_FLAGS_READ);
+	string buffer(8, '\0');
+	handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 0);
+	REQUIRE(buffer == object_data.substr(0, buffer.size()));
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(S3TestHelper::CountObservations(observations, "GET", S3TestHelper::STALE_KEY_ID, 400) == 2);
+	REQUIRE(S3TestHelper::CountObservations(observations, "GET", S3TestHelper::STALE_KEY_ID, 200) == 1);
 }
 
 // A generic (non-RequestTimeout) 400 must fail on the first try. Uses a single-shot PUT so exactly one
@@ -1050,6 +1139,24 @@ TEST_CASE("HTTPFS retries transient S3 RequestTimeout across request types", "[h
 	}
 	SECTION("shared curl retries RequestTimeout on a fresh connection") {
 		RunFreshConnectionRetryScenario("curl", true);
+	}
+}
+
+TEST_CASE("A terminal S3 error document behind HTTP 200 keeps the retry charged", "[httpfs][s3][retry][upload]") {
+	SECTION("httplib") {
+		RunTerminalEmbeddedErrorAfterServerErrorScenario("httplib");
+	}
+	SECTION("curl") {
+		RunTerminalEmbeddedErrorAfterServerErrorScenario("curl");
+	}
+}
+
+TEST_CASE("HTTPFS retries a namespaced CDATA RequestTimeout on GET", "[httpfs][s3][retry]") {
+	SECTION("httplib") {
+		RunNamespacedRequestTimeoutGetScenario("httplib");
+	}
+	SECTION("curl") {
+		RunNamespacedRequestTimeoutGetScenario("curl");
 	}
 }
 
