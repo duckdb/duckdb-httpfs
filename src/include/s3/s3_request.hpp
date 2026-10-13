@@ -159,6 +159,8 @@ struct S3RequestUtil {
 	static string GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len);
 	static bool IsRequestTimeout(const HTTPResponse &response);
 	static bool IsRetryableReceivedResponse(const HTTPResponse &response);
+	//! Whether a received response got the operation through: a 2xx (or 304) that does not carry an S3 error document.
+	static bool IsSuccessfulResponse(const HTTPResponse &response);
 	//! Whether a raised request error carries a throttling status, matching core's throttled retry admission.
 	static bool IsThrottledError(const ErrorData &error);
 
