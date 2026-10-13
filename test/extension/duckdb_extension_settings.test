@@ -14,10 +14,10 @@ statement ok
 SET autoload_known_extensions = true;
 
 statement ok
-SET extension_directory = '__TEST_DIR__/custom_extension_directory';
+SET extension_directory = '{TEST_DIR}/custom_extension_directory';
 
 statement ok
-SET custom_extension_repository = '__TEST_DIR__/not_existing_folder'
+SET custom_extension_repository = '{TEST_DIR}/not_existing_folder'
 
 statement error
 FROM read_csv('https://some.org/file.csv');
@@ -25,7 +25,7 @@ FROM read_csv('https://some.org/file.csv');
 not_existing_folder
 
 statement ok
-SET autoinstall_extension_repository = '__TEST_DIR__/other_folder';
+SET autoinstall_extension_repository = '{TEST_DIR}/other_folder';
 
 statement error
 FROM read_csv('https://some.org/file.csv');

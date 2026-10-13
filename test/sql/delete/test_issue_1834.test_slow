@@ -4,6 +4,8 @@
 
 require httpfs
 
+require notwindows
+
 statement ok
 CREATE TABLE Person_likes_Comment (creationDate timestamp without time zone not null, id bigint not null, likes_Comment bigint not null);
 

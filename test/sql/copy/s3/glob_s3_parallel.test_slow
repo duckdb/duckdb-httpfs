@@ -1,0 +1,171 @@
+# name: test/sql/copy/s3/glob_s3_parallel.test_slow
+# description: Parallel S3 glob ordering, pagination and pruning
+# group: [s3]
+
+require parquet
+
+require httpfs
+
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+set ignore_error_messages
+
+statement ok
+SET threads = 1;
+SET s3_url_style = 'path';
+
+statement ok
+COPY (SELECT 0 AS i, 0 AS value WHERE false) TO 's3://test-bucket/glob_parallel/sparse' (FORMAT PARQUET, PARTITION_BY (i), OVERWRITE);
+
+foreach key_count 80 100
+
+loop d 0 14
+
+loop i 0 100
+
+onlyif key_count=80&&i<80
+statement ok
+COPY (SELECT {i} AS i) TO 's3://test-bucket/glob_parallel/sparse/d{d}/f{i}.parquet';
+
+onlyif key_count=100&&i>=80
+statement ok
+COPY (SELECT {i} AS i) TO 's3://test-bucket/glob_parallel/sparse/d{d}/f{i}.parquet';
+
+endloop
+
+endloop
+
+statement ok
+COPY (SELECT 0 AS i) TO 's3://test-bucket/glob_parallel/sparse/z.parquet';
+CREATE OR REPLACE TABLE expected AS
+SELECT 's3://test-bucket/glob_parallel/sparse/d' || d || '/f' || i || '.parquet' AS file
+FROM range(14) dirs(d), range({key_count}) files(i)
+UNION ALL SELECT 's3://test-bucket/glob_parallel/sparse/z.parquet';
+CALL enable_logging('HTTP');
+
+foreach async_threads 0 2 16
+
+statement ok
+SET async_threads = {async_threads};
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(file) = (SELECT list(file ORDER BY file) FROM expected)
+FROM glob('s3://test-bucket/glob_parallel/sparse/**/*.parquet');
+----
+true
+
+# Sparse directories use parallel listing when enough threads are available.
+query I
+SELECT bool_or(contains(request.url, 'delimiter=')) = ({async_threads} = 16)
+FROM duckdb_logs_parsed('HTTP');
+----
+true
+
+endloop
+
+statement ok
+CALL disable_logging();
+
+endloop
+
+statement ok
+SET s3_url_compatibility_mode = true;
+COPY (SELECT 0 AS i, 0 AS value WHERE false) TO 's3://test-bucket/glob_parallel/dense' (FORMAT PARQUET, PARTITION_BY (i), OVERWRITE);
+SET s3_url_compatibility_mode = false;
+
+# Both the root prefix and a child directory need a second page.
+loop i 0 1001
+
+statement ok
+COPY (SELECT {i} AS i) TO 's3://test-bucket/glob_parallel/dense/a/target/f{i}.parquet';
+COPY (SELECT {i} AS i) TO 's3://test-bucket/glob_parallel/dense/p{i}/target/file.parquet';
+
+endloop
+
+foreach path a/target/sub/file a/skip/file a/tail a0 z
+
+statement ok
+COPY (SELECT 0 AS i) TO 's3://test-bucket/glob_parallel/dense/{path}.parquet';
+
+endloop
+
+statement ok
+SET s3_url_compatibility_mode = true;
+COPY (SELECT 0 AS i) TO 's3://test-bucket/glob_parallel/dense/é?/file.parquet';
+SET s3_url_compatibility_mode = false;
+CREATE OR REPLACE TABLE expected AS
+SELECT 's3://test-bucket/glob_parallel/dense/' || path AS file
+FROM (
+    SELECT 'a/target/f' || i || '.parquet' AS path FROM range(1001) files(i)
+    UNION ALL SELECT 'p' || i || '/target/file.parquet' FROM range(1001) dirs(i)
+    UNION ALL SELECT unnest(['a/target/sub/file.parquet', 'a/skip/file.parquet',
+                            'a/tail.parquet', 'a0.parquet', 'z.parquet', 'é?/file.parquet'])
+);
+CALL enable_logging('HTTP');
+
+foreach async_threads 0 2 16
+
+statement ok
+SET async_threads = {async_threads};
+
+foreach recursive true false
+
+statement ok
+SET s3_allow_recursive_globbing = {recursive};
+
+foreach pattern **/*.parquet */target/*.parquet
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(file) = (SELECT list(file ORDER BY file) FROM expected
+                    WHERE '{pattern}' = '**/*.parquet' OR regexp_matches(file, '/target/[^/]+[.]parquet$'))
+FROM glob('s3://test-bucket/glob_parallel/dense/{pattern}');
+----
+true
+
+query I
+SELECT bool_or(contains(request.url, 'delimiter=')) = {recursive}
+FROM duckdb_logs_parsed('HTTP');
+----
+true
+
+onlyif pattern=*/target/*.parquet
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE contains(request.url, 'skip');
+----
+0
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT file = (SELECT min(file) FROM expected
+               WHERE '{pattern}' = '**/*.parquet' OR regexp_matches(file, '/target/[^/]+[.]parquet$'))
+FROM glob('s3://test-bucket/glob_parallel/dense/{pattern}') LIMIT 1;
+----
+true
+
+query I
+SELECT count(*) BETWEEN 1 AND CASE WHEN {recursive} THEN {async_threads} + 5 ELSE 1 END
+FROM duckdb_logs_parsed('HTTP');
+----
+true
+
+endloop
+
+endloop
+
+endloop

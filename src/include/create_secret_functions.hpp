@@ -4,7 +4,7 @@
 
 namespace duckdb {
 struct CreateSecretInput;
-struct S3AuthParams;
+class S3AuthParams;
 class CreateSecretFunction;
 class BaseSecret;
 struct SecretEntry;
@@ -36,8 +36,6 @@ protected:
 
 struct CreateBearerTokenFunctions {
 public:
-	static constexpr const char *HUGGINGFACE_TYPE = "huggingface";
-
 	//! Register all CreateSecretFunctions
 	static void Register(ExtensionLoader &loader);
 
@@ -50,6 +48,9 @@ protected:
 	//! Function for the "config" provider: creates secret from parameters passed by user
 	static unique_ptr<BaseSecret> CreateHuggingFaceSecretFromCredentialChain(ClientContext &context,
 	                                                                         CreateSecretInput &input);
+
+public:
+	static constexpr const char *HUGGINGFACE_TYPE = "huggingface";
 };
 
 } // namespace duckdb

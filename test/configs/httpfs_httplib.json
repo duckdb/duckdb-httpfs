@@ -1,0 +1,27 @@
+{
+  "description": "Run HTTPFS tests with statically loaded extensions and the httplib client.",
+  "on_init": "SET httpfs_client_implementation='httplib';",
+  "skip_error_messages": [],
+  "statically_loaded_extensions": [
+    "httpfs",
+    "parquet",
+    "core_functions"
+  ],
+  "skip_tests": [
+    {
+      "reason": "Connection caching is only implemented by the curl client.",
+      "paths": [
+        "test/sql/connection_caching.test",
+        "test/sql/connection_caching_default.test",
+        "test/sql/connection_caching_disable.test",
+        "test/sql/s3/connection_caching_s3.test"
+      ]
+    },
+    {
+      "reason": "The httplib client opens a connection per request; this test's thousands of uploads under the parallel runner make MinIO drop connections mid-request (\"Failed to read connection\"). The listing behavior it covers is client-independent and runs under the other configurations.",
+      "paths": [
+        "test/sql/copy/s3/glob_s3_parallel.test_slow"
+      ]
+    }
+  ]
+}

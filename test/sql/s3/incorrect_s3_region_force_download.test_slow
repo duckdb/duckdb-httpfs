@@ -1,0 +1,32 @@
+# name: test/sql/s3/incorrect_s3_region_force_download.test_slow
+# description: Test force_download when the incorrect S3 region is specified
+# group: [s3]
+
+require httpfs
+
+require parquet
+
+# override MinIO setup
+statement ok
+SET s3_access_key_id='';
+
+statement ok
+SET s3_secret_access_key='';
+
+statement ok
+SET s3_endpoint='s3.amazonaws.com';
+
+statement ok
+SET s3_region='us-east-1';
+
+statement ok
+SET force_download=true;
+
+# Full download path with wrong region exercises retrying after a failed cached-file download.
+query I
+SELECT COUNT(*) > 0 FROM (
+	FROM read_parquet('s3://coiled-datasets/timeseries/20-years/parquet/part.0.parquet')
+	LIMIT 1
+);
+----
+true

@@ -41,9 +41,6 @@ statement ok
 PRAGMA temp_directory=''
 
 statement ok
-SET s3_uploader_thread_limit = 5;
-
-statement ok
 CALL DBGEN(sf=1)
 
 query I

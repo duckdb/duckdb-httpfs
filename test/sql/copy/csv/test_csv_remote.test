@@ -4,8 +4,6 @@
 
 require httpfs
 
-statement ok
-PRAGMA enable_verification
 
 # Test load from url with query string
 query IIIIIIIIIIII

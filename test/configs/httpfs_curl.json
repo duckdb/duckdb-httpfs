@@ -1,0 +1,10 @@
+{
+  "description": "Run HTTPFS tests with statically loaded extensions and the curl client.",
+  "on_init": "SET httpfs_client_implementation='curl';",
+  "skip_error_messages": [],
+  "statically_loaded_extensions": [
+    "httpfs",
+    "parquet",
+    "core_functions"
+  ]
+}

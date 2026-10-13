@@ -56,17 +56,17 @@ CREATE VIEW lineitem as SELECT * FROM parquet_scan('s3://test-bucket/lineitem_sf
 loop i 1 9
 
 query I
-PRAGMA tpch(${i})
+PRAGMA tpch({i})
 ----
-<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q0${i}.csv
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q0{i}.csv
 
 endloop
 
 loop i 10 23
 
 query I
-PRAGMA tpch(${i})
+PRAGMA tpch({i})
 ----
-<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q${i}.csv
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q{i}.csv
 
 endloop

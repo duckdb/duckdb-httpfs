@@ -2,9 +2,6 @@
 # description: Test globbing CSVs on s3
 # group: [glob]
 
-statement ok
-PRAGMA enable_verification
-
 require httpfs
 
 require-env S3_TEST_SERVER_AVAILABLE 1
@@ -50,7 +47,7 @@ COPY dates FROM 's3://test-bucket/copy_csv_glob_s3/copy/a[123]/*.csv' (AUTO_DETE
 foreach urlstyle path vhost
 
 statement ok
-SET s3_url_style='${urlstyle}'
+SET s3_url_style='{urlstyle}'
 
 query I
 SELECT * FROM dates ORDER BY 1

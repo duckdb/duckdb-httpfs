@@ -10,6 +10,25 @@ set httpfs_client_implementation = 'default';
 statement ok
 set httpfs_client_implementation = 'httplib';
 
+statement ok
+set httpfs_connection_caching = false;
+
+statement ok
+set httpfs_client_implementation = 'curl';
+
+query I
+select current_setting('httpfs_connection_caching');
+----
+false
+
+statement ok
+set httpfs_client_implementation = 'httplib';
+
+query I
+select current_setting('httpfs_connection_caching');
+----
+false
+
 statement error
 set httpfs_client_implementation = 'something else';
 ----

@@ -1,0 +1,18 @@
+{
+  "description": "Run HTTPFS tests with extension autoloading.",
+  "autoloading": "available",
+  "skip_compiled": true,
+  "skip_error_messages": [],
+  "skip_tests": [
+    {
+      "reason": "These tests require HTTPFS to be available only from the local extension repository.",
+      "paths": [
+        "test/extension/autoloading_base.test",
+        "test/extension/autoloading_current_setting.test",
+        "test/extension/autoloading_filesystems.test",
+        "test/extension/autoloading_load_only.test",
+        "test/extension/autoloading_reset_setting.test"
+      ]
+    }
+  ]
+}

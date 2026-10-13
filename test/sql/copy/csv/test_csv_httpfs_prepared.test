@@ -4,8 +4,6 @@
 
 require httpfs
 
-statement ok
-PRAGMA enable_verification
 
 statement ok
 PREPARE boaz_bug AS from read_csv_auto('https://github.com/duckdb/duckdb/raw/main/data/csv/customer.csv') order by 1

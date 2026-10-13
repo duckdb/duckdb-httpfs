@@ -1,0 +1,25 @@
+# name: test/sql/curl_client/test_option_errors.test
+# description: Curl option failures are reported before sending a request
+# group: [curl_client]
+
+require httpfs
+
+set ignore_error_messages
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+statement ok
+SET http_retries=0;
+
+statement ok
+SET http_proxy='http://127.0.0.1:1';
+
+# libcurl rejects option strings larger than its 8 MB input limit.
+statement ok
+SET http_proxy_username=repeat('x', 8000001);
+
+statement error
+SELECT * FROM read_blob('http://127.0.0.1:1/curl-option-check');
+----
+Failed to set curl option

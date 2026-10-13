@@ -26,7 +26,9 @@ set ignore_error_messages
 statement ok
 CREATE TABLE mytable AS SELECT i as a, (i*2) as b, power(i,2) as c from range(0,10) tbl(i);
 
-
+# Clear files left by a retry of this test.
+statement ok
+COPY (SELECT * FROM mytable LIMIT 0) TO 's3://test-bucket/glob_ss' (FORMAT PARQUET, PARTITION_BY (a), OVERWRITE);
 
 # sanity check: the bucket is empty
 query I

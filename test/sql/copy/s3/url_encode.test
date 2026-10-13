@@ -32,60 +32,60 @@ CREATE TABLE test_4 as (SELECT 4 FROM range(0,5));
 foreach prefix s3:// r2:// s3a:// s3n://
 
 statement ok
-COPY test_1 TO '${prefix}test-bucket-public/url_encode/just because you can doesnt mean you should.parquet' (FORMAT 'parquet');
+COPY test_1 TO '{prefix}test-bucket-public/url_encode/just because you can doesnt mean you should.parquet' (FORMAT 'parquet');
 
 statement ok
-COPY test_2 TO '${prefix}test-bucket-public/url_encode/just+dont+use+plus+or+spaces+please.parquet' (FORMAT 'parquet');
+COPY test_2 TO '{prefix}test-bucket-public/url_encode/just+dont+use+plus+or+spaces+please.parquet' (FORMAT 'parquet');
 
 statement ok
-COPY test_3 TO '${prefix}test-bucket-public/url_encode/should:avoid:using:colon:in:paths.parquet' (FORMAT 'parquet');
+COPY test_3 TO '{prefix}test-bucket-public/url_encode/should:avoid:using:colon:in:paths.parquet' (FORMAT 'parquet');
 
 # For S3 urls spaces are fine
 query I
-SELECT * FROM "${prefix}test-bucket-public/url_encode/just because you can doesnt mean you should.parquet" LIMIT 1;
+SELECT * FROM "{prefix}test-bucket-public/url_encode/just because you can doesnt mean you should.parquet" LIMIT 1;
 ----
 1
 
 # In S3 urls, + means a plus symbol
 query I
-SELECT * FROM "${prefix}test-bucket-public/url_encode/just+dont+use+plus+or+spaces+please.parquet" LIMIT 1;
+SELECT * FROM "{prefix}test-bucket-public/url_encode/just+dont+use+plus+or+spaces+please.parquet" LIMIT 1;
 ----
 2
 
 # Colons in S3 urls are encoded by duckdb internaly like boto3 (issue #5502)
 query I
-SELECT * FROM "${prefix}test-bucket-public/url_encode/should:avoid:using:colon:in:paths.parquet" LIMIT 1;
+SELECT * FROM "{prefix}test-bucket-public/url_encode/should:avoid:using:colon:in:paths.parquet" LIMIT 1;
 ----
 3
 
 # NOTE! For HTTP(s) urls, the + symbol is not encoded by duckdb, leaving it up to the server to decide if it should be interpreted
 # as a space or a plus. In the case of AWS S3, they are interpreted as encoded spaces, however Minio does not
 #query I
-#SELECT * FROM "http://test-bucket-public.${DUCKDB_S3_ENDPOINT}/url_encode/just+because+you+can+doesnt+mean+you+should.parquet" LIMIT 1;
+#SELECT * FROM "http://test-bucket-public.{DUCKDB_S3_ENDPOINT}/url_encode/just+because+you+can+doesnt+mean+you+should.parquet" LIMIT 1;
 #----
 #1
 
 # For HTTP urls, we also allow regular spaces, which will get encoded to %20 by duckdb
 query I
-SELECT * FROM "http://test-bucket-public.${DUCKDB_S3_ENDPOINT}/url_encode/just because you can doesnt mean you should.parquet" LIMIT 1;
+SELECT * FROM "http://test-bucket-public.{DUCKDB_S3_ENDPOINT}/url_encode/just because you can doesnt mean you should.parquet" LIMIT 1;
 ----
 1
 
 # For HTTP urls from AWS with + symbols, encoding them with %2B is required
 query I
-SELECT * FROM "http://test-bucket-public.${DUCKDB_S3_ENDPOINT}/url_encode/just%2Bdont%2Buse%2Bplus%2Bor%2Bspaces%2Bplease.parquet" LIMIT 1;
+SELECT * FROM "http://test-bucket-public.{DUCKDB_S3_ENDPOINT}/url_encode/just%2Bdont%2Buse%2Bplus%2Bor%2Bspaces%2Bplease.parquet" LIMIT 1;
 ----
 2
 
 # However Minio interprets them as spaces so this works too
 query I
-SELECT * FROM "http://test-bucket-public.${DUCKDB_S3_ENDPOINT}/url_encode/just+dont+use+plus+or+spaces+please.parquet" LIMIT 1;
+SELECT * FROM "http://test-bucket-public.{DUCKDB_S3_ENDPOINT}/url_encode/just+dont+use+plus+or+spaces+please.parquet" LIMIT 1;
 ----
 2
 
 # Due to our support for query parameters, this will fail
 statement error
-COPY test_4 TO '${prefix}test-bucket-public/url_encode/question?marks?are?even?worse.parquet' (FORMAT 'parquet');
+COPY test_4 TO '{prefix}test-bucket-public/url_encode/question?marks?are?even?worse.parquet' (FORMAT 'parquet');
 ----
 Invalid query parameters found.
 
@@ -95,16 +95,16 @@ statement ok
 SET s3_url_compatibility_mode=true;
 
 statement ok
-COPY test_4 TO '${prefix}test-bucket-public/url_encode/question?marks?and*stars[and]brackets.parquet' (FORMAT 'parquet');
+COPY test_4 TO '{prefix}test-bucket-public/url_encode/question?marks?and*stars[and]brackets.parquet' (FORMAT 'parquet');
 
 query I
-SELECT * FROM "${prefix}test-bucket-public/url_encode/question?marks?and*stars[and]brackets.parquet" LIMIT 1;
+SELECT * FROM "{prefix}test-bucket-public/url_encode/question?marks?and*stars[and]brackets.parquet" LIMIT 1;
 ----
 4
 
 # HTTP urls will be encoded here
 query I
-SELECT * FROM "http://test-bucket-public.${DUCKDB_S3_ENDPOINT}/url_encode/question%3Fmarks%3Fand%2Astars%5Band%5Dbrackets.parquet" LIMIT 1;
+SELECT * FROM "http://test-bucket-public.{DUCKDB_S3_ENDPOINT}/url_encode/question%3Fmarks%3Fand%2Astars%5Band%5Dbrackets.parquet" LIMIT 1;
 ----
 4
 
@@ -116,11 +116,11 @@ statement ok
 set s3_endpoint='s3.some.random.endpoint.com';
 
 statement error
-SELECT * FROM '${prefix}test-bucket/whatever.parquet';
+SELECT * FROM '{prefix}test-bucket/whatever.parquet';
 ----
 <REGEX>:.*IO Error.*Could not.*error for HTTP HEAD to.*
 
 statement ok
-set s3_endpoint='${DUCKDB_S3_ENDPOINT}'
+set s3_endpoint='{DUCKDB_S3_ENDPOINT}'
 
 endloop

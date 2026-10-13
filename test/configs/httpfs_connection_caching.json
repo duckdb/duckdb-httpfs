@@ -1,0 +1,10 @@
+{
+  "description": "Run HTTPFS tests with statically loaded extensions and curl connection caching enabled.",
+  "on_init": "SET httpfs_client_implementation='curl'; SET httpfs_connection_caching=true;",
+  "skip_error_messages": [],
+  "statically_loaded_extensions": [
+    "httpfs",
+    "parquet",
+    "core_functions"
+  ]
+}

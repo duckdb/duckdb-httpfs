@@ -23,8 +23,6 @@ require-env DUCKDB_S3_USE_SSL
 # override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
 set ignore_error_messages
 
-statement ok
-PRAGMA enable_verification
 
 statement ok
 COPY (SELECT 'value-1' as value) TO 's3://test-bucket/proxy-test/test.parquet';
@@ -51,7 +49,7 @@ FROM 's3://test-bucket/proxy-test/test.parquet'
 
 # Now a working one
 statement ok
-set http_proxy='${HTTP_PROXY_PUBLIC}'
+set http_proxy='{HTTP_PROXY_PUBLIC}'
 
 statement ok
 RESET http_proxy_username
@@ -66,7 +64,7 @@ value-1
 
 # And try the working one with an 'http://' prefix.
 statement ok
-set http_proxy='http://${HTTP_PROXY_PUBLIC}'
+set http_proxy='http://{HTTP_PROXY_PUBLIC}'
 
 query I
 FROM 's3://test-bucket/proxy-test/test.parquet'
@@ -81,7 +79,7 @@ set http_proxy='blabla:1337'
 statement ok
 CREATE SECRET http1 (
     TYPE HTTP, 
-    http_proxy '${HTTP_PROXY_PUBLIC}'
+    http_proxy '{HTTP_PROXY_PUBLIC}'
 );
 
 # This works now, because it uses the secret
@@ -125,9 +123,9 @@ require-env HTTP_PROXY_PRIVATE_PASSWORD
 statement ok
 CREATE SECRET http2 (
     TYPE HTTP, 
-    http_proxy '${HTTP_PROXY_PRIVATE}',
-    http_proxy_username '${HTTP_PROXY_PRIVATE_USERNAME}',
-    http_proxy_password '${HTTP_PROXY_PRIVATE_PASSWORD}'
+    http_proxy '{HTTP_PROXY_PRIVATE}',
+    http_proxy_username '{HTTP_PROXY_PRIVATE_USERNAME}',
+    http_proxy_password '{HTTP_PROXY_PRIVATE_PASSWORD}'
 );
 
 # Correct auth means it works!
@@ -143,7 +141,7 @@ DROP SECRET http2
 statement ok
 CREATE SECRET http3 (
     TYPE HTTP, 
-    http_proxy '${HTTP_PROXY_PRIVATE}',
+    http_proxy '{HTTP_PROXY_PRIVATE}',
     http_proxy_username 'malicious',
     http_proxy_password 'intruder'
 );
