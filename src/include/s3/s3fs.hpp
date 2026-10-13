@@ -121,9 +121,12 @@ public:
 	unique_ptr<HTTPResponse> GetRangeRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
 	                                         const HTTPReadConfig &read_config, idx_t file_offset,
 	                                         data_ptr_t buffer_out, idx_t buffer_out_len) override;
+	//! `validate` is the handler's reading of a received response, run by the executor before the retry quota is
+	//! settled (S3RequestExecutor::ValidateCallback); without it a 2xx without an S3 error document is a success.
 	S3RequestResult PostRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
 	                            string &buffer_out, const_data_ptr_t buffer_in, idx_t buffer_in_len,
-	                            const S3RequestQuery &query = S3RequestQuery());
+	                            const S3RequestQuery &query = S3RequestQuery(),
+	                            const S3RequestExecutor::ValidateCallback &validate = {});
 	S3RequestResult PutRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
 	                           const_data_ptr_t buffer_in, idx_t buffer_in_len,
 	                           const S3RequestQuery &query = S3RequestQuery());

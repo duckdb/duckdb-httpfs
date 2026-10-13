@@ -306,6 +306,54 @@ static void RunTerminalEmbeddedErrorAfterServerErrorScenario(const string &clien
 	        HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST + HTTPRetryQuota::NO_RETRY_REFUND);
 }
 
+// HTTP 500, then an HTTP 200 whose completion document the handler cannot read (empty, or cut off mid-XML): the
+// completion's outcome is unknown and is reported as such, as before. The handler validates the response before the
+// executor settles the quota, so the 2xx core saw does not refund the retry the 500 consumed.
+static void RunUnreadableCompletionAfterServerErrorScenario(const string &client_implementation,
+                                                            MockS3MultipartCompletionBehavior behavior,
+                                                            const string &error_fragment) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+	config.upload.initial_published_object = "existing object";
+	config.upload.completion_behavior = behavior;
+	config.failures.completion_fault.count = 1;
+	config.failures.completion_fault.status = 500;
+	config.failures.completion_fault.code = "InternalError";
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureUploadTest(db, con, server, client_implementation, 3);
+	auto &http_util = HTTPUtil::Get(*db.instance);
+	auto quota = http_util.GetRetryQuota("http://" + server.Endpoint());
+	REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY);
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto handle = OpenWriter(con);
+	auto payload = MultipartPayload();
+	handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+	ErrorData error;
+	auto first_error = RequireError([&]() { handle->Sync(); }, error);
+	RequireError([&]() { handle->Close(); });
+	handle.reset();
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	// The 500 was retried once; the 200 that followed could not be read and was not retried or aborted
+	S3TestHelper::RequireCompletionIdentity(observations, 2);
+	auto completions = S3TestHelper::CompletionObservations(observations);
+	REQUIRE(completions[0].status == 500);
+	REQUIRE(completions[1].status == 200);
+	REQUIRE(error.Type() == ExceptionType::IO);
+	REQUIRE(StringUtil::Contains(first_error, error_fragment));
+	REQUIRE(CountObservationsTarget(observations, "DELETE", 204, "uploadId") == 0);
+	// The retry the 500 consumed is not refunded by a 2xx the handler could not validate; nothing else ran after it
+	REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST);
+}
+
 // A 400 RequestTimeout in the namespaced, CDATA form some stores emit is still the S3 parser's RequestTimeout: the
 // GET handler turns the status into an exception, core asks the provider, and the read is retried.
 static void RunNamespacedRequestTimeoutGetScenario(const string &client_implementation) {
@@ -1148,6 +1196,26 @@ TEST_CASE("A terminal S3 error document behind HTTP 200 keeps the retry charged"
 	}
 	SECTION("curl") {
 		RunTerminalEmbeddedErrorAfterServerErrorScenario("curl");
+	}
+}
+
+TEST_CASE("An unreadable completion response after a server error keeps the retry charged",
+          "[httpfs][s3][retry][upload]") {
+	SECTION("httplib, empty completion response") {
+		RunUnreadableCompletionAfterServerErrorScenario("httplib", MockS3MultipartCompletionBehavior::EMPTY_SUCCESS,
+		                                                "malformed XML");
+	}
+	SECTION("httplib, malformed completion response") {
+		RunUnreadableCompletionAfterServerErrorScenario("httplib", MockS3MultipartCompletionBehavior::MALFORMED_SUCCESS,
+		                                                "malformed XML");
+	}
+	SECTION("curl, empty completion response") {
+		RunUnreadableCompletionAfterServerErrorScenario("curl", MockS3MultipartCompletionBehavior::EMPTY_SUCCESS,
+		                                                "malformed XML");
+	}
+	SECTION("curl, malformed completion response") {
+		RunUnreadableCompletionAfterServerErrorScenario("curl", MockS3MultipartCompletionBehavior::MALFORMED_SUCCESS,
+		                                                "malformed XML");
 	}
 }
 
