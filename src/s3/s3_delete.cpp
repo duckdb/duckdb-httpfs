@@ -87,7 +87,10 @@ void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opene
 	FileOpenerInfo info = {path};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 	auto session = S3RequestExecutor::CreateSession(opener, path, auth_params);
-	auto request_result = DeleteRequest(*session, S3RequestOperation::DELETE_OBJECT, path, {});
+	auto request_result = DeleteRequest(
+	    *session, S3RequestOperation::DELETE_OBJECT, path, {}, [](const S3RequestData &, const HTTPResponse &response) {
+		    return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200, HTTPStatusCode::NoContent_204});
+	    });
 	auto &res = request_result.response;
 	if (res->HasRequestError()) {
 		throw IOException("S3 delete request for \"%s\" could not be completed: %s", request_result.context.display_url,
@@ -264,10 +267,12 @@ static string GetS3DeleteContentMD5(const string &body) {
 }
 
 S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
-                                                     const string &body, idx_t key_count, string &result) {
+                                                     const string &body, idx_t key_count,
+                                                     BulkDeleteDocument &document) {
 	auto payload_hash =
 	    S3RequestUtil::GetPayloadHash(GetEncryptionUtil(), const_data_ptr_cast(body.data()), body.length());
 	auto content_md5 = GetS3DeleteContentMD5(body);
+	string result;
 	return S3RequestExecutor::RunSession(
 	    GetEncryptionUtil(), session,
 	    S3RequestSpec {secret_lookup_url, S3RequestOperation::DELETE_OBJECTS,
@@ -289,6 +294,25 @@ S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session
 		                          const_data_ptr_cast(body.data()), body.length(), [&](BaseRequest &request) {
 			                          return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		                          });
+	    },
+	    [&](const S3RequestData &, const HTTPResponse &response) {
+		    // DeleteObjects reports its outcome in the document behind HTTP 200: a DeleteResult without per-key errors
+		    // deleted the batch; one with errors, or an S3 error document, failed it; anything else cannot be read.
+		    document = BulkDeleteDocument();
+		    if (response.HasRequestError() || response.status != HTTPStatusCode::OK_200) {
+			    return S3OperationOutcome::FAILURE;
+		    }
+		    S3DeleteObjectsResult delete_result;
+		    if (S3XMLResponseParser::TryParseDeleteObjects(response.body, delete_result)) {
+			    document.result = std::move(delete_result);
+			    return document.result->errors.empty() ? S3OperationOutcome::SUCCESS : S3OperationOutcome::FAILURE;
+		    }
+		    S3XMLError error;
+		    if (S3XMLResponseParser::TryParseError(response.body, error)) {
+			    document.error = std::move(error);
+			    return S3OperationOutcome::FAILURE;
+		    }
+		    return S3OperationOutcome::UNKNOWN;
 	    });
 }
 
@@ -340,9 +364,9 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 		for (idx_t batch_start = 0; batch_start < keys.size(); batch_start += maximum_key_count) {
 			auto batch_end = MinValue<idx_t>(batch_start + maximum_key_count, keys.size());
 			auto body = S3XMLWriter::WriteDeleteObjectsRequest(keys, batch_start, batch_end);
-			string result;
+			BulkDeleteDocument document;
 			auto request_result = RunS3BulkDeleteRequest(*delete_session, entries[batch_start].secret_lookup_path, body,
-			                                             batch_end - batch_start, result);
+			                                             batch_end - batch_start, document);
 			auto &res = request_result.response;
 			auto &request_context = request_result.context;
 
@@ -353,11 +377,17 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 			if (res->status != HTTPStatusCode::OK_200) {
 				throw S3RequestUtil::GetRequestError(request_context, *res);
 			}
-
-			S3DeleteObjectsResult delete_result;
-			if (!S3XMLResponseParser::TryParseDeleteObjects(result, delete_result)) {
+			// The outcome was read when the response was validated; report what the document said
+			if (document.error) {
+				throw HTTPException(*res, "S3 bulk delete for \"%s\" failed: %s%s%s", request_context.display_url,
+				                    document.error->code.empty() ? "S3 returned an embedded error"
+				                                                 : document.error->code,
+				                    document.error->message.empty() ? "" : ": ", document.error->message);
+			}
+			if (!document.result) {
 				throw IOException("Malformed S3 bulk delete response for \"%s\"", request_context.display_url);
 			}
+			auto &delete_result = *document.result;
 			if (!delete_result.errors.empty()) {
 				vector<string> errors;
 				for (const auto &error : delete_result.errors) {

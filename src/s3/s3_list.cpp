@@ -508,6 +508,17 @@ S3ListObjectsV2Result AWSListObjectV2::Request(EncryptionUtil &encryption_util, 
 		    GetRequestInfo get_request(request_data.http_url, request_data.headers, params, nullptr, nullptr);
 		    return S3RequestExecutor::SendSessionRequest(session, request_data, get_request);
 	    },
+	    [&](const S3RequestData &, const HTTPResponse &response) {
+		    // The listing's result is the document the response callback below kept (it retries one it cannot read
+		    // on a fresh connection); a 200 that still has none is an outcome the caller reports as unknown.
+		    if (parsed_result) {
+			    return S3OperationOutcome::SUCCESS;
+		    }
+		    if (!response.HasRequestError() && response.status == HTTPStatusCode::OK_200) {
+			    return S3OperationOutcome::UNKNOWN;
+		    }
+		    return S3OperationOutcome::FAILURE;
+	    },
 	    [&](const S3RequestData &request_data, const string &previous_region, const string &correct_region) {
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    DUCKDB_LOG_WARNING(

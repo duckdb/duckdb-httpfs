@@ -163,9 +163,16 @@ struct MockS3ListConfig {
 	idx_t tree_page_size = 1000;
 };
 
+struct MockS3BulkDeleteResponse {
+	int status;
+	string body;
+};
+
 struct MockS3BulkDeleteConfig {
 	//! Reject DeleteObjects requests containing more than this many keys
 	optional_idx maximum_key_count;
+	//! Responses served to the leading DeleteObjects requests, one each in order, before the default empty DeleteResult
+	vector<MockS3BulkDeleteResponse> scripted;
 };
 
 struct MockS3RangeConfig {

@@ -354,6 +354,112 @@ static void RunUnreadableCompletionAfterServerErrorScenario(const string &client
 	REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST);
 }
 
+// HTTP 200 with an InternalError document (S3 did not act, so the executor retries it), then an HTTP 200 whose body
+// the bulk delete cannot read as a DeleteResult, or one that reports a failed key: RemoveFiles reports it as before.
+// The bulk delete validates the result document before the executor settles the quota, so the 2xx core saw does not
+// refund the retry the error document consumed. An empty error fragment is the control: a DeleteResult without errors.
+static void RunBulkDeleteValidationScenario(const string &client_implementation, const string &second_body,
+                                            const string &error_fragment) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+	// Use a refresh target that bulk deletes never exercise, so credential refresh never triggers here.
+	config.auth.refresh_target = MockS3RefreshTarget::PUT;
+	config.bulk_delete.scripted.push_back(
+	    {200, "<Error><Code>InternalError</Code><Message>We encountered an internal error.</Message></Error>"});
+	config.bulk_delete.scripted.push_back({200, second_body});
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::ConfigureRefresh(db, con, server, client_implementation, false);
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=3");
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=1");
+	auto quota = HTTPUtil::Get(*db.instance).GetRetryQuota("http://" + server.Endpoint());
+	REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY);
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	string error;
+	if (error_fragment.empty()) {
+		fs.RemoveFiles({S3TestHelper::S3_PATH});
+	} else {
+		error = RequireError([&]() { fs.RemoveFiles({S3TestHelper::S3_PATH}); });
+	}
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	INFO(error);
+	// The error document was retried once; the 200 that followed was not
+	REQUIRE(observations.size() == 2);
+	REQUIRE(CountObservationsTarget(observations, "POST", 200, "delete") == 2);
+	if (error_fragment.empty()) {
+		// A DeleteResult without errors deleted the batch: the retry is refunded
+		REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY);
+	} else {
+		REQUIRE(StringUtil::Contains(error, error_fragment));
+		// Neither a result the handler cannot read nor one reporting a failed key refunds the retry
+		REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST);
+	}
+}
+
+static void RunBulkDeleteValidationScenarios(const string &client_implementation) {
+	const string delete_result_open = "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
+	RunBulkDeleteValidationScenario(client_implementation, "", "Malformed S3 bulk delete response");
+	RunBulkDeleteValidationScenario(client_implementation, delete_result_open + "<Deleted><Key>object.bin",
+	                                "Malformed S3 bulk delete response");
+	RunBulkDeleteValidationScenario(client_implementation,
+	                                delete_result_open + "<Error><Key>object.bin</Key><Code>AccessDenied</Code>"
+	                                                     "<Message>Access Denied</Message></Error></DeleteResult>",
+	                                "AccessDenied: Access Denied");
+	RunBulkDeleteValidationScenario(client_implementation, delete_result_open + "</DeleteResult>", "");
+}
+
+// A part upload answered with HTTP 200 but no ETag: the part is unusable, the upload fails and is aborted, as before.
+// The part upload validates its required header before the executor settles the quota, so that 200 is no success
+// for the quota; only the initialization and the abort, which did get through, refund their token.
+static void RunPartWithoutETagScenario(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+	config.upload.initial_published_object = "existing object";
+	config.upload.multipart_part_put.etag = MockS3ETagBehavior::OMIT;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureUploadTest(db, con, server, client_implementation, 3);
+	auto quota = HTTPUtil::Get(*db.instance).GetRetryQuota("http://" + server.Endpoint());
+	// Leave room below the capacity so that the refunds of the requests that got through are visible
+	REQUIRE(quota->TryAcquire(2 * HTTPRetryQuota::RETRY_COST));
+
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto handle = OpenWriter(con);
+	const auto available_before = quota->Available();
+	auto payload = MultipartPayload();
+	auto first_error = RequireError([&]() {
+		handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+		handle->Sync();
+	});
+	RequireError([&]() { handle->Close(); });
+	handle.reset();
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(StringUtil::Contains(first_error, "Unexpected response when uploading to S3"));
+	REQUIRE(CountObservationsTarget(observations, "POST", 200, "uploads") == 1);
+	REQUIRE(CountObservationsTarget(observations, "PUT", 200, "partNumber") >= 1);
+	REQUIRE(CountObservationsTarget(observations, "POST", 200, "uploadId") == 0);
+	REQUIRE(CountObservationsTarget(observations, "DELETE", 204, "uploadId") == 1);
+	REQUIRE(server.UploadedObject() == "existing object");
+	// The initialization and the abort got through and refund a token each; the parts without an ETag do not
+	REQUIRE(quota->Available() == available_before + 2 * HTTPRetryQuota::NO_RETRY_REFUND);
+}
+
 // A 400 RequestTimeout in the namespaced, CDATA form some stores emit is still the S3 parser's RequestTimeout: the
 // GET handler turns the status into an exception, core asks the provider, and the read is retried.
 static void RunNamespacedRequestTimeoutGetScenario(const string &client_implementation) {
@@ -1216,6 +1322,24 @@ TEST_CASE("An unreadable completion response after a server error keeps the retr
 	SECTION("curl, malformed completion response") {
 		RunUnreadableCompletionAfterServerErrorScenario("curl", MockS3MultipartCompletionBehavior::MALFORMED_SUCCESS,
 		                                                "malformed XML");
+	}
+}
+
+TEST_CASE("A bulk delete result the handler cannot read keeps the retry charged", "[httpfs][s3][delete][retry]") {
+	SECTION("httplib") {
+		RunBulkDeleteValidationScenarios("httplib");
+	}
+	SECTION("curl") {
+		RunBulkDeleteValidationScenarios("curl");
+	}
+}
+
+TEST_CASE("A part upload without an ETag keeps its token charged", "[httpfs][s3][retry][upload]") {
+	SECTION("httplib") {
+		RunPartWithoutETagScenario("httplib");
+	}
+	SECTION("curl") {
+		RunPartWithoutETagScenario("curl");
 	}
 }
 

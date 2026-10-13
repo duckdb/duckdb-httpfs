@@ -675,20 +675,17 @@ static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
 }
 
-bool S3RequestUtil::IsSuccessfulResponse(const HTTPResponse &response) {
-	if (response.HasRequestError() || !response.Success()) {
-		return false;
+S3OperationOutcome S3RequestUtil::ValidateStatus(const HTTPResponse &response,
+                                                 std::initializer_list<HTTPStatusCode> accepted_statuses) {
+	if (response.HasRequestError()) {
+		return S3OperationOutcome::FAILURE;
 	}
-	if (response.body.empty()) {
-		return true;
+	for (const auto accepted : accepted_statuses) {
+		if (response.status == accepted) {
+			return S3OperationOutcome::SUCCESS;
+		}
 	}
-	// S3 answers some operations (multipart completion, bulk delete) with an error document behind HTTP 200.
-	S3XMLError error;
-	return !S3XMLResponseParser::TryParseError(response.body, error);
-}
-
-S3OperationOutcome S3RequestUtil::ValidateResponse(const HTTPResponse &response) {
-	return IsSuccessfulResponse(response) ? S3OperationOutcome::SUCCESS : S3OperationOutcome::FAILURE;
+	return S3OperationOutcome::FAILURE;
 }
 
 S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,
@@ -739,17 +736,25 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 			                                        response->status == HTTPStatusCode::ServiceUnavailable_503);
 			const auto retry_after =
 			    throttled && response->HasHeader("Retry-After") ? response->GetHeaderValue("Retry-After") : string();
-			// The verdict is the handler's: it validates the response it is about to interpret (by default a 2xx
-			// without an S3 error document got the operation through) before the quota is settled. Anything that is
-			// not retried and not a validated success failed for good as far as the quota is concerned: an error
-			// document behind HTTP 200 (e.g. InvalidPart), a body the handler cannot read (an empty or malformed
-			// completion document, which it reports to its caller as an unknown outcome) and a transport error.
+			// The verdict is the operation's: it validates the response it is about to interpret (its accepted
+			// statuses, a required header, the result document) before the quota is settled. Anything that is not
+			// retried and not a validated success failed for good as far as the quota is concerned: an error document
+			// behind HTTP 200 (e.g. InvalidPart), a body the operation cannot read (an empty or malformed completion
+			// or DeleteResult document, which it reports to its caller as an unknown outcome), a part without its
+			// ETag and a transport error. The operation reads every received response it did not correct, so what it
+			// kept describes the last one even when that was a retryable response the budget would not retry.
 			auto outcome = S3OperationOutcome::FAILURE;
-			if (received_response && !should_retry) {
-				outcome = validate ? validate(request_data, *response) : S3RequestUtil::ValidateResponse(*response);
+			if (received_response) {
+				D_ASSERT(validate);
+				outcome = validate(request_data, *response);
+				if (should_retry) {
+					outcome = S3OperationOutcome::FAILURE;
+				}
 			}
-			result = {std::move(response), S3RequestContext {request_data.operation, std::move(request_data.captured),
-			                                                 std::move(request_data.display_url)}};
+			result.response = std::move(response);
+			result.context = S3RequestContext {request_data.operation, std::move(request_data.captured),
+			                                   std::move(request_data.display_url)};
+			result.outcome = outcome;
 			if (should_retry) {
 				return throttled ? HTTPRetryDecision::Throttled(retry_after) : HTTPRetryDecision::Retry();
 			}
@@ -853,9 +858,9 @@ bool S3RequestExecutor::SetSessionRegion(HTTPRequestSession &session, const stri
 
 S3RequestResult S3RequestExecutor::RunSession(EncryptionUtil &encryption_util, HTTPRequestSession &session,
                                               const S3RequestSpec &spec, const RequestCallback &request,
+                                              const ValidateCallback &validate,
                                               const RegionRedirectCallback &region_redirect,
-                                              const ReceivedResponseCallback &response_callback,
-                                              const ValidateCallback &validate) {
+                                              const ReceivedResponseCallback &response_callback) {
 	return S3RequestExecutor::Run(
 	    encryption_util, session, spec, request,
 	    [&](const S3RequestData &request_data) { return S3RequestExecutor::TryRefreshSession(session, request_data); },
@@ -975,11 +980,12 @@ S3RequestResult S3FileSystem::PostRequest(HTTPRequestSession &session, S3Request
 			                          return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		                          });
 	    },
-	    {}, {}, validate);
+	    validate);
 }
 
 S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &url,
-                                         const_data_ptr_t buffer_in, idx_t buffer_in_len, const S3RequestQuery &query) {
+                                         const_data_ptr_t buffer_in, idx_t buffer_in_len, const S3RequestQuery &query,
+                                         const S3RequestExecutor::ValidateCallback &validate) {
 	if (S3RequestUtil::GetOperationInfo(operation).request_type != RequestType::PUT_REQUEST) {
 		throw InternalException("S3 PutRequest requires a PUT operation");
 	}
@@ -995,7 +1001,8 @@ S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestO
 			                         request.try_request = true;
 			                         return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		                         });
-	    });
+	    },
+	    validate);
 }
 
 void S3FileSystem::ValidateResponseVersion(HTTPFileHandle &handle, const HTTPReadConfig &read_config,
@@ -1027,6 +1034,13 @@ void S3FileSystem::ValidateResponseVersion(HTTPFileHandle &handle, const HTTPRea
 	}
 }
 
+//! What httpfs's read path takes as a delivered object or range (TryRangeRequest, RetryFileInfoWithRange), plus the
+//! 304 of a conditional read whose copy is still current. Everything else the caller turns into an error.
+static S3OperationOutcome ValidateReadStatus(const HTTPResponse &response) {
+	return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200, HTTPStatusCode::PartialContent_206,
+	                                                HTTPStatusCode::Accepted_202, HTTPStatusCode::NotModified_304});
+}
+
 unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	return S3RequestExecutor::RunHandle(
@@ -1038,6 +1052,9 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const str
 		               request_data.http_url, request_data.headers, params, [&](BaseRequest &request) {
 			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
 		               });
+	           },
+	           [](const S3RequestData &, const HTTPResponse &response) {
+		           return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200});
 	           })
 	    .response;
 }
@@ -1059,7 +1076,8 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 		               [&](BaseRequest &request) {
 			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
 		               });
-	           })
+	           },
+	           [](const S3RequestData &, const HTTPResponse &response) { return ValidateReadStatus(response); })
 	    .response;
 }
 
@@ -1069,40 +1087,46 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	const S3RequestSpec spec {
 	    s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version, read_config.condition};
-	return S3RequestExecutor::RunHandle(GetEncryptionUtil(), s3_handle, spec,
-	                                    [&](S3RequestData &request_data) {
-		                                    auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		                                    return RunGetRangeRequest(
-		                                        s3_handle, request_data.http_url, request_data.headers, params,
-		                                        read_config, file_offset, buffer_out, buffer_out_len,
-		                                        [&](const HTTPResponse &response) {
-			                                        return S3RequestUtil::GetRequestError(request_data, response);
-		                                        },
-		                                        [&](BaseRequest &request) {
-			                                        return S3RequestExecutor::SendHandleRequest(s3_handle, request_data,
-			                                                                                    request);
-		                                        });
-	                                    })
+	return S3RequestExecutor::RunHandle(
+	           GetEncryptionUtil(), s3_handle, spec,
+	           [&](S3RequestData &request_data) {
+		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		           return RunGetRangeRequest(
+		               s3_handle, request_data.http_url, request_data.headers, params, read_config, file_offset,
+		               buffer_out, buffer_out_len,
+		               [&](const HTTPResponse &response) {
+			               return S3RequestUtil::GetRequestError(request_data, response);
+		               },
+		               [&](BaseRequest &request) {
+			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
+		               });
+	           },
+	           [](const S3RequestData &, const HTTPResponse &response) { return ValidateReadStatus(response); })
 	    .response;
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	return S3RequestExecutor::RunHandle(GetEncryptionUtil(), s3_handle,
-	                                    S3RequestSpec {s3_url, S3RequestOperation::DELETE_OBJECT, {}, "", "", ""},
-	                                    [&](S3RequestData &request_data) {
-		                                    auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		                                    return RunDeleteRequest(request_data.http_url, request_data.headers, params,
-		                                                            [&](BaseRequest &request) {
-			                                                            return S3RequestExecutor::SendHandleRequest(
-			                                                                s3_handle, request_data, request);
-		                                                            });
-	                                    })
+	return S3RequestExecutor::RunHandle(
+	           GetEncryptionUtil(), s3_handle,
+	           S3RequestSpec {s3_url, S3RequestOperation::DELETE_OBJECT, {}, "", "", ""},
+	           [&](S3RequestData &request_data) {
+		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		           return RunDeleteRequest(
+		               request_data.http_url, request_data.headers, params, [&](BaseRequest &request) {
+			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
+		               });
+	           },
+	           [](const S3RequestData &, const HTTPResponse &response) {
+		           return S3RequestUtil::ValidateStatus(response,
+		                                                {HTTPStatusCode::OK_200, HTTPStatusCode::NoContent_204});
+	           })
 	    .response;
 }
 
 S3RequestResult S3FileSystem::DeleteRequest(HTTPRequestSession &session, S3RequestOperation operation,
-                                            const string &s3_url, const S3RequestQuery &query) {
+                                            const string &s3_url, const S3RequestQuery &query,
+                                            const S3RequestExecutor::ValidateCallback &validate) {
 	if (S3RequestUtil::GetOperationInfo(operation).request_type != RequestType::DELETE_REQUEST) {
 		throw InternalException("S3 DeleteRequest requires a DELETE operation");
 	}
@@ -1114,7 +1138,8 @@ S3RequestResult S3FileSystem::DeleteRequest(HTTPRequestSession &session, S3Reque
 		    return RunDeleteRequest(request_data.http_url, request_data.headers, params, [&](BaseRequest &request) {
 			    return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		    });
-	    });
+	    },
+	    validate);
 }
 
 string S3RequestUtil::ParseError(const string &error) {
