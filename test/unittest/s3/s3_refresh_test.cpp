@@ -20,6 +20,11 @@
 
 namespace duckdb {
 
+//! The validation of the executor tests' operations: a 200 got through, nothing else did
+static S3OperationOutcome AcceptOK(const S3RequestData &, const HTTPResponse &response) {
+	return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200});
+}
+
 namespace {
 
 template <class OPERATION>
@@ -566,17 +571,20 @@ CREATE SECRET refresh_s3_endpoint_mode (
 	                    "",
 	                    "",
 	                    ""};
-	auto result = S3RequestExecutor::RunSession(encryption_util, *session, spec, [&](S3RequestData &request_data) {
-		observed_modes.push_back(request_data.auth_params.GetURLParams().endpoint_mode);
-		observed_endpoints.push_back(request_data.auth_params.GetURLParams().endpoint.GetHost());
-		observed_regions.push_back(request_data.auth_params.GetCredentials().region);
-		if (observed_modes.size() == 1) {
-			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::Forbidden_403);
-			result->body = "<Error><Code>AccessDenied</Code><Message>stale credentials</Message></Error>";
-			return result;
-		}
-		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
-	});
+	auto result = S3RequestExecutor::RunSession(
+	    encryption_util, *session, spec,
+	    [&](S3RequestData &request_data) {
+		    observed_modes.push_back(request_data.auth_params.GetURLParams().endpoint_mode);
+		    observed_endpoints.push_back(request_data.auth_params.GetURLParams().endpoint.GetHost());
+		    observed_regions.push_back(request_data.auth_params.GetCredentials().region);
+		    if (observed_modes.size() == 1) {
+			    auto result = make_uniq<HTTPResponse>(HTTPStatusCode::Forbidden_403);
+			    result->body = "<Error><Code>AccessDenied</Code><Message>stale credentials</Message></Error>";
+			    return result;
+		    }
+		    return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+	    },
+	    AcceptOK);
 	REQUIRE(result.response);
 	REQUIRE(result.response->status == HTTPStatusCode::OK_200);
 	REQUIRE(observed_modes == vector<S3EndpointMode> {initial_mode, refreshed_mode});

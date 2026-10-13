@@ -886,6 +886,14 @@ public:
 			Record(request, response.status);
 			return;
 		}
+		auto scripted_index = served_bulk_delete_responses.fetch_add(1);
+		if (scripted_index < config.bulk_delete.scripted.size()) {
+			auto &scripted = config.bulk_delete.scripted[scripted_index];
+			response.status = scripted.status;
+			response.set_content(scripted.body, "application/xml");
+			Record(request, response.status);
+			return;
+		}
 		response.status = 200;
 		response.set_content("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 		                     "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></DeleteResult>",
@@ -1475,6 +1483,7 @@ public:
 	mutable atomic<idx_t> remaining_post_failures {0};
 	mutable atomic<idx_t> remaining_completion_faults {0};
 	mutable atomic<idx_t> served_completion_faults {0};
+	mutable atomic<idx_t> served_bulk_delete_responses {0};
 
 	//! Request observations
 	mutable annotated_mutex observation_lock;

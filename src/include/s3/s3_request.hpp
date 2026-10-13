@@ -115,6 +115,9 @@ struct S3RequestContext {
 struct S3RequestResult {
 	unique_ptr<HTTPResponse> response;
 	S3RequestContext context;
+	//! The operation's validated outcome (S3RequestExecutor::ValidateCallback), kept for the handling that follows;
+	//! FAILURE when no response was received or the last one was retryable but could not be retried.
+	S3OperationOutcome outcome = S3OperationOutcome::FAILURE;
 };
 
 struct S3RequestSpec {
@@ -164,12 +167,11 @@ struct S3RequestUtil {
 	static string GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len);
 	static bool IsRequestTimeout(const HTTPResponse &response);
 	static bool IsRetryableReceivedResponse(const HTTPResponse &response);
-	//! Whether a received response got the operation through: a 2xx (or 304) that does not carry an S3 error document.
-	static bool IsSuccessfulResponse(const HTTPResponse &response);
-	//! The executor's default validation for an operation whose handler supplies none: IsSuccessfulResponse decides
-	//! between SUCCESS and FAILURE. Operations that read a document (multipart initialization and completion) supply
-	//! their own, which also knows an unreadable body as UNKNOWN.
-	static S3OperationOutcome ValidateResponse(const HTTPResponse &response);
+	//! The validation of an operation whose outcome is its status alone (S3 answers these with an error status, never
+	//! with an error document behind a 2xx): a received response with one of the operation's accepted statuses is a
+	//! success, anything else a failure. Operations that read a document or a required header validate those too.
+	static S3OperationOutcome ValidateStatus(const HTTPResponse &response,
+	                                         std::initializer_list<HTTPStatusCode> accepted_statuses);
 	//! Whether a raised request error carries a throttling status, matching core's throttled retry admission.
 	static bool IsThrottledError(const ErrorData &error);
 
@@ -186,17 +188,18 @@ struct S3RequestExecutor {
 	using RegionRedirectCallback = std::function<void(const S3RequestData &, const string &, const string &)>;
 	using ReceivedResponseCallback =
 	    std::function<S3ReceivedResponseAction(const S3RequestData &, const HTTPResponse &)>;
-	//! The operation handler's validation of a received response the executor does not retry, run before the host
-	//! quota is settled; without one S3RequestUtil::ValidateResponse judges.
+	//! The operation's authoritative validation of a received response the executor does not retry (its accepted
+	//! statuses, required headers or result document), run once before the host quota is settled. Every operation
+	//! supplies one; what it parses it keeps for the handling that follows, so nothing is read twice.
 	using ValidateCallback = std::function<S3OperationOutcome(const S3RequestData &, const HTTPResponse &)>;
 
 	static S3RequestResult RunSession(EncryptionUtil &encryption_util, HTTPRequestSession &session,
 	                                  const S3RequestSpec &spec, const RequestCallback &request,
+	                                  const ValidateCallback &validate,
 	                                  const RegionRedirectCallback &region_redirect = {},
-	                                  const ReceivedResponseCallback &response_callback = {},
-	                                  const ValidateCallback &validate = {});
+	                                  const ReceivedResponseCallback &response_callback = {});
 	static S3RequestResult RunHandle(EncryptionUtil &encryption_util, S3FileHandle &handle, const S3RequestSpec &spec,
-	                                 const RequestCallback &request, const ValidateCallback &validate = {});
+	                                 const RequestCallback &request, const ValidateCallback &validate);
 
 	static bool SetSessionRegion(HTTPRequestSession &session, const string &correct_region, string &previous_region);
 	static bool CredentialRefreshEnabled(optional_ptr<FileOpener> opener);
