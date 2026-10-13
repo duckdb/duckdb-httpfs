@@ -494,6 +494,65 @@ static void RunNamespacedRequestTimeoutGetScenario(const string &client_implemen
 	REQUIRE(S3TestHelper::CountObservations(observations, "GET", S3TestHelper::STALE_KEY_ID, 200) == 1);
 }
 
+// HTTP 500, then a 2xx the full download does not take as the object (202, 206) or the 200 it does, with
+// force_download=true. FullDownload accepts a 200 and nothing else, so the full download validates on that contract
+// (not the range read's 200/202/206/304) before the executor settles the quota: a final 202 or 206 keeps the
+// existing HTTP error and the retry charged, a final 200 reads the object and refunds it.
+static void RunFullDownloadAcceptanceScenario(const string &client_implementation, int final_status) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+	config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
+	config.full_get.scripted_statuses = {500, final_status};
+	auto object_data = config.object.data;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::ConfigureRefresh(db, con, server, client_implementation, false);
+	auto quota = HTTPUtil::Get(*db.instance).GetRetryQuota("http://" + server.Endpoint());
+	REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY);
+
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=3");
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=1");
+	S3TestHelper::RequireQueryOk(con, "SET force_download=true");
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	string buffer(8, '\0');
+	ErrorData error;
+	if (final_status == 200) {
+		auto handle = fs.OpenFile(S3TestHelper::S3_PATH, FileFlags::FILE_FLAGS_READ);
+		handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 0);
+		REQUIRE(buffer == object_data.substr(0, buffer.size()));
+	} else {
+		RequireError(
+		    [&]() {
+			    auto handle = fs.OpenFile(S3TestHelper::S3_PATH, FileFlags::FILE_FLAGS_READ);
+			    handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 0);
+		    },
+		    error);
+	}
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	// The 500 was retried once; what followed was the operation's last response
+	REQUIRE(S3TestHelper::CountObservations(observations, "GET", S3TestHelper::STALE_KEY_ID, 500) == 1);
+	REQUIRE(S3TestHelper::CountObservations(observations, "GET", S3TestHelper::STALE_KEY_ID, final_status) == 1);
+	REQUIRE(observations.size() == 2);
+	if (final_status == 200) {
+		// The validated 200 refunds the retry the 500 consumed
+		REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY);
+		return;
+	}
+	// The caller's error is the one it raised before: an HTTP error carrying the status it would not take
+	REQUIRE(error.Type() == ExceptionType::HTTP);
+	REQUIRE(error.ExtraInfo().at("status_code") == std::to_string(final_status));
+	// A 2xx the full download rejects is no success for the quota: the retry stays charged
+	REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST);
+}
+
 // A generic (non-RequestTimeout) 400 must fail on the first try. Uses a single-shot PUT so exactly one
 // request is expected, distinguishing "not retried" from "retried N times and still failed".
 static void RunGenericErrorNotRetriedScenario(const string &client_implementation) {
@@ -1349,6 +1408,22 @@ TEST_CASE("HTTPFS retries a namespaced CDATA RequestTimeout on GET", "[httpfs][s
 	}
 	SECTION("curl") {
 		RunNamespacedRequestTimeoutGetScenario("curl");
+	}
+}
+
+TEST_CASE("A full download validates on its own acceptance contract", "[httpfs][s3][retry][full-download]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client) {
+			SECTION("a final 200 after a 500 reads the object and refunds the retry") {
+				RunFullDownloadAcceptanceScenario(client, 200);
+			}
+			SECTION("a final 202 after a 500 keeps the HTTP error and the retry charged") {
+				RunFullDownloadAcceptanceScenario(client, 202);
+			}
+			SECTION("a final 206 after a 500 keeps the HTTP error and the retry charged") {
+				RunFullDownloadAcceptanceScenario(client, 206);
+			}
+		}
 	}
 }
 

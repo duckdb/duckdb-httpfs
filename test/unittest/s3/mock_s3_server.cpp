@@ -1205,6 +1205,20 @@ public:
 
 			auto range = GetHeader(request, "Range");
 			if (range.empty()) {
+				auto scripted_index = served_full_get_scripted.fetch_add(1);
+				if (scripted_index < config.full_get.scripted_statuses.size()) {
+					response.status = config.full_get.scripted_statuses[scripted_index];
+					if (response.status >= 500) {
+						response.set_content("<Error><Code>InternalError</Code><Message>We encountered an internal "
+						                     "error. Please try again.</Message></Error>",
+						                     "application/xml");
+					} else {
+						SetGetHeaders(response, generation);
+						response.set_content(data, "application/octet-stream");
+					}
+					Record(request, response.status);
+					return;
+				}
 				response.status = 200;
 				SetGetHeaders(response, generation);
 				if (config.full_get.block_until_released) {
@@ -1484,6 +1498,7 @@ public:
 	mutable atomic<idx_t> remaining_completion_faults {0};
 	mutable atomic<idx_t> served_completion_faults {0};
 	mutable atomic<idx_t> served_bulk_delete_responses {0};
+	mutable atomic<idx_t> served_full_get_scripted {0};
 
 	//! Request observations
 	mutable annotated_mutex observation_lock;

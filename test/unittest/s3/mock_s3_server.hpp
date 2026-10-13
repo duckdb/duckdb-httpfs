@@ -184,6 +184,9 @@ struct MockS3RangeConfig {
 };
 
 struct MockS3FullGetConfig {
+	//! Answer this many leading full (range-less) object GETs with these statuses: a 5xx carries an S3 InternalError
+	//! document, a 2xx the object's bytes and headers (a 202 or 206 where the client expects a 200)
+	vector<int> scripted_statuses;
 	//! Send successful responses with chunked transfer encoding and no Content-Length
 	bool chunked = false;
 	//! Hold the response body until ReleaseFullGet is called

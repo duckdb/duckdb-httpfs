@@ -1002,11 +1002,18 @@ void S3FileSystem::ValidateResponseVersion(HTTPFileHandle &handle, const HTTPRea
 	}
 }
 
-//! What httpfs's read path takes as a delivered object or range (TryRangeRequest, RetryFileInfoWithRange), plus the
-//! 304 of a conditional read whose copy is still current. Everything else the caller turns into an error.
-static S3OperationOutcome ValidateReadStatus(const HTTPResponse &response) {
+//! What httpfs's range read takes as a delivered range (TryRangeRequest, RetryFileInfoWithRange), plus the 304 of a
+//! conditional read whose copy is still current. Everything else the caller turns into an error.
+static S3OperationOutcome ValidateRangeReadStatus(const HTTPResponse &response) {
 	return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200, HTTPStatusCode::PartialContent_206,
 	                                                HTTPStatusCode::Accepted_202, HTTPStatusCode::NotModified_304});
+}
+
+//! What httpfs's full download takes as the delivered object (FullDownload): a 200 and nothing else. A 202 or 206
+//! answers a request that asked for the whole object with something else; the caller rejects it, so for the quota it
+//! is no success either.
+static S3OperationOutcome ValidateFullDownloadStatus(const HTTPResponse &response) {
+	return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200});
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) {
@@ -1045,7 +1052,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_
 			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
 		               });
 	           },
-	           [](const S3RequestData &, const HTTPResponse &response) { return ValidateReadStatus(response); })
+	           [](const S3RequestData &, const HTTPResponse &response) { return ValidateFullDownloadStatus(response); })
 	    .response;
 }
 
@@ -1069,7 +1076,7 @@ unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, strin
 			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
 		               });
 	           },
-	           [](const S3RequestData &, const HTTPResponse &response) { return ValidateReadStatus(response); })
+	           [](const S3RequestData &, const HTTPResponse &response) { return ValidateRangeReadStatus(response); })
 	    .response;
 }
 
