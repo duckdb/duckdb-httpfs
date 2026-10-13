@@ -675,6 +675,18 @@ static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
 }
 
+bool S3RequestUtil::IsSuccessfulResponse(const HTTPResponse &response) {
+	if (response.HasRequestError() || !response.Success()) {
+		return false;
+	}
+	if (response.body.empty()) {
+		return true;
+	}
+	// S3 answers some operations (multipart completion, bulk delete) with an error document behind HTTP 200.
+	S3XMLError error;
+	return !S3XMLResponseParser::TryParseError(response.body, error);
+}
+
 S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,
                                        const S3RequestSpec &spec, const RequestCallback &request,
                                        const RefreshCallback &refresh_auth_params, const SetRegionCallback &set_region,
@@ -686,60 +698,64 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 	// One id for the whole operation lets S3 correlate every attempt of it.
 	const auto invocation_id = UUID::ToString(UUID::GenerateRandomUUID());
 	S3RequestResult result {};
+	// This loop coordinates the operation: core's request loop shares the budget, judges statuses and leaves the
+	// verdict to the decision returned here, after status and body have been read. The budget admits retries and
+	// settles the host quota from that verdict: a success refunds the last retry, a failure keeps it charged.
 	retry_budget.Run([&]() {
-		// Only bounded auth/region corrections bypass transient retry admission.
-		for (;;) {
-			auto request_data = CreateRequestData(encryption_util, session.Capture(), spec, retry_budget);
-			request_data.headers.Insert(HTTPFSUtil::S3_INVOCATION_ID_HEADER, invocation_id);
-			try {
-				auto response = request(request_data);
-				auto received_response = response && !response->HasRequestError();
-				if (received_response && !retried_auth_refresh && IsAuthRefreshStatus(*response) &&
-				    refresh_auth_params(request_data)) {
-					retried_auth_refresh = true;
-					continue;
-				}
-				string correct_region;
-				if (received_response && !retried_region &&
-				    GetRegionRedirect(*response, request_data.auth_params, correct_region).IsValid()) {
-					set_region(request_data, correct_region);
-					retried_region = true;
-					continue;
-				}
-				bool should_retry = received_response && ShouldRetryReceivedResponse(request_data, *response);
-				if (received_response && response_callback &&
-				    response_callback(request_data, *response) == S3ReceivedResponseAction::RETRY_FRESH_CONNECTION) {
-					D_ASSERT(fresh_connection);
-					fresh_connection(request_data);
-					should_retry = true;
-				}
-				// Throttling responses get the throttle schedule, including any Retry-After.
-				const bool throttled = should_retry && (response->status == HTTPStatusCode::TooManyRequests_429 ||
-				                                        response->status == HTTPStatusCode::ServiceUnavailable_503);
-				const auto retry_after = throttled && response->HasHeader("Retry-After")
-				                             ? response->GetHeaderValue("Retry-After")
-				                             : string();
-				result = {std::move(response),
-				          S3RequestContext {request_data.operation, std::move(request_data.captured),
-				                            std::move(request_data.display_url)}};
-				if (!should_retry) {
-					return HTTPRetryDecision::Finish();
-				}
-				return throttled ? HTTPRetryDecision::Throttled(retry_after) : HTTPRetryDecision::Retry();
-			} catch (std::exception &ex) {
-				ErrorData error(ex);
-				if (!retried_auth_refresh && IsAuthRefreshStatus(error) && refresh_auth_params(request_data)) {
-					retried_auth_refresh = true;
-					continue;
-				}
-				string correct_region;
-				if (!retried_region && GetRegionRedirect(error, request_data.auth_params, correct_region).IsValid()) {
-					set_region(request_data, correct_region);
-					retried_region = true;
-					continue;
-				}
-				throw;
+		auto request_data = CreateRequestData(encryption_util, session.Capture(), spec, retry_budget);
+		request_data.headers.Insert(HTTPFSUtil::S3_INVOCATION_ID_HEADER, invocation_id);
+		try {
+			auto response = request(request_data);
+			auto received_response = response && !response->HasRequestError();
+			// Only bounded auth/region corrections bypass retry admission: once each, and never past core's bound.
+			if (received_response && !retried_auth_refresh && IsAuthRefreshStatus(*response) &&
+			    refresh_auth_params(request_data)) {
+				retried_auth_refresh = true;
+				return HTTPRetryDecision::Correction();
 			}
+			string correct_region;
+			if (received_response && !retried_region &&
+			    GetRegionRedirect(*response, request_data.auth_params, correct_region).IsValid()) {
+				set_region(request_data, correct_region);
+				retried_region = true;
+				return HTTPRetryDecision::Correction();
+			}
+			bool should_retry = received_response && ShouldRetryReceivedResponse(request_data, *response);
+			if (received_response && response_callback &&
+			    response_callback(request_data, *response) == S3ReceivedResponseAction::RETRY_FRESH_CONNECTION) {
+				D_ASSERT(fresh_connection);
+				fresh_connection(request_data);
+				should_retry = true;
+			}
+			// Throttling responses get the throttle schedule, including any Retry-After.
+			const bool throttled = should_retry && (response->status == HTTPStatusCode::TooManyRequests_429 ||
+			                                        response->status == HTTPStatusCode::ServiceUnavailable_503);
+			const auto retry_after =
+			    throttled && response->HasHeader("Retry-After") ? response->GetHeaderValue("Retry-After") : string();
+			// The verdict: a 2xx without an S3 error document got the operation through; anything that is not
+			// retried failed for good, including an error document behind HTTP 200 (e.g. InvalidPart) and a
+			// transport error the caller reports as an unknown outcome.
+			const bool succeeded = received_response && S3RequestUtil::IsSuccessfulResponse(*response);
+			result = {std::move(response), S3RequestContext {request_data.operation, std::move(request_data.captured),
+			                                                 std::move(request_data.display_url)}};
+			if (should_retry) {
+				return throttled ? HTTPRetryDecision::Throttled(retry_after) : HTTPRetryDecision::Retry();
+			}
+			return succeeded ? HTTPRetryDecision::Success() : HTTPRetryDecision::Failure();
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (!retried_auth_refresh && IsAuthRefreshStatus(error) && refresh_auth_params(request_data)) {
+				retried_auth_refresh = true;
+				return HTTPRetryDecision::Correction();
+			}
+			string correct_region;
+			if (!retried_region && GetRegionRedirect(error, request_data.auth_params, correct_region).IsValid()) {
+				set_region(request_data, correct_region);
+				retried_region = true;
+				return HTTPRetryDecision::Correction();
+			}
+			// The failure propagates; core recorded it, so nothing is refunded.
+			throw;
 		}
 	});
 	result.context.throttled_retries = retry_budget.ThrottledRetries();
