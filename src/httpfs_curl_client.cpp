@@ -5,6 +5,7 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
 #include <curl/curl.h>
+#include <limits>
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
 
@@ -110,6 +111,23 @@ struct RequestInfo {
 	std::vector<HTTPHeaders> header_collection;
 };
 
+static long TimeoutMilliseconds(const HTTPParams &params) {
+	const auto max_ms = static_cast<uint64_t>(std::numeric_limits<long>::max());
+	if (params.timeout == 0 && params.timeout_usec == 0) {
+		return 0;
+	}
+	if (params.timeout > max_ms / 1000) {
+		return std::numeric_limits<long>::max();
+	}
+
+	const auto seconds_ms = params.timeout * 1000;
+	const auto fractional_ms = params.timeout_usec / 1000 + (params.timeout_usec % 1000 != 0 ? 1 : 0);
+	if (fractional_ms > max_ms - seconds_ms) {
+		return std::numeric_limits<long>::max();
+	}
+	return static_cast<long>(seconds_ms + fractional_ms);
+}
+
 static idx_t httpfs_client_count = 0;
 
 class HTTPFSCurlClient : public HTTPClient {
@@ -182,12 +200,13 @@ public:
 			                 0L); // Override default, don't verify that the cert matches the hostname
 		}
 
-		// set connection timeout
-		curl_easy_setopt(*curl, CURLOPT_CONNECTTIMEOUT, http_params.timeout);
-		// Do NOT impose a hard timeout on the whole transfer
-		curl_easy_setopt(*curl, CURLOPT_TIMEOUT, 0L);                         // no hard timeout for uploads
-		curl_easy_setopt(*curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);              // abort if < 1 KB/s...
-		curl_easy_setopt(*curl, CURLOPT_LOW_SPEED_TIME, http_params.timeout); // ...for 'timeout' consecutive seconds
+		// Use millisecond precision so fractional HTTPParams timeouts remain bounded.
+		const auto timeout_ms = TimeoutMilliseconds(http_params);
+		const auto low_speed_timeout_seconds = timeout_ms / 1000 + (timeout_ms % 1000 != 0 ? 1 : 0);
+		curl_easy_setopt(*curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms);
+		curl_easy_setopt(*curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+		curl_easy_setopt(*curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);                    // abort if < 1 KB/s...
+		curl_easy_setopt(*curl, CURLOPT_LOW_SPEED_TIME, low_speed_timeout_seconds); // ...for timeout seconds
 
 		// accept content as-is (i.e no decompressing)
 		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, NULL);
