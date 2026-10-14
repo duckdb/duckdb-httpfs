@@ -8,5 +8,10 @@
         "ssl"
       ]
     }
-  ]
+  ],
+  "vcpkg-configuration": {
+    "overlay-triplets": [
+      "vcpkg_triplets"
+    ]
+  }
 }
