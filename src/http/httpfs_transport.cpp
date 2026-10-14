@@ -79,7 +79,7 @@ bool HTTPFSUtil::GetDefaultVerifySSL(const HTTPFSParams &params) const {
 }
 
 HTTPTransportReusePolicy HTTPFSUtil::GetTransportReusePolicy() const {
-#ifdef EMSCRIPTEN
+#ifdef __EMSCRIPTEN__
 	return HTTPTransportReusePolicy::CLIENT_FREE;
 #else
 	return HTTPTransportReusePolicy::SESSION_LOCAL;
