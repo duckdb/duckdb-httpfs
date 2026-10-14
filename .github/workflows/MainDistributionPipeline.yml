@@ -22,9 +22,6 @@ jobs:
         id: runners
         uses: duckdb/duckdb-ci/detect-runners@main
 
-  duckdb-submodule-version:
-    uses: duckdb/extension-ci-tools/.github/workflows/_submodule_version.yml@main
-
   duckdb-stable-build:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
@@ -50,12 +47,9 @@ jobs:
 
   code-quality:
     name: Code Quality
-    needs:
-      - duckdb-submodule-version
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
     with:
       extension_name: httpfs
-      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
       ci_tools_version: main
       extra_toolchains: 'python3'
       format_checks: 'format'
