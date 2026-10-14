@@ -1,0 +1,56 @@
+# name: test/sql/settings/deprecated_settings.test
+# description: Settings superseded by secrets are deprecated, debug-only settings are hidden
+# group: [settings]
+
+require httpfs
+
+query I
+SELECT list_sort(list(name)) FROM duckdb_settings(deprecated := true)
+WHERE name IN ('s3_region', 's3_access_key_id', 's3_secret_access_key', 's3_session_token', 's3_endpoint',
+               's3_url_style', 's3_use_ssl', 's3_kms_key_id', 's3_url_compatibility_mode', 's3_requester_pays',
+               'gcs_user_project', 'enable_curl_server_cert_verification');
+----
+[enable_curl_server_cert_verification, gcs_user_project, s3_access_key_id, s3_endpoint, s3_kms_key_id, s3_region, s3_requester_pays, s3_secret_access_key, s3_session_token, s3_url_compatibility_mode, s3_url_style, s3_use_ssl]
+
+query I
+SELECT list_sort(list(name)) FROM duckdb_settings(debug := true)
+WHERE name IN ('hf_max_per_page', 'unsafe_disable_etag_checks');
+----
+[hf_max_per_page, unsafe_disable_etag_checks]
+
+query I
+SELECT count(*) FROM duckdb_settings()
+WHERE name IN ('s3_region', 's3_access_key_id', 's3_secret_access_key', 's3_session_token', 's3_endpoint',
+               's3_url_style', 's3_use_ssl', 's3_kms_key_id', 's3_url_compatibility_mode', 's3_requester_pays',
+               'gcs_user_project', 'enable_curl_server_cert_verification', 'hf_max_per_page',
+               'unsafe_disable_etag_checks');
+----
+0
+
+# deprecated and debug settings can still be set and read
+statement ok
+SET s3_region = 'eu-west-1';
+
+query I
+SELECT current_setting('s3_region');
+----
+eu-west-1
+
+statement ok
+SET s3_url_style = 'path';
+
+statement error
+SET s3_url_style = 'nope';
+----
+<REGEX>:.*Error.*
+
+statement ok
+SET enable_curl_server_cert_verification = true;
+
+statement ok
+SET unsafe_disable_etag_checks = true;
+
+query I
+SELECT current_setting('unsafe_disable_etag_checks');
+----
+true

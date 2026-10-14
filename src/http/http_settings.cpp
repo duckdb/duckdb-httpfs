@@ -124,15 +124,15 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("enable_curl_server_cert_verification",
 	                          "Enable server side certificate verification for CURL backend.", LogicalType::BOOLEAN,
-	                          Value(true));
+	                          Value(true), nullptr, SetScope::SESSION, false, true);
 	config.AddExtensionOption("enable_server_cert_verification", "Enable server side certificate verification.",
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("ca_cert_file", "Path to a custom certificate file for self-signed certificates.",
 	                          LogicalType::VARCHAR, Value(""), SetCACertFile);
 	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency", LogicalType::BOOLEAN,
-	                          Value(false));
+	                          Value(false), nullptr, SetScope::SESSION, true);
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
-	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+	                          LogicalType::UBIGINT, Value::UBIGINT(0), nullptr, SetScope::SESSION, true);
 	config.AddExtensionOption("httpfs_client_implementation", "Select which HTTP client implementation is used",
 	                          LogicalType::VARCHAR, "default", SetHTTPClientImplementation, SetScope::GLOBAL);
 	config.AddExtensionOption("httpfs_connection_caching", "Enable connection caching for HTTP requests",
