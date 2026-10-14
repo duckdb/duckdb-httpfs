@@ -30,6 +30,7 @@ jobs:
     with:
       extension_name: httpfs
       ci_tools_version: main
+      opt_in_archs: windows_arm64
       runners: ${{ needs.prepare.outputs.runners }}
 
   duckdb-stable-deploy:
