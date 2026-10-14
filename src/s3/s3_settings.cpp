@@ -10,6 +10,15 @@ namespace duckdb {
 namespace {
 
 struct S3UploadSizing {
+	// DuckDB versions return either idx_t or optional_idx from ParseMemoryLimit.
+	static idx_t ResolveMemoryLimit(idx_t limit) {
+		return limit;
+	}
+
+	static idx_t ResolveMemoryLimit(optional_idx limit) {
+		return limit.IsValid() ? limit.GetIndex() : NumericLimits<idx_t>::Maximum();
+	}
+
 	static bool ScheduleCovers(uint64_t initial_part_size, uint64_t max_file_size, idx_t max_parts,
 	                           idx_t growth_interval, idx_t maximum_part_size) {
 		uint64_t capacity = 0;
@@ -147,7 +156,8 @@ S3UploadConfig S3UploadConfig::ReadFrom(optional_ptr<FileOpener> opener, const S
 	Value value;
 
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_uploader_max_filesize", value)) {
-		uploader_max_filesize = DBConfig::ParseMemoryLimitOrMaximum(value.GetValue<string>());
+		uploader_max_filesize =
+		    S3UploadSizing::ResolveMemoryLimit(DBConfig::ParseMemoryLimit(value.GetValue<string>()));
 	} else {
 		uploader_max_filesize = S3UploadConfig::DEFAULT_MAX_FILESIZE;
 	}

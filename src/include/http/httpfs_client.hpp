@@ -126,7 +126,7 @@ private:
 	idx_t next_transport_reuse_domain DUCKDB_GUARDED_BY(transport_reuse_lock) = 1;
 };
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
