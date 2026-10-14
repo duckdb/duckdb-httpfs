@@ -9,7 +9,7 @@
 #include "duckdb/logging/log_manager.hpp"
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 #include "crypto.hpp"
-#elif defined(EMSCRIPTEN)
+#elif defined(__EMSCRIPTEN__)
 #include "mbedtls_wrapper.hpp"
 #endif // OVERRIDE_ENCRYPTION_UTILS
 
@@ -38,7 +38,7 @@ struct HTTPFSExtensionLoader {
 	static void ConfigureEncryption(DBConfig &config) {
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 		config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
-#elif defined(EMSCRIPTEN)
+#elif defined(__EMSCRIPTEN__)
 		if (!config.encryption_util) {
 			config.encryption_util = make_shared_ptr<duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLSFactory>();
 		}

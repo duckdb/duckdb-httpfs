@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 #include "http/httpfs_curl_client.hpp"
 #endif
 

@@ -11,3 +11,5 @@ duckdb_extension_load(httpfs
 	SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
 	INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/src/include
 )
+
+duckdb_extension_statically_link(httpfs)
