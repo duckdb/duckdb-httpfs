@@ -6,7 +6,7 @@
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/config.hpp"
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 #include "http/httpfs_curl_client.hpp"
 #endif
 
@@ -73,7 +73,7 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
 		                            "`default` are currently supported for duckdb-wasm");
 	}
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 	if (value == "curl" || value == "default") {
 		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(context)));
 		return;
@@ -89,7 +89,7 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 
 static void SetHTTPConnectionCaching(ClientContext &context, SetScope scope, Value &parameter) {
 	RequireGlobalScope(scope, "httpfs_connection_caching");
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 	auto &config = DBConfig::GetConfig(context);
 	auto &http_util = config.GetHTTPUtil();
 	if (http_util.GetName() == "HTTPFS-Curl") {
@@ -148,7 +148,7 @@ void HTTPSettings::Initialize(DBConfig &config) {
 	if (http_util.GetName() == "WasmHTTPUtils") {
 		return;
 	}
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(config)));
 #else
 	config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
