@@ -94,7 +94,16 @@ public:
 		}
 		client->set_follow_location(http_params.follow_location);
 		client->set_keep_alive(http_params.keep_alive);
-		client->set_ca_cert_path(http_params.ca_cert_file.c_str());
+		// the bundle is read through the database's file system and handed over in memory
+		shared_ptr<const string> bundle;
+		if (http_params.VerifyServerCertificate() && HTTPFSUtil::IsSecureConnection(GetBaseUrl())) {
+			bundle = http_params.http_util.Cast<HTTPFSUtil>().GetCertificateBundle(http_params.ca_cert_file);
+		}
+		if (bundle) {
+			client->set_ca_cert_store(duckdb_httplib_openssl::tls::create_ca_store(bundle->data(), bundle->size()));
+		} else {
+			client->set_ca_cert_path("");
+		}
 		client->enable_server_certificate_verification(http_params.VerifyServerCertificate());
 		client->set_write_timeout(NumericCast<time_t>(http_params.timeout),
 		                          NumericCast<time_t>(http_params.timeout_usec));
