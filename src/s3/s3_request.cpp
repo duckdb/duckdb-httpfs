@@ -964,48 +964,87 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const str
 	    .response;
 }
 
+unique_ptr<HTTPResponse> S3FileSystem::ReadListedVersion(S3FileHandle &handle, const HTTPReadConfig &read_config,
+                                                         const RunRead &run) {
+	// A listed file is opened with its ETag as an If-Match condition and no version ID
+	if (!handle.opened_from_listing || read_config.object_version.IsSet() ||
+	    read_config.condition.type != HTTPReadConditionType::ETAG || !handle.file_state) {
+		return run(read_config);
+	}
+	{
+		auto captured = handle.request_session->Capture();
+		if (!captured.snapshot->Params().s3_version_id_pinning ||
+		    captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider().GetType() == S3ProviderType::GCS) {
+			return run(read_config);
+		}
+	}
+	const auto &etag = read_config.condition.value;
+	auto learned = handle.file_state->GetLearnedVersion(etag);
+	if (learned.IsSet()) {
+		auto pinned = read_config;
+		pinned.object_version = std::move(learned);
+		pinned.condition = {};
+		return run(pinned);
+	}
+	auto response = run(read_config);
+	// A 412 means the file changed after the listing; it surfaces as an error
+	if (response && !response->HasRequestError() && static_cast<int>(response->status) < 300) {
+		// The If-Match succeeded, so this response's version ID is the listed version
+		auto version = handle.ReadObjectVersion(response->headers);
+		// Suspended-versioning buckets report "null", which an overwrite replaces in place
+		if (version.GetType() == HTTPObjectVersionType::S3_VERSION_ID && version.GetValue() != "null") {
+			handle.file_state->SetLearnedVersion(etag, std::move(version));
+		}
+	}
+	return response;
+}
+
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                   const HTTPReadConfig &read_config, CachedFileDownload &download) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	const S3RequestSpec spec {
-	    s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version, read_config.condition};
-	return S3RequestExecutor::RunHandle(
-	           GetEncryptionUtil(), s3_handle, spec,
-	           [&](S3RequestData &request_data) {
-		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		           return RunGetRequest(
-		               s3_handle, request_data.http_url, request_data.headers, params, read_config, download,
-		               [&](const HTTPResponse &response) {
-			               return S3RequestUtil::GetRequestError(request_data, response);
-		               },
-		               [&](BaseRequest &request) {
-			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
-		               });
-	           })
-	    .response;
+	return ReadListedVersion(s3_handle, read_config, [&](const HTTPReadConfig &config) {
+		const S3RequestSpec spec {
+		    s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", config.object_version, config.condition};
+		return S3RequestExecutor::RunHandle(
+		           GetEncryptionUtil(), s3_handle, spec,
+		           [&](S3RequestData &request_data) {
+			           auto &params = request_data.http_params->Cast<HTTPFSParams>();
+			           return RunGetRequest(
+			               s3_handle, request_data.http_url, request_data.headers, params, config, download,
+			               [&](const HTTPResponse &response) {
+				               return S3RequestUtil::GetRequestError(request_data, response);
+			               },
+			               [&](BaseRequest &request) {
+				               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
+			               });
+		           })
+		    .response;
+	});
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::GetRangeRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
                                                        const HTTPReadConfig &read_config, idx_t file_offset,
                                                        data_ptr_t buffer_out, idx_t buffer_out_len) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	const S3RequestSpec spec {
-	    s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", read_config.object_version, read_config.condition};
-	return S3RequestExecutor::RunHandle(GetEncryptionUtil(), s3_handle, spec,
-	                                    [&](S3RequestData &request_data) {
-		                                    auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		                                    return RunGetRangeRequest(
-		                                        s3_handle, request_data.http_url, request_data.headers, params,
-		                                        read_config, file_offset, buffer_out, buffer_out_len,
-		                                        [&](const HTTPResponse &response) {
-			                                        return S3RequestUtil::GetRequestError(request_data, response);
-		                                        },
-		                                        [&](BaseRequest &request) {
-			                                        return S3RequestExecutor::SendHandleRequest(s3_handle, request_data,
-			                                                                                    request);
-		                                        });
-	                                    })
-	    .response;
+	return ReadListedVersion(s3_handle, read_config, [&](const HTTPReadConfig &config) {
+		const S3RequestSpec spec {
+		    s3_url, S3RequestOperation::GET_OBJECT, {}, "", "", "", config.object_version, config.condition};
+		return S3RequestExecutor::RunHandle(GetEncryptionUtil(), s3_handle, spec,
+		                                    [&](S3RequestData &request_data) {
+			                                    auto &params = request_data.http_params->Cast<HTTPFSParams>();
+			                                    return RunGetRangeRequest(
+			                                        s3_handle, request_data.http_url, request_data.headers, params,
+			                                        config, file_offset, buffer_out, buffer_out_len,
+			                                        [&](const HTTPResponse &response) {
+				                                        return S3RequestUtil::GetRequestError(request_data, response);
+			                                        },
+			                                        [&](BaseRequest &request) {
+				                                        return S3RequestExecutor::SendHandleRequest(
+				                                            s3_handle, request_data, request);
+			                                        });
+		                                    })
+		    .response;
+	});
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::DeleteRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) {
