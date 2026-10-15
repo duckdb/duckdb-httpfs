@@ -735,6 +735,7 @@ static void RunBulkDeleteEndpointModeIdentityScenario(const string &client_imple
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
 	S3TestHelper::RequireQueryOk(con,
 	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
 	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");

@@ -397,6 +397,7 @@ TEST_CASE("S3 anonymous redirects remain available on both HTTP clients", "[http
 		DuckDB db(nullptr);
 		Connection con(db);
 		S3TestHelper::LoadExtension(db);
+		S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
 		S3TestHelper::RequireQueryOk(con, "SET httpfs_client_implementation='" + client + "'");
 		S3TestHelper::RequireQueryOk(con, "CREATE SECRET reader (TYPE S3, ENDPOINT '" + origin.Endpoint() +
 		                                      "', URL_STYLE 'path', USE_SSL false, REQUESTER_PAYS true)");
