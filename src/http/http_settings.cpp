@@ -6,7 +6,7 @@
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/config.hpp"
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 #include "http/httpfs_curl_client.hpp"
 #endif
 
@@ -43,9 +43,7 @@ static void SetCACertFile(ClientContext &context, SetScope, Value &parameter) {
 		parameter = Value("");
 		return;
 	}
-	LocalFileSystem fs;
-	ClientContextFileOpener opener(context);
-	parameter = Value(fs.CanonicalizePath(value, opener));
+	parameter = Value(FileSystem::GetFileSystem(context).CanonicalizePath(value));
 }
 
 static void SetExtraHTTPHeaders(ClientContext &, SetScope, Value &parameter) {
@@ -73,13 +71,13 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
 		                            "`default` are currently supported for duckdb-wasm");
 	}
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 	if (value == "curl" || value == "default") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(context)));
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(context), context.db.get()));
 		return;
 	}
 	if (value == "httplib") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>(context.db.get()));
 		return;
 	}
 #endif
@@ -89,11 +87,11 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 
 static void SetHTTPConnectionCaching(ClientContext &context, SetScope scope, Value &parameter) {
 	RequireGlobalScope(scope, "httpfs_connection_caching");
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 	auto &config = DBConfig::GetConfig(context);
 	auto &http_util = config.GetHTTPUtil();
 	if (http_util.GetName() == "HTTPFS-Curl") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(BooleanValue::Get(parameter)));
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(BooleanValue::Get(parameter), context.db.get()));
 	}
 #endif
 }
@@ -141,15 +139,16 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), SetHTTPConnectionCaching, SetScope::GLOBAL);
 }
 
-void HTTPSettings::Initialize(DBConfig &config) {
+void HTTPSettings::Initialize(DatabaseInstance &db) {
+	auto &config = DBConfig::GetConfig(db);
 	auto &http_util = config.GetHTTPUtil();
 	if (http_util.GetName() == "WasmHTTPUtils") {
 		return;
 	}
-#ifndef EMSCRIPTEN
-	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(config)));
+#ifndef __EMSCRIPTEN__
+	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(config), db));
 #else
-	config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
+	config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>(db));
 #endif
 }
 

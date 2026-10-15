@@ -9,7 +9,7 @@
 #include "duckdb/logging/log_manager.hpp"
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 #include "crypto.hpp"
-#elif defined(EMSCRIPTEN)
+#elif defined(__EMSCRIPTEN__)
 #include "mbedtls_wrapper.hpp"
 #endif // OVERRIDE_ENCRYPTION_UTILS
 
@@ -23,10 +23,11 @@ struct HTTPFSExtensionLoader {
 		fs.RegisterSubSystem(make_uniq<S3FileSystem>(BufferManager::GetBufferManager(instance)));
 	}
 
-	static void RegisterSettings(DBConfig &config) {
+	static void RegisterSettings(DatabaseInstance &instance) {
+		auto &config = DBConfig::GetConfig(instance);
 		HTTPSettings::Register(config);
 		S3Settings::Register(config);
-		HTTPSettings::Initialize(config);
+		HTTPSettings::Initialize(instance);
 		S3Settings::Initialize(config);
 	}
 
@@ -38,7 +39,7 @@ struct HTTPFSExtensionLoader {
 	static void ConfigureEncryption(DBConfig &config) {
 #ifdef OVERRIDE_ENCRYPTION_UTILS
 		config.encryption_util = make_shared_ptr<AESStateSSLFactory>();
-#elif defined(EMSCRIPTEN)
+#elif defined(__EMSCRIPTEN__)
 		if (!config.encryption_util) {
 			config.encryption_util = make_shared_ptr<duckdb_mbedtls::MbedTlsWrapper::AESStateMBEDTLSFactory>();
 		}
@@ -48,7 +49,7 @@ struct HTTPFSExtensionLoader {
 	static void Load(ExtensionLoader &loader) {
 		auto &instance = loader.GetDatabaseInstance();
 		auto &config = DBConfig::GetConfig(instance);
-		RegisterSettings(config);
+		RegisterSettings(instance);
 		RegisterSecrets(loader);
 		ConfigureEncryption(config);
 
