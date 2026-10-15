@@ -123,7 +123,7 @@ SET s3_endpoint='false_endpoint';
 statement error
 SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_endpoint={DUCKDB_S3_ENDPOINT}" LIMIT 3
 ----
-S3 URL routing options cannot change the destination of configured request material
+URL options change the S3 destination, but the request uses credentials from a secret or setting
 
 # A destination override must provide its own credentials.
 statement ok
@@ -164,12 +164,12 @@ SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_use_ssl=bla" LIM
 statement error
 SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_url_style=vhost" LIMIT 3
 ----
-S3 URL routing options cannot change the destination of configured request material
+URL options change the S3 destination, but the request uses credentials from a secret or setting
 
 statement error
 SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_url_style=virtual" LIMIT 3
 ----
-S3 URL routing options cannot change the destination of configured request material
+URL options change the S3 destination, but the request uses credentials from a secret or setting
 
 statement ok
 SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_url_style=vhost&s3_access_key_id={AWS_ACCESS_KEY_ID}&s3_secret_access_key={AWS_SECRET_ACCESS_KEY}" LIMIT 3

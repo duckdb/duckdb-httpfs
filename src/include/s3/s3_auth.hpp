@@ -170,7 +170,9 @@ struct S3AuthRoutingPolicy {
 	bool operator==(const S3AuthRoutingPolicy &other) const;
 
 	Inheritance inheritance = Inheritance::ALLOW_CONFIGURED;
-	bool has_inherited_authentication = false;
+	bool has_inherited_credentials = false;
+	bool has_inherited_sse_key = false;
+	string configured_destination_error;
 };
 
 class S3AuthParams {
@@ -217,8 +219,6 @@ private:
 	static S3AuthParams ResolveConfig(S3AuthConfig config);
 	static S3AuthRoutingPolicy ResolveRoutingPolicy(const S3AuthConfig &configured, const S3AuthParams &resolved,
 	                                                const S3AuthQueryParameters &url_options, const string &file_path);
-	static S3AuthRoutingPolicy::Inheritance GetAuthInheritance(const S3AuthConfig &configured,
-	                                                           const S3AuthParams &resolved, const string &file_path);
 };
 
 struct AWSEnvironmentCredentialsProvider {

@@ -3,6 +3,7 @@
 #include "s3/s3_url.hpp"
 
 #include "duckdb/common/crypto/md5.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/blob.hpp"
 
@@ -231,44 +232,70 @@ S3AuthRoutingPolicy S3AuthResolver::ResolveRoutingPolicy(const S3AuthConfig &con
                                                          const S3AuthQueryParameters &url_options,
                                                          const string &file_path) {
 	S3AuthRoutingPolicy result;
-	result.inheritance = GetAuthInheritance(configured, resolved, file_path);
-	result.has_inherited_authentication =
-	    !resolved.credentials.HasSameAuthentication(url_options.GetExplicitCredentials()) ||
-	    (resolved.request_options.sse_customer_key && !url_options.OverridesSSECustomerKey());
-	return result;
-}
-
-S3AuthRoutingPolicy::Inheritance S3AuthResolver::GetAuthInheritance(const S3AuthConfig &configured,
-                                                                    const S3AuthParams &resolved,
-                                                                    const string &file_path) {
-	// Failed destination comparisons cannot authorize inherited material.
+	result.inheritance = S3AuthRoutingPolicy::Inheritance::REQUIRE_EXPLICIT;
+	result.has_inherited_credentials =
+	    !resolved.credentials.HasSameAuthentication(url_options.GetExplicitCredentials());
+	result.has_inherited_sse_key = resolved.request_options.sse_customer_key && !url_options.OverridesSSECustomerKey();
+	S3AuthURLParams url;
 	try {
 		auto endpoint = S3Provider::ResolveEndpoint(configured);
-		S3AuthURLParams url {std::move(endpoint.endpoint), endpoint.mode, endpoint.style, configured.query_mode};
+		url = {std::move(endpoint.endpoint), endpoint.mode, endpoint.style, configured.query_mode};
+	} catch (const InvalidInputException &ex) {
+		result.configured_destination_error = ErrorData(ex).RawMessage();
+		return result;
+	} catch (const IOException &ex) {
+		result.configured_destination_error = ErrorData(ex).RawMessage();
+		return result;
+	}
+	// Failed URL comparisons cannot authorize inherited material, but are not
+	// necessarily errors in the saved configuration (the URL supplies the bucket).
+	try {
 		if (url == resolved.GetURLParams() ||
 		    S3Url::Parse(file_path, configured.route, url).GetBucketHTTPUrl() ==
 		        S3Url::Parse(file_path, resolved).GetBucketHTTPUrl() ||
 		    resolved.GetProvider().AllowsAutomaticEndpointChange(url, resolved.GetURLParams())) {
-			return S3AuthRoutingPolicy::Inheritance::ALLOW_CONFIGURED;
+			result.inheritance = S3AuthRoutingPolicy::Inheritance::ALLOW_CONFIGURED;
 		}
 	} catch (const InvalidInputException &) {
-		return S3AuthRoutingPolicy::Inheritance::REQUIRE_EXPLICIT;
 	} catch (const IOException &) {
-		return S3AuthRoutingPolicy::Inheritance::REQUIRE_EXPLICIT;
 	}
-	return S3AuthRoutingPolicy::Inheritance::REQUIRE_EXPLICIT;
+	return result;
 }
 
 void S3AuthRoutingPolicy::ValidateInheritedMaterial(bool has_configured_headers) const {
-	if (inheritance == Inheritance::REQUIRE_EXPLICIT && (has_inherited_authentication || has_configured_headers)) {
-		throw InvalidInputException(
-		    "S3 URL routing options cannot change the destination of configured request material; "
-		    "configure the endpoint and authentication together in a secret");
+	if (inheritance == Inheritance::ALLOW_CONFIGURED) {
+		return;
 	}
+	vector<string> inherited_material;
+	if (has_inherited_credentials) {
+		inherited_material.emplace_back("credentials");
+	}
+	if (has_inherited_sse_key) {
+		inherited_material.emplace_back("SSE-C encryption key (SSE_C_KEY)");
+	}
+	if (has_configured_headers) {
+		inherited_material.emplace_back("HTTP headers");
+	}
+	if (inherited_material.empty()) {
+		return;
+	}
+	auto material = StringUtil::Join(inherited_material, " and ");
+	if (!configured_destination_error.empty()) {
+		throw InvalidInputException(
+		    "Cannot reuse configured %s because the configured S3 destination could not be resolved: %s. "
+		    "Fix the destination configuration in the secret or settings.",
+		    material, configured_destination_error);
+	}
+	throw InvalidInputException(
+	    "URL options change the S3 destination, but the request uses %s from a secret or setting. "
+	    "Configure the intended ENDPOINT, URL_STYLE and USE_SSL together with the %s.",
+	    material, material);
 }
 
 bool S3AuthRoutingPolicy::operator==(const S3AuthRoutingPolicy &other) const {
-	return inheritance == other.inheritance && has_inherited_authentication == other.has_inherited_authentication;
+	return inheritance == other.inheritance && has_inherited_credentials == other.has_inherited_credentials &&
+	       has_inherited_sse_key == other.has_inherited_sse_key &&
+	       configured_destination_error == other.configured_destination_error;
 }
 
 bool S3AuthParams::HasAuthenticationMaterial() const {
@@ -295,7 +322,8 @@ S3AuthParams S3AuthResolver::ResolveConfig(S3AuthConfig config) {
 	result.url = {std::move(endpoint.endpoint), endpoint.mode, endpoint.style, config.query_mode};
 	result.request_options = std::move(request_options);
 	result.refresh_identity = {config.use_ssl};
-	result.routing.has_inherited_authentication = result.HasAuthenticationMaterial();
+	result.routing.has_inherited_credentials = result.credentials.HasAuthentication();
+	result.routing.has_inherited_sse_key = result.request_options.sse_customer_key.has_value();
 	if (result.request_options.sse_customer_key) {
 		if (!result.request_options.kms_key_id.empty()) {
 			throw InvalidInputException("SSE_C_KEY and KMS_KEY_ID cannot be configured together");

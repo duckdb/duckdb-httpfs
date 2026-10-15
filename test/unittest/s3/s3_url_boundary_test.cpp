@@ -7,6 +7,7 @@
 #include "s3/s3fs.hpp"
 #include "crypto.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 
@@ -108,6 +109,58 @@ TEST_CASE("S3 compatibility mode never interprets marker-looking keys as routing
 	}
 }
 
+TEST_CASE("A sole terminal question mark preserves the directly named S3 object", "[httpfs][s3][url-boundary]") {
+	for (const string client : {"curl", "httplib"}) {
+		CAPTURE(client);
+		MockS3ServerConfig config;
+		config.object.key = "data/file?";
+		MockS3Server server(config);
+		DuckDB db(nullptr);
+		Connection con(db);
+		S3TestHelper::LoadExtension(db);
+		S3TestHelper::RequireQueryOk(con, "SET httpfs_client_implementation='" + client + "'");
+		S3TestHelper::RequireQueryOk(con, "CREATE SECRET reader (TYPE S3, KEY_ID 'id', SECRET 'secret', ENDPOINT '" +
+		                                      server.Endpoint() + "', URL_STYLE 'path', USE_SSL false)");
+		const auto direct_path = server.S3Path();
+		auto listed = con.Query("SELECT file FROM glob('s3://refresh-bucket/data/**')");
+		INFO((listed->HasError() ? listed->GetError() : ""));
+		REQUIRE_FALSE(listed->HasError());
+		const auto listed_path = listed->Collection().GetValue(0, 0).ToString();
+		REQUIRE(listed_path == direct_path + "?");
+		for (const auto &path : {direct_path, listed_path}) {
+			auto result = con.Query("SELECT filename, content FROM read_blob(?)", Value(path));
+			INFO((result->HasError() ? result->GetError() : ""));
+			REQUIRE_FALSE(result->HasError());
+			REQUIRE(result->Collection().GetValue(0, 0).ToString() == path);
+			REQUIRE(StringValue::Get(result->Collection().GetValue(1, 0)) == server.ObjectData());
+		}
+		bool read_exact_key = false;
+		for (const auto &observation : server.Observations()) {
+			if (observation.target.find("list-type=") != string::npos) {
+				continue;
+			}
+			REQUIRE(observation.target == "/refresh-bucket/data/file%3F");
+			read_exact_key |= observation.method == "GET";
+		}
+		REQUIRE(read_exact_key);
+
+		S3TestHelper::RequireQueryOk(
+		    con, "COPY (SELECT 42 AS value, 7 AS payload WHERE false) TO 's3://refresh-bucket/data' "
+		         "(FORMAT CSV, PARTITION_BY(value), OVERWRITE)");
+		bool deleted_exact_key = false;
+		for (const auto &observation : server.Observations()) {
+			if (observation.method == "POST") {
+				const string expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+				                        "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+				                        "<Object><Key>data/file?</Key></Object><Quiet>true</Quiet></Delete>";
+				REQUIRE(observation.body_digest == MockS3DigestBody(expected));
+				deleted_exact_key = true;
+			}
+		}
+		REQUIRE(deleted_exact_key);
+	}
+}
+
 TEST_CASE("Anonymous S3 routing retains public request options", "[httpfs][s3][url-boundary]") {
 	S3AuthConfig config;
 	config.request_options.kms_key_id = "public-key-identifier";
@@ -116,6 +169,44 @@ TEST_CASE("Anonymous S3 routing retains public request options", "[httpfs][s3][u
 	REQUIRE(params.GetURLParams().endpoint.GetHost() == "objects.example");
 	REQUIRE(params.GetRequestOptions().kms_key_id == config.request_options.kms_key_id);
 	REQUIRE(params.GetRequestOptions().requester_pays);
+}
+
+TEST_CASE("Writes invalidate metadata for both terminal question mark URL spellings", "[httpfs][s3][url-boundary]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (const bool write_listed_path : {false, true}) {
+			CAPTURE(client, write_listed_path);
+			MockS3ServerConfig config;
+			config.object.key = "file?";
+			MockS3Server server(config);
+			DuckDB db(nullptr);
+			Connection con(db);
+			S3TestHelper::LoadExtension(db);
+			S3TestHelper::RequireQueryOk(con, "SET httpfs_client_implementation='" + client + "'");
+			S3TestHelper::RequireQueryOk(con, "CREATE SECRET reader (TYPE S3, ENDPOINT '" + server.Endpoint() +
+			                                      "', URL_STYLE 'path', USE_SSL false)");
+			S3TestHelper::RequireQueryOk(con, "SET enable_http_metadata_cache=true");
+			S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
+			const auto direct_path = server.S3Path();
+			const auto listed_path = direct_path + "?";
+			S3TestHelper::RequireQueryOk(con, "BEGIN");
+			auto &fs = FileSystem::GetFileSystem(*con.context);
+			auto direct = fs.OpenFile(direct_path, FileFlags::FILE_FLAGS_READ);
+			auto cache = direct->file_system.Cast<HTTPFileSystem>().GetGlobalCache();
+			direct->Close();
+			auto listed = fs.OpenFile(listed_path, FileFlags::FILE_FLAGS_READ);
+			listed->Close();
+			HTTPMetadataCacheEntry cached;
+			REQUIRE(cache->Find(direct_path, cached));
+			REQUIRE(cache->Find(listed_path, cached));
+			S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+			const auto &write_path = write_listed_path ? listed_path : direct_path;
+			S3TestHelper::RequireQueryOk(con, "COPY (SELECT 'a much longer replacement body' AS v) TO '" + write_path +
+			                                      "' (FORMAT CSV)");
+			REQUIRE_FALSE(cache->Find(direct_path, cached));
+			REQUIRE_FALSE(cache->Find(listed_path, cached));
+		}
+	}
 }
 
 TEST_CASE("S3 URL routing cannot relocate inherited sensitive configuration", "[httpfs][s3][url-boundary]") {
@@ -165,6 +256,39 @@ TEST_CASE("S3 URL routing cannot relocate inherited sensitive configuration", "[
 	REQUIRE(explicit_url.GetURLParams().endpoint.GetHost() == "objects.example");
 }
 
+TEST_CASE("Literal-mode writes invalidate normal-mode listed metadata", "[httpfs][s3][url-boundary]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (const string key : {"file?", "file??", "file?part"}) {
+			CAPTURE(client, key);
+			MockS3ServerConfig config;
+			config.object.key = key;
+			MockS3Server server(config);
+			DuckDB db(nullptr);
+			Connection con(db);
+			S3TestHelper::LoadExtension(db);
+			S3TestHelper::RequireQueryOk(con, "SET httpfs_client_implementation='" + client + "'");
+			S3TestHelper::RequireQueryOk(con, "CREATE SECRET reader (TYPE S3, ENDPOINT '" + server.Endpoint() +
+			                                      "', URL_STYLE 'path', USE_SSL false)");
+			S3TestHelper::RequireQueryOk(con, "SET enable_http_metadata_cache=true");
+			S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
+			const auto listed_path = server.S3Path() + "?";
+			S3TestHelper::RequireQueryOk(con, "BEGIN");
+			auto &fs = FileSystem::GetFileSystem(*con.context);
+			auto handle = fs.OpenFile(listed_path, FileFlags::FILE_FLAGS_READ);
+			auto cache = handle->file_system.Cast<HTTPFileSystem>().GetGlobalCache();
+			handle->Close();
+			HTTPMetadataCacheEntry cached;
+			REQUIRE(cache->Find(listed_path, cached));
+			S3TestHelper::RequireQueryOk(con, "COMMIT");
+			S3TestHelper::RequireQueryOk(con, "SET s3_url_compatibility_mode=true");
+			S3TestHelper::RequireQueryOk(con, "COPY (SELECT 'a much longer replacement body' AS v) TO '" +
+			                                      server.S3Path() + "' (FORMAT CSV)");
+			S3TestHelper::RequireQueryOk(con, "SET s3_url_compatibility_mode=false");
+			REQUIRE_FALSE(cache->Find(listed_path, cached));
+		}
+	}
+}
+
 TEST_CASE("S3 URL routing preserves validated AWS region selection", "[httpfs][s3][url-boundary]") {
 	S3AuthConfig config;
 	config.credentials.access_key_id = "configured-id";
@@ -211,7 +335,7 @@ TEST_CASE("S3 secret routing overrides are rejected before transport", "[httpfs]
 		auto result = con.Query("FROM read_csv('" + receiver.S3Path() + "?s3_endpoint=" + receiver.Endpoint() +
 		                        "&s3_use_ssl=false&s3_url_style=path')");
 		REQUIRE(result->HasError());
-		REQUIRE(StringUtil::Contains(result->GetError(), "cannot change the destination"));
+		REQUIRE(StringUtil::Contains(result->GetError(), "URL options change the S3 destination"));
 		REQUIRE(receiver.Observations().empty());
 	}
 }
@@ -327,6 +451,88 @@ TEST_CASE("An invalid configured route cannot authorize inherited request materi
 		    S3AuthResolver::Resolve(config, path + "&s3_access_key_id=url-id&s3_secret_access_key=url-secret");
 		REQUIRE(explicit_auth.GetCredentials().secret_access_key == "url-secret");
 	}
+}
+
+TEST_CASE("S3 routing diagnostics identify inherited configuration without exposing its values",
+          "[httpfs][s3][url-boundary]") {
+	auto routing_error = [](const S3AuthConfig &config, const string &path, bool has_headers = false) {
+		try {
+			auto params = S3AuthResolver::Resolve(config, path);
+			params.ValidateInheritedMaterial(has_headers);
+		} catch (const InvalidInputException &ex) {
+			return ErrorData(ex).RawMessage();
+		}
+		FAIL("Expected a routing error");
+		return string();
+	};
+	S3AuthConfig config;
+	config.endpoint = "objects.example";
+	config.endpoint_mode = S3EndpointMode::EXPLICIT;
+	config.url_style = "path";
+	config.credentials.access_key_id = "private-configured-key";
+	config.credentials.secret_access_key = "private-configured-secret";
+	config.credentials.session_token = "private-configured-token";
+	const string path = "s3://bucket/key?s3_endpoint=other.example";
+	const string explicit_path = path + "&s3_access_key_id=url-key&s3_secret_access_key=url-secret&s3_session_token=";
+	auto error = routing_error(config, path);
+	REQUIRE(StringUtil::Contains(error, "credentials from a secret or setting"));
+	for (const string option : {"ENDPOINT", "URL_STYLE", "USE_SSL"}) {
+		REQUIRE(StringUtil::Contains(error, option));
+	}
+	for (const string value : {"private-configured-key", "private-configured-secret", "private-configured-token"}) {
+		REQUIRE_FALSE(StringUtil::Contains(error, value));
+	}
+	error = routing_error(config, explicit_path, true);
+	REQUIRE(StringUtil::Contains(error, "HTTP headers"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "credentials"));
+
+	const string encryption_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+	config.request_options.sse_customer_key = S3SSECustomerKey::Create(encryption_key);
+	error = routing_error(config, explicit_path);
+	REQUIRE(StringUtil::Contains(error, "SSE-C encryption key (SSE_C_KEY)"));
+	REQUIRE_FALSE(StringUtil::Contains(error, encryption_key));
+	REQUIRE_FALSE(StringUtil::Contains(error, "credentials"));
+	config.request_options.sse_customer_key.reset();
+
+	config.url_style = "vhost";
+	error = routing_error(config, "s3://bad@bucket/key?s3_url_style=path");
+	REQUIRE(StringUtil::Contains(error, "URL options change the S3 destination"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "configured S3 destination could not be resolved"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "Fix the destination configuration"));
+	config.url_style = "path";
+
+	config.endpoint = "ftp://objects.example";
+	error = routing_error(config, path);
+	REQUIRE(StringUtil::Contains(error, "configured credentials"));
+	REQUIRE(StringUtil::Contains(error, "Unsupported S3 endpoint scheme 'ftp'"));
+	REQUIRE(StringUtil::Contains(error, "Fix the destination configuration"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "private-configured"));
+	auto explicit_auth = S3AuthResolver::Resolve(config, explicit_path);
+	REQUIRE(explicit_auth.GetCredentials().access_key_id == "url-key");
+	REQUIRE(explicit_auth.GetCredentials().session_token.empty());
+
+	config.credentials = S3AuthCredentials();
+	auto anonymous = S3AuthResolver::Resolve(config, path);
+	REQUIRE(anonymous.GetURLParams().endpoint.GetHost() == "other.example");
+	error = routing_error(config, path, true);
+	REQUIRE(StringUtil::Contains(error, "configured HTTP headers"));
+	REQUIRE(StringUtil::Contains(error, "Unsupported S3 endpoint scheme 'ftp'"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "credentials"));
+
+	config.route = S3UrlScheme::Match("r2://");
+	config.endpoint.clear();
+	config.endpoint_mode = S3EndpointMode::AUTOMATIC;
+	config.credentials.access_key_id = "private-configured-key";
+	config.credentials.secret_access_key = "private-configured-secret";
+	error = routing_error(config, "r2://bucket/key?s3_endpoint=other.example");
+	REQUIRE(StringUtil::Contains(error, "R2 requires an endpoint"));
+	REQUIRE(StringUtil::Contains(error, "set ACCOUNT_ID or ENDPOINT in the R2 secret"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "s3_endpoint in the URL"));
+
+	config.route = S3UrlScheme::MatchRoutedUrl("custom://");
+	error = routing_error(config, "custom://bucket/key?s3_endpoint=other.example");
+	REQUIRE(StringUtil::Contains(error, "set ENDPOINT in the secret or set the s3_endpoint setting"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "s3_endpoint in the URL"));
 }
 
 TEST_CASE("Anonymous S3 requests preserve configured redirect behavior", "[httpfs][s3][url-boundary]") {
@@ -548,6 +754,8 @@ TEST_CASE("S3 directory adapters reject path normalization before deletion", "[h
 	REQUIRE(result->HasError());
 	INFO(result->GetError());
 	REQUIRE(StringUtil::Contains(result->GetError(), "cannot be represented"));
+	REQUIRE(StringUtil::Contains(result->GetError(), "filesystem path normalization"));
+	REQUIRE_FALSE(StringUtil::Contains(result->GetError(), "directory URL options"));
 	for (const auto &observation : server.Observations()) {
 		REQUIRE(observation.method == "GET");
 	}
@@ -588,6 +796,34 @@ TEST_CASE("S3 directory listing accepts bucket roots and ignores directory marke
 		REQUIRE(fs.JoinPath(directory, files[0]) == "s3://refresh-bucket/data/file.csv");
 	}
 	S3TestHelper::RequireQueryOk(con, "COMMIT");
+}
+
+TEST_CASE("Escaped S3 directory URLs report reconstruction rather than path normalization",
+          "[httpfs][s3][url-boundary]") {
+	for (const string client : {"curl", "httplib"}) {
+		CAPTURE(client);
+		MockS3ServerConfig config;
+		config.list.keys = {"di?r/old.csv"};
+		MockS3Server server(config);
+		DuckDB db(nullptr);
+		Connection con(db);
+		S3TestHelper::LoadExtension(db);
+		S3TestHelper::RequireQueryOk(con, "SET httpfs_client_implementation='" + client + "'");
+		S3TestHelper::RequireQueryOk(con, "CREATE SECRET reader (TYPE S3, ENDPOINT '" + server.Endpoint() +
+		                                      "', URL_STYLE 'path', USE_SSL false)");
+		auto result = con.Query("COPY (SELECT 42 AS value, 7 AS payload WHERE false) TO 's3://refresh-bucket/di?r?' "
+		                        "(FORMAT CSV, PARTITION_BY(value), OVERWRITE)");
+		REQUIRE(result->HasError());
+		REQUIRE(StringUtil::Contains(result->GetError(), "joining the directory and filename"));
+		REQUIRE_FALSE(StringUtil::Contains(result->GetError(), "filesystem path normalization"));
+		REQUIRE_FALSE(StringUtil::Contains(result->GetError(), "directory URL options"));
+		auto observations = server.Observations();
+		REQUIRE_FALSE(observations.empty());
+		for (const auto &observation : observations) {
+			REQUIRE(observation.method == "GET");
+			REQUIRE(observation.status == 200);
+		}
+	}
 }
 
 TEST_CASE("COPY overwrite rejects S3 dot segments before deleting any objects", "[httpfs][s3][url-boundary]") {
@@ -679,6 +915,8 @@ TEST_CASE("COPY overwrite refuses non-empty S3 directories with query options be
 			REQUIRE(result->HasError());
 			INFO(result->GetError());
 			REQUIRE(StringUtil::Contains(result->GetError(), "directory URL options"));
+			REQUIRE(StringUtil::Contains(result->GetError(), "REQUESTER_PAYS true"));
+			REQUIRE_FALSE(StringUtil::Contains(result->GetError(), "path normalization"));
 			auto observations = server.Observations();
 			REQUIRE_FALSE(observations.empty());
 			for (const auto &observation : observations) {

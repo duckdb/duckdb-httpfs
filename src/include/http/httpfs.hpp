@@ -86,6 +86,8 @@ protected:
 
 	virtual void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) DUCKDB_EXCLUDES(cache_policy_lock);
 	virtual HTTPMetadataCacheEntry GetCacheEntry() const;
+	//! Invalidate metadata affected by a write, including filesystem-specific URL aliases.
+	virtual void InvalidateWriteMetadata(HTTPMetadataCache &cache) const;
 
 private:
 	void FinalizeReadConfig();

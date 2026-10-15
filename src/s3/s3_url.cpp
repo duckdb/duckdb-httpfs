@@ -90,14 +90,17 @@ S3AuthQueryParameters S3Url::ParseAuthQueryParameters(const string &query, S3Pro
 			                        string(S3Provider::GetVersionParameterName(HTTPObjectVersionType::GCS_GENERATION)) +
 			                        "'";
 		}
-		throw IOException("Invalid query parameters found. Supported parameters are:\n%s", supported_parameters);
+		throw IOException("Invalid query parameters found. Supported parameters are:\n%s\n%s", supported_parameters,
+		                  "S3 URL options start after the last '?'; encode '?' in option values as %3F.");
 	}
 	return result;
 }
 
 S3Url::PathComponents S3Url::Split(const string &url, S3URLQueryMode mode) {
 	auto separator = mode == S3URLQueryMode::LITERAL_KEY ? string::npos : url.rfind('?');
-	if (separator == string::npos) {
+	// A sole terminal '?' is a literal key character in existing URLs. Serialized
+	// listed keys containing '?' have an extra delimiter, so this cannot match them.
+	if (separator == string::npos || (separator + 1 == url.size() && url.find('?') == separator)) {
 		return {url, ""};
 	}
 	return {url.substr(0, separator), url.substr(separator + 1)};

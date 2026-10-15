@@ -75,6 +75,7 @@ protected:
 	HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const override;
 	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
 	HTTPMetadataCacheEntry GetCacheEntry() const override;
+	void InvalidateWriteMetadata(HTTPMetadataCache &cache) const override;
 
 private:
 	void SetRegion(const string &region);
@@ -151,9 +152,10 @@ protected:
 	                                        optional_ptr<FileOpener> opener) override;
 
 private:
-	bool ListObjectsInDirectory(const string &directory,
-	                            const std::function<void(OpenFileInfo &, const string &relative_path)> &callback,
-	                            optional_ptr<FileOpener> opener);
+	bool ListObjectsInDirectory(
+	    const string &directory,
+	    const std::function<void(OpenFileInfo &, const string &relative_path, bool has_directory_options)> &callback,
+	    optional_ptr<FileOpener> opener);
 	S3RequestResult RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
 	                                       const string &body, idx_t key_count, string &result);
 

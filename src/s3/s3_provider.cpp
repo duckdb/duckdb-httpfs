@@ -447,10 +447,10 @@ S3ResolvedEndpoint S3Provider::ResolveEndpoint(const S3AuthConfig &config) {
 	}
 	if ((config.route.IsAlias() || config.route.type == S3ProviderType::R2) && EndpointIsUnresolved(endpoint_string)) {
 		if (config.route.type == S3ProviderType::R2) {
-			throw IOException("R2 requires an endpoint; provide account_id in the secret or s3_endpoint in the URL");
+			throw IOException("R2 requires an endpoint; set ACCOUNT_ID or ENDPOINT in the R2 secret");
 		}
-		throw IOException("An aliased URL scheme requires an endpoint; provide ENDPOINT in the secret, set "
-		                  "s3_endpoint, or pass s3_endpoint in the URL");
+		throw IOException("An aliased URL scheme requires an endpoint; set ENDPOINT in the secret or set "
+		                  "the s3_endpoint setting");
 	}
 
 	auto endpoint = NormalizedS3Endpoint::Parse(endpoint_string, config.use_ssl);

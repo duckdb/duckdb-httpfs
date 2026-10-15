@@ -406,7 +406,7 @@ unique_ptr<MultiFileList> S3FileSystem::GlobFilesExtended(const string &path, co
 }
 
 bool S3FileSystem::ListObjectsInDirectory(const string &directory,
-                                          const std::function<void(OpenFileInfo &, const string &)> &callback,
+                                          const std::function<void(OpenFileInfo &, const string &, bool)> &callback,
                                           optional_ptr<FileOpener> opener) {
 	FileOpenerInfo info {directory};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
@@ -437,7 +437,7 @@ bool S3FileSystem::ListObjectsInDirectory(const string &directory,
 			auto relative_path = parsed.GetRelativeObjectUrl(entry.path, base_key);
 			entry.path = parsed.GetObjectUrl(entry.path);
 			found = true;
-			callback(entry, relative_path);
+			callback(entry, relative_path, !parsed.GetQueryString().empty());
 		}
 	} while (!continuation.empty());
 	return found;
@@ -447,10 +447,20 @@ bool S3FileSystem::ListFilesExtended(const string &directory, const std::functio
                                      optional_ptr<FileOpener> opener) {
 	return ListObjectsInDirectory(
 	    directory,
-	    [&](OpenFileInfo &file, const string &relative_path) {
-		    if (JoinPath(directory, relative_path) != file.path) {
+	    [&](OpenFileInfo &file, const string &relative_path, bool has_directory_options) {
+		    auto joined_path = JoinPath(directory, relative_path);
+		    if (joined_path != file.path) {
+			    if (has_directory_options) {
+				    throw IOException("S3 directory URL options cannot be preserved when joining listed filenames. "
+				                      "Move supported options into the S3 secret, for example REQUESTER_PAYS true.");
+			    }
+			    auto literal_join = directory + (StringUtil::EndsWith(directory, "/") ? "" : "/") + relative_path;
+			    if (joined_path != literal_join) {
+				    throw IOException("S3 directory entry cannot be represented without changing its path; "
+				                      "filesystem path normalization changes the listed object key");
+			    }
 			    throw IOException("S3 directory entry cannot be represented without changing its path; "
-			                      "directory URL options or path normalization prevent an exact join");
+			                      "joining the directory and filename does not reconstruct the listed object URL");
 		    }
 		    file.path = relative_path;
 		    callback(file);
