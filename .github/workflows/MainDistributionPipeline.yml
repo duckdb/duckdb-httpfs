@@ -22,27 +22,30 @@ jobs:
         id: runners
         uses: duckdb/duckdb-ci/detect-runners@main
 
-  duckdb-stable-build:
-    name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+  build:
+    name: Build extension
+    uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
     needs:
       - prepare
     with:
-      extension_name: httpfs
-      ci_tools_version: main
+      groups: |
+        main:
+          config: extension_config.cmake
+          toolchain: main
       opt_in_archs: windows_arm64
       runners: ${{ needs.prepare.outputs.runners }}
 
-  duckdb-stable-deploy:
-    name: Deploy extension binaries
+  deploy:
+    name: Deploy extension
+    if: ${{ startsWith(github.ref_name, 'v') || github.ref_name == 'main' }}
     needs:
-      - prepare
-      - duckdb-stable-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+      - build
+    uses: duckdb/extension-ci-tools/.github/workflows/deploy.yml@main
     secrets: inherit
     with:
-      extension_name: httpfs
-      ci_tools_version: main
+      duckdb_version: ${{ needs.build.outputs.duckdb_version }}
+      duckdb_commit: ${{ needs.build.outputs.duckdb_commit }}
+      deploy_extensions: httpfs
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
 
@@ -73,7 +76,7 @@ jobs:
         run: |
           sudo apt-get update -y -qq
           sudo apt-get install -y -qq ninja-build clang-tidy libcurl4-openssl-dev libssl-dev
-          sudo pip3 install pybind11[global] --break-system-packages
+          sudo pip3 install 'pybind11[global]' --break-system-packages
       - name: Tidy Check
         run: make tidy-check
 
