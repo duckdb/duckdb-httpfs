@@ -1351,7 +1351,7 @@ TEST_CASE("S3 URL styles share one validation policy", "[httpfs][s3][provider][u
 
 	SECTION("compatibility mode keeps query-looking key text literal") {
 		auto config = TestAuthConfig();
-		config.compatibility_mode = true;
+		config.query_mode = S3URLQueryMode::LITERAL_KEY;
 		auto auth_params = ResolveTestAuth(std::move(config));
 		auto parsed = S3Url::Parse("s3://bucket/key?s3_url_style=handwritten", auth_params);
 		REQUIRE(parsed.GetQueryString().empty());
@@ -1623,7 +1623,7 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 
 	SECTION("compatibility mode treats the version parameter as key bytes") {
 		auto config = TestAuthConfig();
-		config.compatibility_mode = true;
+		config.query_mode = S3URLQueryMode::LITERAL_KEY;
 		const string path = "s3://bucket/key?s3_version_id=abc";
 		auto auth_params = ResolveTestAuth(std::move(config), path);
 		auto parsed_url = S3Url::Parse(path, auth_params);
@@ -1644,7 +1644,7 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		auto auth_params = ResolveTestAuth(TestAuthConfig());
 		REQUIRE(S3Url::GetDisplayUrl("s3://bucket/key?s3_secret_access_key=secret", auth_params) == "s3://bucket/key");
 		auto compatibility_config = TestAuthConfig();
-		compatibility_config.compatibility_mode = true;
+		compatibility_config.query_mode = S3URLQueryMode::LITERAL_KEY;
 		auto compatibility_params = ResolveTestAuth(std::move(compatibility_config));
 		REQUIRE(S3Url::GetDisplayUrl("s3://bucket/key?literal", compatibility_params) == "s3://bucket/key?literal");
 	}
@@ -1658,26 +1658,26 @@ TEST_CASE("S3 URL compatibility mode reads canonical and legacy secret keys", "[
 	SECTION("canonical key") {
 		KeyValueSecret secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("canonical"));
 		secret.secret_map["url_compatibility_mode"] = Value(true);
-		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().compatibility_mode);
+		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().query_mode == S3URLQueryMode::LITERAL_KEY);
 	}
 
 	SECTION("canonical key takes precedence") {
 		KeyValueSecret secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("precedence"));
 		secret.secret_map["url_compatibility_mode"] = Value(false);
 		secret.secret_map["s3_url_compatibility_mode"] = Value(true);
-		REQUIRE_FALSE(ReadSecretAuthParams(con, secret).GetURLParams().compatibility_mode);
+		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().query_mode == S3URLQueryMode::PARSE_OPTIONS);
 	}
 
 	SECTION("legacy key") {
 		KeyValueSecret secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("legacy"));
 		secret.secret_map["s3_url_compatibility_mode"] = Value(true);
-		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().compatibility_mode);
+		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().query_mode == S3URLQueryMode::LITERAL_KEY);
 	}
 
 	SECTION("global setting fallback") {
 		S3TestHelper::RequireQueryOk(con, "SET s3_url_compatibility_mode=true");
 		KeyValueSecret secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("setting"));
-		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().compatibility_mode);
+		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().query_mode == S3URLQueryMode::LITERAL_KEY);
 	}
 
 	SECTION("invalid legacy URL style") {
@@ -1801,7 +1801,7 @@ TEST_CASE("GCS generation URL validation and signing", "[httpfs][s3][gcs-generat
 		REQUIRE_THROWS(other.GetProvider().GetVersionQueryParameter(parsed.GetObjectVersion()));
 		REQUIRE_THROWS(S3Url::Parse(other.GetProvider().GetRoute().prefix + "bucket/key?gcs_generation=123", other));
 	}
-	config.compatibility_mode = true;
+	config.query_mode = S3URLQueryMode::LITERAL_KEY;
 	auto literal = S3Url::Parse(path, ResolveTestAuth(config, path));
 	REQUIRE_FALSE(literal.GetObjectVersion().IsSet());
 	REQUIRE(literal.GetKey() == "key?gcs_generation=000123");

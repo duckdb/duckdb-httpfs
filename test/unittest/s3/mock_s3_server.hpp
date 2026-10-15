@@ -85,6 +85,7 @@ struct MockS3MetadataConfig {
 	bool exact_empty_response_headers = false;
 	//! Emit one HTTP redirect before the successful HEAD response
 	bool redirect_head = false;
+	string redirect_location;
 	vector<pair<string, string>> redirect_response_headers;
 };
 
@@ -136,6 +137,7 @@ struct MockS3FailureConfig {
 };
 
 struct MockS3ListConfig {
+	vector<string> keys;
 	//! Return a truncated first page before the final object page
 	bool paginate = false;
 	//! Serve a generated tree of "<tree_prefix>d<NN>/f<NNN>.bin" keys instead of the single configured object
@@ -296,6 +298,7 @@ private:
 	unique_ptr<Impl> impl;
 };
 
+string MockS3DigestBody(const string &body);
 string MockS3RefreshTargetName(MockS3RefreshTarget target);
 
 bool MockS3HasObservation(const vector<MockS3RequestObservation> &observations, const string &method,

@@ -50,7 +50,7 @@ static void AddDeleteAuthHash(hash_t &result, const S3AuthParams &auth_params) {
 	AddDeleteHash(result, url.endpoint.GetCanonicalValue());
 	AddDeleteEnumHash(result, url.endpoint_mode);
 	AddDeleteEnumHash(result, url.style);
-	AddDeleteHash(result, static_cast<idx_t>(url.compatibility_mode));
+	AddDeleteEnumHash(result, url.query_mode);
 
 	auto &request_options = auth_params.GetRequestOptions();
 	AddDeleteHash(result, request_options.kms_key_id);
@@ -370,8 +370,8 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 
 void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> opener) {
 	vector<string> files_to_remove;
-	ListFiles(
-	    path, [&](const string &file, bool is_dir) { files_to_remove.push_back(file); }, opener.get());
+	ListObjectsInDirectory(
+	    path, [&](OpenFileInfo &file, const string &) { files_to_remove.push_back(file.path); }, opener);
 
 	RemoveFiles(files_to_remove, opener);
 }

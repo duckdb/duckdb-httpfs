@@ -151,6 +151,9 @@ protected:
 	                                        optional_ptr<FileOpener> opener) override;
 
 private:
+	bool ListObjectsInDirectory(const string &directory,
+	                            const std::function<void(OpenFileInfo &, const string &relative_path)> &callback,
+	                            optional_ptr<FileOpener> opener);
 	S3RequestResult RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
 	                                       const string &body, idx_t key_count, string &result);
 

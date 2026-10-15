@@ -1,6 +1,7 @@
 target_sources(
   unittest_httpfs
   PRIVATE mock_s3_server.cpp
+          s3_url_boundary_test.cpp
           gcs_generation_test.cpp
           s3_refresh_test.cpp
           s3_request_test.cpp

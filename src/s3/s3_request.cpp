@@ -530,11 +530,17 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
                                                    const CapturedHTTPRequestSnapshot &captured,
                                                    const S3RequestSpec &spec, HTTPRetryBudget &retry_budget) {
 	auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
+	auto has_configured_headers = !snapshot.Params().extra_headers.empty() || !snapshot.Params().bearer_token.empty();
+	snapshot.auth_params.ValidateInheritedMaterial(has_configured_headers);
 	auto &operation_info = S3RequestUtil::GetOperationInfo(spec.operation);
 	S3RequestData result(spec.operation, snapshot.auth_params, retry_budget);
 	result.captured = captured;
 	auto session_request = snapshot.CreateRequest();
 	result.http_params = std::move(session_request.params);
+	// Sensitive requests use only the validated and re-signed region redirect path.
+	if (has_configured_headers || snapshot.auth_params.HasAuthenticationMaterial()) {
+		result.http_params->follow_location = false;
+	}
 	auto parsed_s3_url = S3Url::Parse(spec.url, result.auth_params);
 	auto &version = spec.object_version.IsSet() ? spec.object_version : parsed_s3_url.GetObjectVersion();
 	if (version.IsSet() && spec.operation != S3RequestOperation::HEAD_OBJECT &&
