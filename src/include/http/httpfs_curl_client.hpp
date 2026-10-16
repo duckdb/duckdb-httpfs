@@ -12,6 +12,10 @@ struct FileOpenerInfo;
 class HTTPState;
 class HTTPFSCurlClient;
 
+//! Returns the CURLOPT_SSLVERSION value that pins the minimum TLS version to 1.2,
+//! leaving the maximum at curl's default. Exposed for unit testing.
+long GetCurlMinTLSVersion(); // NOLINT(google-runtime-int): curl option values are long
+
 class CURLURLHandle {
 private:
 	explicit CURLURLHandle(CURLU *handle_p);

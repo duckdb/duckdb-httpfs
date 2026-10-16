@@ -9,4 +9,5 @@ target_sources(
           openssl_test.cpp
           positional_read_test.cpp
           range_read_test.cpp
-          sequential_read_test.cpp)
+          sequential_read_test.cpp
+          tls_version_test.cpp)
