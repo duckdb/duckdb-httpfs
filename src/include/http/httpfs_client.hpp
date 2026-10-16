@@ -63,7 +63,7 @@ public:
 	static constexpr bool DEFAULT_FORCE_DOWNLOAD = false;
 	static constexpr bool AUTO_FALLBACK_TO_FULL_DOWNLOAD = true;
 
-	//! Runtime parameters; append new fields and propagate them to duckdb-wasm
+	//! Runtime parameters owned by HTTPFS; browser clients consume only the HTTPParams base.
 	bool force_download = DEFAULT_FORCE_DOWNLOAD;
 	bool auto_fallback_to_full_download = AUTO_FALLBACK_TO_FULL_DOWNLOAD;
 	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;

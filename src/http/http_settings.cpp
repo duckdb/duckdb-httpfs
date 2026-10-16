@@ -12,6 +12,36 @@
 
 namespace duckdb {
 
+namespace {
+
+class HTTPFSWasmUtil : public HTTPFSUtil {
+public:
+	HTTPFSWasmUtil(HTTPUtil &browser_util_p, DatabaseInstance &db) : HTTPFSUtil(db), browser_util(browser_util_p) {
+	}
+
+	unique_ptr<HTTPClient> InitializeClient(HTTPParams &params, const string &proto_host_port) override {
+		return browser_util.InitializeClient(params, proto_host_port);
+	}
+
+	HTTPTransportReusePolicy GetTransportReusePolicy() const override {
+		return HTTPTransportReusePolicy::EPHEMERAL;
+	}
+
+	string GetName() const override {
+		return "HTTPFS-Wasm";
+	}
+
+private:
+	bool GetDefaultVerifySSL(const HTTPFSParams &) const override {
+		return true;
+	}
+
+	//! The database transport manager retains previous providers until database destruction.
+	HTTPUtil &browser_util;
+};
+
+} // namespace
+
 static void RequireGlobalScope(SetScope scope, const char *setting) {
 	if (scope == SetScope::SESSION) {
 		throw InvalidInputException("%s can only be set globally", setting);
@@ -64,7 +94,7 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 	auto &config = DBConfig::GetConfig(context);
 	auto value = StringValue::Get(parameter);
 	auto &http_util = config.GetHTTPUtil();
-	if (http_util.GetName() == "WasmHTTPUtils") {
+	if (http_util.GetName() == "WasmHTTPUtils" || http_util.GetName() == "HTTPFS-Wasm") {
 		if (value == "wasm" || value == "default") {
 			return;
 		}
@@ -142,7 +172,11 @@ void HTTPSettings::Register(DBConfig &config) {
 void HTTPSettings::Initialize(DatabaseInstance &db) {
 	auto &config = DBConfig::GetConfig(db);
 	auto &http_util = config.GetHTTPUtil();
+	if (http_util.GetName() == "HTTPFS-Wasm") {
+		return;
+	}
 	if (http_util.GetName() == "WasmHTTPUtils") {
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSWasmUtil>(http_util, db));
 		return;
 	}
 #ifndef __EMSCRIPTEN__
