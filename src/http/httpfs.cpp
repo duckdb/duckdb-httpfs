@@ -1,5 +1,6 @@
 #include "http/httpfs.hpp"
 #include "s3/s3_provider.hpp"
+#include "s3/s3_request.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/logging/log_manager.hpp"
 
@@ -53,6 +54,19 @@ void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> res
 	auto sanitized_request = request;
 	sanitized_request.headers["x-amz-server-side-encryption-customer-key"] = "redacted";
 	HTTPUtil::LogRequest(sanitized_request, response);
+}
+
+bool HTTPFSUtil::ShouldRetry(const BaseRequest &request, const HTTPResponse &response) {
+	// S3 reports a timed-out upload as 400 RequestTimeout: the status is final, the error code is not.
+	return HTTPUtil::ShouldRetry(request, response) || S3RequestUtil::IsRequestTimeout(response);
+}
+
+void HTTPFSUtil::PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) {
+	// Only S3 requests carry an invocation id; the attempt header is unsigned, like in the AWS SDKs.
+	if (!request.headers.HasHeader(S3_INVOCATION_ID_HEADER)) {
+		return;
+	}
+	request.headers[S3_ATTEMPT_HEADER] = StringUtil::Format("attempt=%llu; max=%llu", attempt, max_attempts);
 }
 
 struct HTTPParametersInitializer {
