@@ -5,6 +5,8 @@ if(NOT _DUCKDB_HTTPFS_VCPKG_CLANGCL_TOOLCHAIN)
 	find_program(CMAKE_CXX_COMPILER NAMES clang-cl.exe clang-cl REQUIRED)
 	find_program(CMAKE_RC_COMPILER NAMES llvm-rc.exe llvm-rc rc.exe rc REQUIRED)
 
+	message(STATUS "duckdb-httpfs: building vcpkg OpenSSL with clang-cl: ${CMAKE_C_COMPILER}")
+
 	string(APPEND VCPKG_C_FLAGS " --target=arm64-pc-windows-msvc")
 	string(APPEND VCPKG_CXX_FLAGS " --target=arm64-pc-windows-msvc")
 
