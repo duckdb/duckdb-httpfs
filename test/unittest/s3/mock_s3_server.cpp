@@ -337,7 +337,7 @@ public:
 	}
 
 	explicit Impl(MockS3ServerConfig config_p)
-	    : config(std::move(config_p)), live_generation(config.object.generation),
+	    : config(std::move(config_p)), live_generation(config.object.generation), live_version(config.object.version),
 	      server_owner(CreateServer(config.use_ssl)), server(*server_owner) {
 		uploaded_object = config.upload.initial_published_object;
 		remaining_put_failures = config.failures.transient_put_failures;
@@ -588,6 +588,94 @@ public:
 		for (const auto &header : config.metadata.response_headers) {
 			response.set_header(header.first, header.second);
 		}
+	}
+
+	bool IsVersioned() const {
+		return !config.object.versions.empty();
+	}
+
+	//! The S3 version selected by versionId, or the live one
+	string GetS3Version(const httplib::Request &request) const {
+		if (request.has_param("versionId")) {
+			return GetParameter(request, "versionId");
+		}
+		annotated_lock_guard<annotated_mutex> guard(generation_lock);
+		return live_version;
+	}
+
+	void SetVersionHeaders(httplib::Response &response, const string &version_id,
+	                       const MockS3ObjectVersion &version) const {
+		response.set_header("Accept-Ranges", "bytes");
+		response.set_header("ETag", version.etag);
+		response.set_header("x-amz-version-id", version_id);
+	}
+
+	void HandleVersionedObject(const httplib::Request &request, httplib::Response &response) const {
+		auto version_id = GetS3Version(request);
+		auto entry = config.object.versions.find(version_id);
+		if (entry == config.object.versions.end()) {
+			response.status = 404;
+			Record(request, response.status);
+			return;
+		}
+		const auto &version = entry->second;
+		if (request.has_header("If-Match") && GetHeader(request, "If-Match") != version.etag) {
+			response.status = 412;
+			Record(request, response.status);
+			return;
+		}
+		SetVersionHeaders(response, version_id, version);
+		if (request.method == "HEAD") {
+			response.status = 200;
+			response.set_header("Content-Length", std::to_string(version.data.size()));
+			Record(request, response.status);
+			return;
+		}
+		auto range = GetHeader(request, "Range");
+		if (range.empty()) {
+			response.status = 200;
+			response.set_content(version.data, "application/octet-stream");
+			Record(request, response.status);
+			return;
+		}
+		idx_t range_start;
+		idx_t range_end;
+		if (!ParseRange(range, version.data.size(), range_start, range_end)) {
+			response.status = 416;
+			Record(request, response.status);
+			return;
+		}
+		// httplib applies the Range header to the full body
+		response.status = 206;
+		response.set_content(version.data, "application/octet-stream");
+		Record(request, response.status);
+	}
+
+	void SendVersionedList(const httplib::Request &request, httplib::Response &response) const {
+		if (request.target.find("list-type=2") == string::npos) {
+			response.status = 404;
+			Record(request, response.status);
+			return;
+		}
+		string live;
+		{
+			annotated_lock_guard<annotated_mutex> guard(generation_lock);
+			live = live_version;
+		}
+		const auto &live_object = config.object.versions.at(live);
+		response.status = 200;
+		response.set_content(StringUtil::Format("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+		                                        "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+		                                        "<Name>%s</Name><IsTruncated>false</IsTruncated>"
+		                                        "<Contents><Key>%s</Key>"
+		                                        "<LastModified>2026-10-13T12:00:00.000Z</LastModified>"
+		                                        "<ETag>%s</ETag><Size>%llu</Size></Contents>"
+		                                        "</ListBucketResult>",
+		                                        config.object.bucket, config.object.key,
+		                                        StringUtil::Replace(live_object.etag, "\"", "&quot;"),
+		                                        static_cast<unsigned long long>(live_object.data.size())),
+		                     "application/xml");
+		Record(request, response.status);
 	}
 
 	string GetResponseETag() const {
@@ -1123,6 +1211,10 @@ public:
 				SendAuthFailure(request, response);
 				return httplib::Server::HandlerResponse::Handled;
 			}
+			if (IsVersioned()) {
+				HandleVersionedObject(request, response);
+				return httplib::Server::HandlerResponse::Handled;
+			}
 			if (remaining_head_not_found.load() > 0) {
 				remaining_head_not_found--;
 				response.status = 404;
@@ -1148,6 +1240,10 @@ public:
 		});
 
 		server.Get(path, [this](const httplib::Request &request, httplib::Response &response) {
+			if (IsVersioned()) {
+				HandleVersionedObject(request, response);
+				return;
+			}
 			auto generation = GetGeneration(request);
 			auto object_data = GetObjectData(generation);
 			if (!object_data) {
@@ -1328,6 +1424,10 @@ public:
 		});
 
 		auto list_objects = [this](const httplib::Request &request, httplib::Response &response) {
+			if (IsVersioned()) {
+				SendVersionedList(request, response);
+				return;
+			}
 			if (request.target.find("list-type=2") == string::npos) {
 				response.status = 404;
 				Record(request, response.status);
@@ -1426,6 +1526,7 @@ public:
 	MockS3ServerConfig config;
 	mutable annotated_mutex generation_lock;
 	string live_generation DUCKDB_GUARDED_BY(generation_lock);
+	string live_version DUCKDB_GUARDED_BY(generation_lock);
 	unique_ptr<httplib::Server> server_owner;
 	httplib::Server &server;
 	std::thread server_thread;
@@ -1525,6 +1626,12 @@ void MockS3Server::SetObjectGeneration(const string &generation) {
 	D_ASSERT(impl->config.object.generations.count(generation));
 	annotated_lock_guard<annotated_mutex> guard(impl->generation_lock);
 	impl->live_generation = generation;
+}
+
+void MockS3Server::SetObjectVersion(const string &version_id) {
+	D_ASSERT(impl->config.object.versions.count(version_id));
+	annotated_lock_guard<annotated_mutex> guard(impl->generation_lock);
+	impl->live_version = version_id;
 }
 
 string MockS3Server::UploadedObject() const {

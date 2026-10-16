@@ -45,6 +45,11 @@ enum class MockS3MultipartGeometry : uint8_t { FLEXIBLE, FIXED_EQUAL };
 
 enum class MockS3ETagBehavior : uint8_t { VALUE, EMPTY, OMIT };
 
+struct MockS3ObjectVersion {
+	string etag;
+	string data;
+};
+
 struct MockS3ObjectConfig {
 	string bucket = "refresh-bucket";
 	string key = "object.bin";
@@ -53,6 +58,10 @@ struct MockS3ObjectConfig {
 	unordered_map<string, string> generations;
 	//! Initial live generation; empty uses the unversioned data above
 	string generation;
+	//! S3 object versions by version ID; when set, they replace the data and metadata ETag above
+	unordered_map<string, MockS3ObjectVersion> versions;
+	//! Initial live S3 version ID
+	string version;
 };
 
 struct MockS3AuthConfig {
@@ -279,6 +288,7 @@ public:
 	string S3Path() const;
 	const string &ObjectData() const;
 	void SetObjectGeneration(const string &generation);
+	void SetObjectVersion(const string &version_id);
 	string UploadedObject() const;
 	string CompletionBody() const;
 	vector<MockS3RequestObservation> Observations() const;
