@@ -5,6 +5,7 @@ target_sources(
           hffs_test.cpp
           http_request_session_test.cpp
           http_test_helper.cpp
+          openssl_test.cpp
           positional_read_test.cpp
           range_read_test.cpp
           sequential_read_test.cpp)
