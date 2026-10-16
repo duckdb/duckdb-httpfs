@@ -81,12 +81,10 @@ TEST_CASE("GCS generation checks reject replacement between reads", "[httpfs][s3
 					for (auto &observation : server.Observations()) {
 						REQUIRE(observation.target == "/refresh-bucket/object.bin");
 						if (observation.method == "GET") {
+							// HMAC (AWS4-signed) requests rely on the response generation check instead.
 							REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match") ==
-							        vector<string> {"123"});
+							        (bearer ? vector<string> {"123"} : vector<string>()));
 							REQUIRE(observation.if_match.empty());
-							if (!bearer) {
-								REQUIRE(StringUtil::Contains(observation.authorization, "x-goog-if-generation-match"));
-							}
 						}
 					}
 					// A failed read invalidates global metadata; reopening observes the replacement.
@@ -351,10 +349,8 @@ CREATE OR REPLACE SECRET generation_test (
 				for (auto &observation : server.Observations()) {
 					REQUIRE(observation.target ==
 					        string("/refresh-bucket/object.bin") + (explicit_selection ? "?generation=123" : ""));
-					const bool conditional =
-					    !explicit_selection && target != MockS3RefreshTarget::FULL_GET && observation.method == "GET";
-					REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match") ==
-					        (conditional ? vector<string> {"123"} : vector<string>()));
+					// HMAC (AWS4-signed) requests never carry the generation precondition header.
+					REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match").empty());
 				}
 				S3TestHelper::RequireQueryOk(con, "COMMIT");
 			}
@@ -504,7 +500,7 @@ TEST_CASE("GCS cached metadata remains stable during full downloads", "[httpfs][
 		for (auto &observation : server.Observations()) {
 			if (observation.method == "GET") {
 				saw_full_get |= observation.range.empty();
-				REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match") == vector<string> {"123"});
+				REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match").empty());
 			}
 		}
 		REQUIRE(saw_full_get);

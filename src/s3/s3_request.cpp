@@ -382,11 +382,16 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	auto &credentials = auth_params.GetCredentials();
 	auto &request_options = auth_params.GetRequestOptions();
 	auto headers = CreateConfiguredS3Headers(configured_headers, provider.GetType());
-	provider.ApplyReadCondition(read_condition, headers);
+	auto auth_type = provider.GetAuthType(auth_params);
+	// GCS rejects x-goog-if-generation-match on AWS4-HMAC-SHA256 (HMAC key) requests with 400 ExcessHeaderValues.
+	// The response generation is still validated after the read.
+	if (provider.GetType() != S3ProviderType::GCS || auth_type != S3AuthType::SIGV4) {
+		provider.ApplyReadCondition(read_condition, headers);
+	}
 	if (provider.GetType() == S3ProviderType::GCS && !request_options.user_project.empty()) {
 		headers["x-goog-user-project"] = request_options.user_project;
 	}
-	switch (provider.GetAuthType(auth_params)) {
+	switch (auth_type) {
 	case S3AuthType::ANONYMOUS: {
 		headers["Host"] = host;
 		return headers;
