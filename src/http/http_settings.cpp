@@ -5,6 +5,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/logging/logger.hpp"
 
 #ifndef __EMSCRIPTEN__
 #include "http/httpfs_curl_client.hpp"
@@ -107,6 +108,8 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 		return;
 	}
 	if (value == "httplib") {
+		DUCKDB_LOG_WARNING(context, "The 'httplib' client implementation is deprecated and will be removed in a future "
+		                            "release; use 'curl' (the default) instead.");
 		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>(context.db.get()));
 		return;
 	}

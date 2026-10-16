@@ -54,3 +54,30 @@ query I
 SELECT current_setting('unsafe_disable_etag_checks');
 ----
 true
+
+# the httplib client implementation is deprecated
+statement ok
+SET enable_logging=true;
+
+statement ok
+SET warnings_as_errors=true;
+
+statement error
+SET httpfs_client_implementation='httplib';
+----
+The 'httplib' client implementation is deprecated and will be removed in a future release
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+statement ok
+SET httpfs_client_implementation='default';
+
+statement ok
+SET warnings_as_errors=false;
+
+statement ok
+SET httpfs_client_implementation='httplib';
+
+statement ok
+SET httpfs_client_implementation='default';
