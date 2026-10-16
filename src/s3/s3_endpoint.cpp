@@ -267,6 +267,10 @@ bool NormalizedS3Endpoint::IsDefaultPort() const {
 }
 
 void NormalizedS3Endpoint::SetHost(string host_p) {
+	if (host_p.empty()) {
+		throw InvalidInputException("S3 endpoint host cannot be empty");
+	}
+	ValidateEndpointHost(host_p);
 	host = StringUtil::Lower(std::move(host_p));
 	is_ipv6 = false;
 }

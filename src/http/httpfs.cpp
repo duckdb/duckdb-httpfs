@@ -1224,8 +1224,12 @@ void HTTPFileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpene
 
 	// If we're writing to a file, we might as well remove it from the cache
 	if (current_cache && flags.OpenForWriting()) {
-		current_cache->Erase(path);
+		InvalidateWriteMetadata(*current_cache);
 	}
+}
+
+void HTTPFileHandle::InvalidateWriteMetadata(HTTPMetadataCache &cache) const {
+	cache.Erase(path);
 }
 
 shared_ptr<const HTTPRequestSnapshot> HTTPFileHandle::CreateRequestSnapshot(const HTTPFSParams &params) const {

@@ -12,14 +12,28 @@ string S3Url::Encode(const string &input, S3URLEncodeMode mode) {
 	return StringUtil::URLEncode(input, mode == S3URLEncodeMode::QUERY_COMPONENT);
 }
 
-static bool GetQueryParam(const string &key, string &param, unordered_map<string, string> &query_params) {
+static optional<string> GetQueryParam(const string &key, unordered_map<string, string> &query_params) {
 	auto found_param = query_params.find(key);
 	if (found_param == query_params.end()) {
+		return {};
+	}
+	auto value = std::move(found_param->second);
+	query_params.erase(found_param);
+	return value;
+}
+
+static optional<bool> GetBooleanQueryParam(const string &key, unordered_map<string, string> &query_params) {
+	auto value = GetQueryParam(key, query_params);
+	if (!value) {
+		return {};
+	}
+	if (*value == "true") {
+		return true;
+	}
+	if (*value == "false") {
 		return false;
 	}
-	param = found_param->second;
-	query_params.erase(found_param);
-	return true;
+	throw IOException("Incorrect setting found for %s, allowed values are: 'true' or 'false'", key);
 }
 
 unordered_map<string, string> S3Url::ParseQueryParameters(const string &url_query_param) {
@@ -48,143 +62,82 @@ unordered_map<string, string> S3Url::ParseQueryParameters(const string &url_quer
 	return result;
 }
 
-void S3Url::ReadQueryParams(const string &url_query_param, S3AuthConfig &config) {
-	if (url_query_param.empty()) {
-		return;
-	}
-
-	auto query_params = ParseQueryParameters(url_query_param);
-	auto &credentials = config.credentials;
-	auto &request_options = config.request_options;
-
-	GetQueryParam("s3_region", credentials.region, query_params);
-	GetQueryParam("s3_access_key_id", credentials.access_key_id, query_params);
-	GetQueryParam("s3_secret_access_key", credentials.secret_access_key, query_params);
-	GetQueryParam("s3_session_token", credentials.session_token, query_params);
-	auto found_param = query_params.find("s3_use_ssl");
-	if (found_param != query_params.end()) {
-		if (found_param->second == "true") {
-			config.use_ssl = true;
-		} else if (found_param->second == "false") {
-			config.use_ssl = false;
-		} else {
-			throw IOException("Incorrect setting found for s3_use_ssl, allowed values are: 'true' or 'false'");
-		}
-		query_params.erase(found_param);
-	}
-	string endpoint;
-	if (GetQueryParam("s3_endpoint", endpoint, query_params)) {
-		config.endpoint = std::move(endpoint);
-		auto trimmed_endpoint = config.endpoint;
-		StringUtil::Trim(trimmed_endpoint);
-		config.endpoint_mode = trimmed_endpoint.empty() ? S3EndpointMode::AUTOMATIC : S3EndpointMode::EXPLICIT;
-	}
-	GetQueryParam("s3_url_style", config.url_style, query_params);
-	auto found_requester_pays_param = query_params.find("s3_requester_pays");
-	if (found_requester_pays_param != query_params.end()) {
-		if (found_requester_pays_param->second == "true") {
-			request_options.requester_pays = true;
-		} else if (found_requester_pays_param->second == "false") {
-			request_options.requester_pays = false;
-		} else {
-			throw IOException("Incorrect setting found for s3_requester_pays, allowed values are: 'true' or 'false'");
-		}
-		query_params.erase(found_requester_pays_param);
-	}
-	string sse_c_key;
-	if (GetQueryParam("s3_sse_c_key", sse_c_key, query_params)) {
-		if (sse_c_key.empty()) {
-			// An empty override clears any key configured through a secret.
-			request_options.sse_customer_key.reset();
-		} else {
-			// Base64 keys contain '+', which URL decoding turns into a space unless it was percent-encoded.
-			// A valid key never contains a space, so restore the '+' before validating.
-			sse_c_key = StringUtil::Replace(sse_c_key, " ", "+");
-			try {
-				request_options.sse_customer_key = S3SSECustomerKey::Create(sse_c_key);
-			} catch (InvalidInputException &) {
-				throw IOException("Incorrect setting found for s3_sse_c_key, expected a base64-encoded 256-bit key "
-				                  "(percent-encode '+' as %2B, '/' as %2F and '=' as %3D)");
-			}
-		}
-	}
-	if (config.route.type == S3ProviderType::GCS) {
-		GetQueryParam("gcs_user_project", request_options.user_project, query_params);
+S3AuthQueryParameters S3Url::ParseAuthQueryParameters(const string &query, S3ProviderType provider) {
+	auto query_params = ParseQueryParameters(query);
+	S3AuthQueryParameters result;
+	result.region = GetQueryParam("s3_region", query_params);
+	result.access_key_id = GetQueryParam("s3_access_key_id", query_params);
+	result.secret_access_key = GetQueryParam("s3_secret_access_key", query_params);
+	result.session_token = GetQueryParam("s3_session_token", query_params);
+	result.use_ssl = GetBooleanQueryParam("s3_use_ssl", query_params);
+	result.endpoint = GetQueryParam("s3_endpoint", query_params);
+	result.url_style = GetQueryParam("s3_url_style", query_params);
+	result.requester_pays = GetBooleanQueryParam("s3_requester_pays", query_params);
+	result.sse_c_key = GetQueryParam("s3_sse_c_key", query_params);
+	if (provider == S3ProviderType::GCS) {
+		result.user_project = GetQueryParam("gcs_user_project", query_params);
 	}
 	// Validate object selection without storing it in authentication parameters.
-	S3Provider::ParseObjectVersion(config.route.type, query_params);
+	S3Provider::ParseObjectVersion(provider, query_params);
 	if (!query_params.empty()) {
 		auto supported_parameters =
 		    string("'s3_region', 's3_access_key_id', 's3_secret_access_key', 's3_session_token',\n's3_endpoint', "
 		           "'s3_url_style', 's3_use_ssl', 's3_requester_pays', 's3_sse_c_key'");
 		supported_parameters +=
 		    ", '" + string(S3Provider::GetVersionParameterName(HTTPObjectVersionType::S3_VERSION_ID)) + "'";
-		if (config.route.type == S3ProviderType::GCS) {
+		if (provider == S3ProviderType::GCS) {
 			supported_parameters += ", 'gcs_user_project', '" +
 			                        string(S3Provider::GetVersionParameterName(HTTPObjectVersionType::GCS_GENERATION)) +
 			                        "'";
 		}
-		throw IOException("Invalid query parameters found. Supported parameters are:\n%s", supported_parameters);
+		throw IOException("Invalid query parameters found. Supported parameters are:\n%s\n%s", supported_parameters,
+		                  "S3 URL options start after the last '?'; encode '?' in option values as %3F.");
 	}
+	return result;
 }
 
-void S3Url::ApplyAuthQueryParameters(const string &url, S3AuthConfig &config) {
-	if (config.compatibility_mode) {
-		return;
+S3Url::PathComponents S3Url::Split(const string &url, S3URLQueryMode mode) {
+	auto separator = mode == S3URLQueryMode::LITERAL_KEY ? string::npos : url.rfind('?');
+	// A sole terminal '?' is a literal key character in existing URLs. Serialized
+	// listed keys containing '?' have an extra delimiter, so this cannot match them.
+	if (separator == string::npos || (separator + 1 == url.size() && url.find('?') == separator)) {
+		return {url, ""};
 	}
-	auto question_pos = url.find_first_of('?');
-	if (question_pos != string::npos) {
-		ReadQueryParams(url.substr(question_pos + 1), config);
-	}
+	return {url.substr(0, separator), url.substr(separator + 1)};
 }
 
 string S3Url::GetDisplayUrl(const string &url, const S3AuthParams &params) {
-	if (params.GetURLParams().compatibility_mode) {
-		return url;
-	}
-	auto query_position = url.find('?');
-	return query_position == string::npos ? url : url.substr(0, query_position);
+	return Split(url, params.GetURLParams().query_mode).path;
 }
 
 ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
+	return Parse(url, params.GetProvider().GetRoute(), params.GetURLParams());
+}
+
+ParsedS3Url S3Url::Parse(const string &url, const S3ProviderMatch &route, const S3AuthURLParams &url_params) {
 	string prefix, host, bucket, key, encoded_path, encoded_bucket_path, query_string;
 
-	auto &route = params.GetProvider().GetRoute();
 	prefix = route.prefix;
 	D_ASSERT(StringUtil::CIStartsWith(url, prefix));
-	auto prefix_end_pos = url.find("//") + 2;
-	auto slash_pos = url.find('/', prefix_end_pos);
+	auto components = Split(url, url_params.query_mode);
+	auto prefix_end_pos = components.path.find("//") + 2;
+	auto slash_pos = components.path.find('/', prefix_end_pos);
 	if (slash_pos == string::npos) {
 		throw IOException("URL needs to contain a '/' after the host");
 	}
-	bucket = url.substr(prefix_end_pos, slash_pos - prefix_end_pos);
+	bucket = components.path.substr(prefix_end_pos, slash_pos - prefix_end_pos);
 	if (bucket.empty()) {
 		throw IOException("URL needs to contain a bucket name");
 	}
 
-	if (params.GetURLParams().compatibility_mode) {
-		// In url compatibility mode, we will ignore any special chars, so query param strings are disabled
-		key += url.substr(slash_pos);
-	} else {
-		// Parse query parameters
-		auto question_pos = url.find_first_of('?');
-		if (question_pos != string::npos) {
-			query_string = url.substr(question_pos + 1);
-		}
-
-		if (!query_string.empty()) {
-			key += url.substr(slash_pos, question_pos - slash_pos);
-		} else {
-			key += url.substr(slash_pos);
-		}
-	}
+	key = components.path.substr(slash_pos);
+	query_string = std::move(components.query);
 
 	if (key.empty()) {
 		throw IOException("URL needs to contain key");
 	}
 
 	// Derived host and path based on the normalized endpoint
-	auto &url_params = params.GetURLParams();
 	host = url_params.endpoint.GetAuthority();
 	auto &base_path = url_params.endpoint.GetBasePath();
 	for (idx_t i = 0; i < base_path.size(); i++) {
@@ -209,7 +162,8 @@ ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 	if (use_path) {
 		encoded_path += "/" + Encode(bucket, S3URLEncodeMode::PATH);
 	} else if (use_vhost) {
-		host = bucket + "." + host;
+		auto bucket_endpoint = NormalizedS3Endpoint::Parse(bucket + "." + host, url_params.endpoint.UsesSSL());
+		host = bucket_endpoint.GetAuthority();
 	}
 	encoded_bucket_path = encoded_path.empty() ? "/" : encoded_path + "/";
 
@@ -228,11 +182,31 @@ ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 	result.bucket = std::move(bucket);
 	result.key = std::move(key);
 	result.query_string = std::move(query_string);
+	result.query_mode = url_params.query_mode;
 	result.host = std::move(host);
 	result.encoded_path = std::move(encoded_path);
 	result.encoded_bucket_path = std::move(encoded_bucket_path);
 	result.use_ssl = url_params.endpoint.UsesSSL();
 	return result;
+}
+
+string ParsedS3Url::GetObjectQuery(const string &object_key) const {
+	if (query_mode == S3URLQueryMode::PARSE_OPTIONS &&
+	    (!query_string.empty() || object_key.find('?') != string::npos)) {
+		return '?' + query_string;
+	}
+	return "";
+}
+
+string ParsedS3Url::GetObjectUrl(const string &object_key) const {
+	return prefix + bucket + "/" + object_key + GetObjectQuery(object_key);
+}
+
+string ParsedS3Url::GetRelativeObjectUrl(const string &object_key, const string &base_key) const {
+	if (!StringUtil::StartsWith(object_key, base_key)) {
+		throw IOException("Listed S3 object does not start with the requested directory");
+	}
+	return object_key.substr(base_key.size()) + GetObjectQuery(object_key);
 }
 
 const string &ParsedS3Url::GetPrefix() const {

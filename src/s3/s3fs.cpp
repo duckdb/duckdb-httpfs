@@ -248,6 +248,20 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 	return result;
 }
 
+void S3FileHandle::InvalidateWriteMetadata(HTTPMetadataCache &cache) const {
+	HTTPFileHandle::InvalidateWriteMetadata(cache);
+	auto captured = request_session->Capture();
+	auto mode = captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetURLParams().query_mode;
+	auto components = S3Url::Split(path, mode);
+	if (!components.query.empty() || components.path.find('?') == string::npos) {
+		return;
+	}
+	// Invalidate the written key's literal and normal-mode serialized spellings, including
+	// writes made in literal mode. Keep their entries separate: mode and scoped configuration
+	// can change which object a particular spelling resolves to.
+	cache.Erase(path == components.path ? components.path + "?" : components.path);
+}
+
 void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
 	auto context = FileOpener::TryGetClientContext(opener);
 	auto refresh_enabled = S3RequestExecutor::CredentialRefreshEnabled(opener);

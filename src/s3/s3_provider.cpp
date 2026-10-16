@@ -400,6 +400,100 @@ S3Provider S3Provider::Resolve(S3ProviderMatch route, const NormalizedS3Endpoint
 	return S3Provider(std::move(route), profile);
 }
 
+static bool EndpointIsAWS(const NormalizedS3Endpoint &endpoint) {
+	if (endpoint.IsEmpty()) {
+		return true;
+	}
+	return StringUtil::StartsWith(endpoint.GetHost(), "s3.") &&
+	       StringUtil::EndsWith(endpoint.GetHost(), ".amazonaws.com");
+}
+
+static bool EndpointIsUnresolved(const string &endpoint) {
+	auto trimmed_endpoint = endpoint;
+	StringUtil::Trim(trimmed_endpoint);
+	return trimmed_endpoint.empty();
+}
+
+static string GetRegionalS3Host(const string &region) {
+	if (region.empty() || region.size() > 63) {
+		throw InvalidInputException("Invalid S3 region for an automatic endpoint");
+	}
+	for (const auto character : region) {
+		if (!StringUtil::CharacterIsAlphaNumeric(character) && character != '-') {
+			throw InvalidInputException("Invalid S3 region for an automatic endpoint");
+		}
+	}
+	return StringUtil::Format("s3.%s.amazonaws.com", region);
+}
+
+S3ResolvedEndpoint S3Provider::ResolveEndpoint(const S3AuthConfig &config) {
+	auto endpoint_string = config.endpoint;
+	auto endpoint_mode = config.endpoint_mode;
+	auto url_style = config.url_style;
+	auto region = config.credentials.region;
+	const auto &credentials = config.credentials;
+	if (config.route.type == S3ProviderType::GCS) {
+		if (EndpointIsUnresolved(endpoint_string)) {
+			endpoint_string = "storage.googleapis.com";
+			endpoint_mode = S3EndpointMode::AUTOMATIC;
+		}
+		if (url_style.empty()) {
+			url_style = "path";
+		}
+		if (region.empty() && credentials.oauth2_bearer_token.empty() &&
+		    (!credentials.secret_access_key.empty() || !credentials.access_key_id.empty())) {
+			region = "auto";
+		}
+	}
+	if ((config.route.IsAlias() || config.route.type == S3ProviderType::R2) && EndpointIsUnresolved(endpoint_string)) {
+		if (config.route.type == S3ProviderType::R2) {
+			throw IOException("R2 requires an endpoint; set ACCOUNT_ID or ENDPOINT in the R2 secret");
+		}
+		throw IOException("An aliased URL scheme requires an endpoint; set ENDPOINT in the secret or set "
+		                  "the s3_endpoint setting");
+	}
+
+	auto endpoint = NormalizedS3Endpoint::Parse(endpoint_string, config.use_ssl);
+	if (config.route.type == S3ProviderType::S3 && !config.route.IsAlias() &&
+	    endpoint.GetHost() == "s3.amazonaws.com" && endpoint.GetBasePath().empty() && endpoint.IsDefaultPort()) {
+		endpoint_mode = S3EndpointMode::AUTOMATIC;
+	}
+	if (config.route.type == S3ProviderType::S3 &&
+	    (endpoint_mode == S3EndpointMode::AUTOMATIC || EndpointIsAWS(endpoint))) {
+		if (region.empty()) {
+			if (credentials.access_key_id.empty()) {
+				if (endpoint_mode == S3EndpointMode::AUTOMATIC) {
+					endpoint.SetHost("s3.amazonaws.com");
+				}
+			} else {
+				region = "us-east-1";
+			}
+		}
+		if (endpoint_mode == S3EndpointMode::AUTOMATIC && !region.empty()) {
+			endpoint.SetHost(GetRegionalS3Host(region));
+		}
+	}
+	return {std::move(endpoint), endpoint_mode, S3AuthURLParams::ParseStyle(url_style), std::move(region)};
+}
+
+NormalizedS3Endpoint S3Provider::GetEndpointForRegion(const S3AuthURLParams &url, const string &region) const {
+	auto endpoint = url.endpoint;
+	if (GetType() == S3ProviderType::S3 && url.endpoint_mode == S3EndpointMode::AUTOMATIC) {
+		endpoint.SetHost(GetRegionalS3Host(region));
+	}
+	return endpoint;
+}
+
+bool S3Provider::AllowsAutomaticEndpointChange(const S3AuthURLParams &configured,
+                                               const S3AuthURLParams &resolved) const {
+	return GetType() == S3ProviderType::S3 && !route.IsAlias() &&
+	       configured.endpoint_mode == S3EndpointMode::AUTOMATIC &&
+	       resolved.endpoint_mode == S3EndpointMode::AUTOMATIC &&
+	       configured.endpoint.UsesSSL() == resolved.endpoint.UsesSSL() && configured.endpoint.IsDefaultPort() &&
+	       resolved.endpoint.IsDefaultPort() && configured.endpoint.GetBasePath().empty() &&
+	       resolved.endpoint.GetBasePath().empty();
+}
+
 static S3MultipartUploadPolicy DefaultMultipartUploadPolicy() {
 	static constexpr idx_t MIB = 1024ULL * 1024ULL;
 	static constexpr idx_t GIB = 1024ULL * MIB;

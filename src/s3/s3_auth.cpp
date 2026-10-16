@@ -3,6 +3,7 @@
 #include "s3/s3_url.hpp"
 
 #include "duckdb/common/crypto/md5.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/blob.hpp"
 
@@ -64,20 +65,79 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 
 S3AuthParams::S3AuthParams() = default;
 
+bool S3AuthCredentials::HasAuthentication() const {
+	return !HasSameAuthentication(S3AuthCredentials());
+}
+
+bool S3AuthCredentials::HasSameAuthentication(const S3AuthCredentials &other) const {
+	return access_key_id == other.access_key_id && secret_access_key == other.secret_access_key &&
+	       session_token == other.session_token && oauth2_bearer_token == other.oauth2_bearer_token;
+}
+
 bool S3AuthCredentials::operator==(const S3AuthCredentials &other) const {
-	return region == other.region && access_key_id == other.access_key_id &&
-	       secret_access_key == other.secret_access_key && session_token == other.session_token &&
-	       oauth2_bearer_token == other.oauth2_bearer_token;
+	return region == other.region && HasSameAuthentication(other);
 }
 
 bool S3AuthURLParams::operator==(const S3AuthURLParams &other) const {
 	return endpoint == other.endpoint && endpoint_mode == other.endpoint_mode && style == other.style &&
-	       compatibility_mode == other.compatibility_mode;
+	       query_mode == other.query_mode;
 }
 
 bool S3AuthRequestOptions::operator==(const S3AuthRequestOptions &other) const {
 	return kms_key_id == other.kms_key_id && sse_customer_key == other.sse_customer_key &&
 	       requester_pays == other.requester_pays && user_project == other.user_project;
+}
+
+template <class T>
+static void ApplyQueryParam(const optional<T> &option, T &value) {
+	if (option) {
+		value = *option;
+	}
+}
+
+void S3AuthQueryParameters::ApplyCredentials(S3AuthCredentials &credentials) const {
+	ApplyQueryParam(region, credentials.region);
+	ApplyQueryParam(access_key_id, credentials.access_key_id);
+	ApplyQueryParam(secret_access_key, credentials.secret_access_key);
+	ApplyQueryParam(session_token, credentials.session_token);
+}
+
+S3AuthCredentials S3AuthQueryParameters::GetExplicitCredentials() const {
+	S3AuthCredentials result;
+	ApplyCredentials(result);
+	return result;
+}
+
+bool S3AuthQueryParameters::OverridesSSECustomerKey() const {
+	return sse_c_key.has_value();
+}
+
+void S3AuthQueryParameters::ApplyTo(S3AuthConfig &config) const {
+	ApplyCredentials(config.credentials);
+	ApplyQueryParam(use_ssl, config.use_ssl);
+	ApplyQueryParam(url_style, config.url_style);
+	ApplyQueryParam(requester_pays, config.request_options.requester_pays);
+	ApplyQueryParam(user_project, config.request_options.user_project);
+	if (endpoint) {
+		config.endpoint = *endpoint;
+		auto trimmed_endpoint = *endpoint;
+		StringUtil::Trim(trimmed_endpoint);
+		config.endpoint_mode = trimmed_endpoint.empty() ? S3EndpointMode::AUTOMATIC : S3EndpointMode::EXPLICIT;
+	}
+	if (sse_c_key) {
+		if (sse_c_key->empty()) {
+			config.request_options.sse_customer_key.reset();
+		} else {
+			// Restore unescaped '+' in base64 keys after URL decoding.
+			auto key = StringUtil::Replace(*sse_c_key, " ", "+");
+			try {
+				config.request_options.sse_customer_key = S3SSECustomerKey::Create(key);
+			} catch (InvalidInputException &) {
+				throw IOException("Incorrect setting found for s3_sse_c_key, expected a base64-encoded 256-bit key "
+				                  "(percent-encode '+' as %2B, '/' as %2F and '=' as %3D)");
+			}
+		}
+	}
 }
 
 S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
@@ -119,8 +179,10 @@ S3AuthConfig S3AuthResolver::ReadConfig(S3KeyValueReader &secret_reader, const s
 	if (secret_reader.TryGetSecretKey("sse_c_key", sse_c_key)) {
 		request_options.sse_customer_key = S3SSECustomerKey::Create(sse_c_key);
 	}
+	bool compatibility_mode = false;
 	secret_reader.TryGetSecretKeysOrSetting("url_compatibility_mode", "s3_url_compatibility_mode",
-	                                        "s3_url_compatibility_mode", config.compatibility_mode);
+	                                        "s3_url_compatibility_mode", compatibility_mode);
+	config.query_mode = compatibility_mode ? S3URLQueryMode::LITERAL_KEY : S3URLQueryMode::PARSE_OPTIONS;
 	secret_reader.TryGetSecretKeyOrSetting("requester_pays", "s3_requester_pays", request_options.requester_pays);
 
 	string endpoint;
@@ -141,20 +203,6 @@ S3AuthConfig S3AuthResolver::ReadConfig(S3KeyValueReader &secret_reader, const s
 	return config;
 }
 
-static bool EndpointIsAWS(const NormalizedS3Endpoint &endpoint) {
-	if (endpoint.IsEmpty()) {
-		return true;
-	}
-	return StringUtil::StartsWith(endpoint.GetHost(), "s3.") &&
-	       StringUtil::EndsWith(endpoint.GetHost(), ".amazonaws.com");
-}
-
-static bool EndpointIsUnresolved(const string &endpoint) {
-	auto trimmed_endpoint = endpoint;
-	StringUtil::Trim(trimmed_endpoint);
-	return trimmed_endpoint.empty();
-}
-
 S3URLStyle S3AuthURLParams::ParseStyle(const string &url_style) {
 	if (url_style.empty() || url_style == "vhost" || url_style == "virtual") {
 		return S3URLStyle::VIRTUAL_HOSTED;
@@ -167,66 +215,115 @@ S3URLStyle S3AuthURLParams::ParseStyle(const string &url_style) {
 }
 
 S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_path) {
-	S3Url::ApplyAuthQueryParameters(file_path, config);
-	auto &credentials = config.credentials;
-	auto &request_options = config.request_options;
-
-	if (config.route.type == S3ProviderType::GCS) {
-		if (EndpointIsUnresolved(config.endpoint)) {
-			config.endpoint = "storage.googleapis.com";
-			config.endpoint_mode = S3EndpointMode::AUTOMATIC;
-		}
-		if (config.url_style.empty()) {
-			config.url_style = "path";
-		}
-		if (credentials.region.empty() && credentials.oauth2_bearer_token.empty() &&
-		    (!credentials.secret_access_key.empty() || !credentials.access_key_id.empty())) {
-			credentials.region = "auto";
-		}
+	auto components = S3Url::Split(file_path, config.query_mode);
+	if (components.query.empty()) {
+		return ResolveConfig(std::move(config));
 	}
+	auto configured = config;
+	auto url_options = S3Url::ParseAuthQueryParameters(components.query, config.route.type);
+	url_options.ApplyTo(config);
+	auto result = ResolveConfig(std::move(config));
+	result.routing = ResolveRoutingPolicy(configured, result, url_options, file_path);
+	result.ValidateInheritedMaterial(false);
+	return result;
+}
 
-	auto style = S3AuthURLParams::ParseStyle(config.url_style);
+S3AuthRoutingPolicy S3AuthResolver::ResolveRoutingPolicy(const S3AuthConfig &configured, const S3AuthParams &resolved,
+                                                         const S3AuthQueryParameters &url_options,
+                                                         const string &file_path) {
+	S3AuthRoutingPolicy result;
+	result.inheritance = S3AuthRoutingPolicy::Inheritance::REQUIRE_EXPLICIT;
+	result.has_inherited_credentials =
+	    !resolved.credentials.HasSameAuthentication(url_options.GetExplicitCredentials());
+	result.has_inherited_sse_key = resolved.request_options.sse_customer_key && !url_options.OverridesSSECustomerKey();
+	S3AuthURLParams url;
+	try {
+		auto endpoint = S3Provider::ResolveEndpoint(configured);
+		url = {std::move(endpoint.endpoint), endpoint.mode, endpoint.style, configured.query_mode};
+	} catch (const InvalidInputException &ex) {
+		result.configured_destination_error = ErrorData(ex).RawMessage();
+		return result;
+	} catch (const IOException &ex) {
+		result.configured_destination_error = ErrorData(ex).RawMessage();
+		return result;
+	}
+	// Failed URL comparisons cannot authorize inherited material, but are not
+	// necessarily errors in the saved configuration (the URL supplies the bucket).
+	try {
+		if (url == resolved.GetURLParams() ||
+		    S3Url::Parse(file_path, configured.route, url).GetBucketHTTPUrl() ==
+		        S3Url::Parse(file_path, resolved).GetBucketHTTPUrl() ||
+		    resolved.GetProvider().AllowsAutomaticEndpointChange(url, resolved.GetURLParams())) {
+			result.inheritance = S3AuthRoutingPolicy::Inheritance::ALLOW_CONFIGURED;
+		}
+	} catch (const InvalidInputException &) {
+	} catch (const IOException &) {
+	}
+	return result;
+}
+
+void S3AuthRoutingPolicy::ValidateInheritedMaterial(bool has_configured_headers) const {
+	if (inheritance == Inheritance::ALLOW_CONFIGURED) {
+		return;
+	}
+	vector<string> inherited_material;
+	if (has_inherited_credentials) {
+		inherited_material.emplace_back("credentials");
+	}
+	if (has_inherited_sse_key) {
+		inherited_material.emplace_back("SSE-C encryption key (SSE_C_KEY)");
+	}
+	if (has_configured_headers) {
+		inherited_material.emplace_back("HTTP headers");
+	}
+	if (inherited_material.empty()) {
+		return;
+	}
+	auto material = StringUtil::Join(inherited_material, " and ");
+	if (!configured_destination_error.empty()) {
+		throw InvalidInputException(
+		    "Cannot reuse configured %s because the configured S3 destination could not be resolved: %s. "
+		    "Fix the destination configuration in the secret or settings.",
+		    material, configured_destination_error);
+	}
+	throw InvalidInputException(
+	    "URL options change the S3 destination, but the request uses %s from a secret or setting. "
+	    "Configure the intended ENDPOINT, URL_STYLE and USE_SSL together with the %s.",
+	    material, material);
+}
+
+bool S3AuthRoutingPolicy::operator==(const S3AuthRoutingPolicy &other) const {
+	return inheritance == other.inheritance && has_inherited_credentials == other.has_inherited_credentials &&
+	       has_inherited_sse_key == other.has_inherited_sse_key &&
+	       configured_destination_error == other.configured_destination_error;
+}
+
+bool S3AuthParams::HasAuthenticationMaterial() const {
+	return credentials.HasAuthentication() || request_options.sse_customer_key.has_value();
+}
+
+void S3AuthParams::ValidateInheritedMaterial(bool has_configured_headers) const {
+	routing.ValidateInheritedMaterial(has_configured_headers);
+}
+
+S3AuthParams S3AuthResolver::ResolveConfig(S3AuthConfig config) {
+	auto endpoint = S3Provider::ResolveEndpoint(config);
+	auto &request_options = config.request_options;
 	if (config.route.type == S3ProviderType::GCS && request_options.requester_pays &&
 	    request_options.user_project.empty()) {
 		throw InvalidInputException(
 		    "GCS Requester Pays requires a billing project; set USER_PROJECT in the GCS secret, "
 		    "set gcs_user_project, or pass gcs_user_project in the URL.");
 	}
-	if ((config.route.IsAlias() || config.route.type == S3ProviderType::R2) && EndpointIsUnresolved(config.endpoint)) {
-		if (config.route.type == S3ProviderType::R2) {
-			throw IOException("R2 requires an endpoint; provide account_id in the secret or s3_endpoint in the URL");
-		}
-		throw IOException("An aliased URL scheme requires an endpoint; provide ENDPOINT in the secret, set "
-		                  "s3_endpoint, or pass s3_endpoint in the URL");
-	}
-
-	auto endpoint = NormalizedS3Endpoint::Parse(config.endpoint, config.use_ssl);
-	if (config.route.type == S3ProviderType::S3 && !config.route.IsAlias() &&
-	    endpoint.GetHost() == "s3.amazonaws.com" && endpoint.GetBasePath().empty() && endpoint.IsDefaultPort()) {
-		config.endpoint_mode = S3EndpointMode::AUTOMATIC;
-	}
-	if (config.route.type == S3ProviderType::S3 &&
-	    (config.endpoint_mode == S3EndpointMode::AUTOMATIC || EndpointIsAWS(endpoint))) {
-		if (credentials.region.empty()) {
-			if (credentials.access_key_id.empty()) {
-				if (config.endpoint_mode == S3EndpointMode::AUTOMATIC) {
-					endpoint.SetHost("s3.amazonaws.com");
-				}
-			} else {
-				credentials.region = "us-east-1";
-			}
-		}
-		if (config.endpoint_mode == S3EndpointMode::AUTOMATIC && !credentials.region.empty()) {
-			endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", credentials.region));
-		}
-	}
-
 	S3AuthParams result;
-	result.provider = S3Provider::Resolve(std::move(config.route), endpoint);
-	result.credentials = std::move(credentials);
-	result.url = {std::move(endpoint), config.endpoint_mode, style, config.compatibility_mode};
+	result.provider = S3Provider::Resolve(std::move(config.route), endpoint.endpoint);
+	result.credentials = std::move(config.credentials);
+	result.credentials.region = std::move(endpoint.region);
+	result.url = {std::move(endpoint.endpoint), endpoint.mode, endpoint.style, config.query_mode};
 	result.request_options = std::move(request_options);
 	result.refresh_identity = {config.use_ssl};
+	result.routing.has_inherited_credentials = result.credentials.HasAuthentication();
+	result.routing.has_inherited_sse_key = result.request_options.sse_customer_key.has_value();
 	if (result.request_options.sse_customer_key) {
 		if (!result.request_options.kms_key_id.empty()) {
 			throw InvalidInputException("SSE_C_KEY and KMS_KEY_ID cannot be configured together");
@@ -247,16 +344,14 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 S3AuthParams S3AuthParams::WithRegion(string region) const {
 	auto result = *this;
 	result.credentials.region = std::move(region);
-	if (result.provider.GetType() == S3ProviderType::S3 && result.url.endpoint_mode == S3EndpointMode::AUTOMATIC) {
-		result.url.endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", result.credentials.region));
-	}
+	result.url.endpoint = result.provider.GetEndpointForRegion(result.url, result.credentials.region);
 	result.provider = S3Provider::Resolve(result.provider.GetRoute(), result.url.endpoint);
 	return result;
 }
 
 bool S3AuthParams::operator==(const S3AuthParams &other) const {
 	return provider == other.provider && credentials == other.credentials && url == other.url &&
-	       request_options == other.request_options;
+	       request_options == other.request_options && routing == other.routing;
 }
 
 S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,

@@ -116,12 +116,18 @@ SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_region={AWS_DEFA
 statement ok
 SET s3_region='{AWS_DEFAULT_REGION}';
 
-# test endpoint param
+# Changing the endpoint cannot inherit configured credentials.
 statement ok
 SET s3_endpoint='false_endpoint';
 
-statement ok
+statement error
 SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_endpoint={DUCKDB_S3_ENDPOINT}" LIMIT 3
+----
+URL options change the S3 destination, but the request uses credentials from a secret or setting
+
+# A destination override must provide its own credentials.
+statement ok
+SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_endpoint={DUCKDB_S3_ENDPOINT}&s3_access_key_id={AWS_ACCESS_KEY_ID}&s3_secret_access_key={AWS_SECRET_ACCESS_KEY}" LIMIT 3
 
 statement ok
 SET s3_endpoint='{DUCKDB_S3_ENDPOINT}';
@@ -154,12 +160,22 @@ statement error
 SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_use_ssl=bla" LIMIT 3
 ----
 
-#test url_style
-statement ok
+# Changing the URL style also changes the destination.
+statement error
 SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_url_style=vhost" LIMIT 3
+----
+URL options change the S3 destination, but the request uses credentials from a secret or setting
+
+statement error
+SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_url_style=virtual" LIMIT 3
+----
+URL options change the S3 destination, but the request uses credentials from a secret or setting
 
 statement ok
-SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_url_style=virtual" LIMIT 3
+SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_url_style=vhost&s3_access_key_id={AWS_ACCESS_KEY_ID}&s3_secret_access_key={AWS_SECRET_ACCESS_KEY}" LIMIT 3
+
+statement ok
+SELECT i FROM "s3://test-bucket/s3_query_params/test.parquet?s3_url_style=virtual&s3_access_key_id={AWS_ACCESS_KEY_ID}&s3_secret_access_key={AWS_SECRET_ACCESS_KEY}" LIMIT 3
 
 statement ok
 SET s3_url_style='path';
