@@ -103,6 +103,8 @@ public:
 	                                                        optional_ptr<FileOpenerInfo> info);
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
+	//! S3's 400 RequestTimeout is retryable; core only knows the generic statuses.
+	bool ShouldRetry(const BaseRequest &request, const HTTPResponse &response) override;
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
