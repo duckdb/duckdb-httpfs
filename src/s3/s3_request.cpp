@@ -91,7 +91,7 @@ const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation
 	                            false},
 	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true, false, false,
 	                            false},
-	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, false,
+	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, true,
 	                            false, false},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "initializing multipart upload for",
 	                            false, false, true, true},
