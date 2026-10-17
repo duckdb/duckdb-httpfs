@@ -197,8 +197,19 @@ private:
 			client.curl = make_uniq<CURLHandle>(params.ca_cert_file.empty());
 			client.transport_reuse_domain = reuse_domain;
 			client.ca_cert_bundle.reset();
-			if (params.VerifyServerCertificate() && HTTPFSUtil::IsSecureConnection(client.GetBaseUrl())) {
-				client.ca_cert_bundle = params.http_util.Cast<HTTPFSUtil>().GetCertificateBundle(params.ca_cert_file);
+			if (!params.VerifyServerCertificate()) {
+				return;
+			}
+			auto &http_util = params.http_util.Cast<HTTPFSUtil>();
+			if (HTTPFSUtil::IsSecureConnection(client.GetBaseUrl())) {
+				client.ca_cert_bundle = http_util.GetCertificateBundle(params.ca_cert_file);
+				return;
+			}
+			// an http request can be redirected to https, which needs the bundle - but a plain http request does not
+			try {
+				client.ca_cert_bundle = http_util.GetCertificateBundle(params.ca_cert_file);
+			} catch (std::exception &) {
+				client.ca_cert_bundle.reset();
 			}
 		}
 
