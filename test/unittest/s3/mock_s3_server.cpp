@@ -1180,7 +1180,7 @@ public:
 
 			auto range = GetHeader(request, "Range");
 			if (range.empty()) {
-				response.status = 200;
+				response.status = config.full_get.status;
 				SetGetHeaders(response, generation);
 				if (config.full_get.block_until_released) {
 					response.set_content_provider(
@@ -1320,6 +1320,31 @@ public:
 					                              }
 					                              return false;
 				                              });
+				Record(request, response.status);
+				return;
+			}
+			if (config.range.behavior == MockS3RangeBehavior::NONCOMPLIANT_PARTIAL) {
+				// Non-compliant 206: ignore Range, stream the whole body chunked, with no
+				// Content-Length and no Content-Range (mirrors hubeau.eaufrance.fr).
+				// httplib's response writer validates `req.ranges` and rewrites such a response
+				// (it downgrades a chunked 206 to 200 and/or adds Content-Range), so drop the
+				// ranges it parsed from the request to transmit the response verbatim.
+				const_cast<httplib::Request &>(request).ranges.clear();
+				response.set_chunked_content_provider("application/octet-stream",
+				                                      [&data](size_t offset, httplib::DataSink &sink) {
+					                                      if (offset >= data.size()) {
+						                                      sink.done();
+						                                      return true;
+					                                      }
+					                                      const auto length = MinValue<size_t>(7, data.size() - offset);
+					                                      if (!sink.write(data.data() + offset, length)) {
+						                                      return false;
+					                                      }
+					                                      if (offset + length == data.size()) {
+						                                      sink.done();
+					                                      }
+					                                      return true;
+				                                      });
 				Record(request, response.status);
 				return;
 			}

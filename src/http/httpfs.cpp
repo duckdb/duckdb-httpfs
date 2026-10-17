@@ -692,7 +692,8 @@ unique_ptr<CachedFileHandle> HTTPFileSystem::FullDownload(HTTPFileHandle &hfh, c
 			hfh.file_not_found = true;
 			return nullptr;
 		}
-		if (full_download_result->status != HTTPStatusCode::OK_200) {
+		if (full_download_result->status != HTTPStatusCode::OK_200 &&
+		    full_download_result->status != HTTPStatusCode::PartialContent_206) {
 			throw GetHTTPError(hfh, *full_download_result, RequestType::GET_REQUEST, hfh.path);
 		}
 		auto metadata = hfh.ReadFileInfo(*full_download_result, request_time, Timestamp::GetCurrentTimestamp());

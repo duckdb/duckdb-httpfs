@@ -19,7 +19,13 @@ enum class MockS3RefreshTarget : uint8_t {
 	LIST_OBJECTS_GET
 };
 
-enum class MockS3RangeBehavior : uint8_t { NORMAL, IGNORE_RANGE, TRUNCATE_TRANSFER, SHORT_SUCCESS };
+enum class MockS3RangeBehavior : uint8_t {
+	NORMAL,
+	IGNORE_RANGE,
+	TRUNCATE_TRANSFER,
+	SHORT_SUCCESS,
+	NONCOMPLIANT_PARTIAL
+};
 
 enum class MockS3MalformedListBehavior : uint8_t { TRUNCATED_XML, FOREIGN_NAMESPACE_KEY };
 
@@ -167,6 +173,8 @@ struct MockS3RangeConfig {
 };
 
 struct MockS3FullGetConfig {
+	//! Response status for a full (non-range) GET
+	int status = 200;
 	//! Send successful responses with chunked transfer encoding and no Content-Length
 	bool chunked = false;
 	//! Hold the response body until ReleaseFullGet is called
