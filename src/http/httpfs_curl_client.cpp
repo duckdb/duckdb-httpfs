@@ -103,7 +103,7 @@ static CURLSH *GetCurlDNSShare() {
 	return share;
 }
 
-long GetCurlMinTLSVersion() { // NOLINT(google-runtime-int): curl option values are long
+long GetCurlMinTLSVersion() {       // NOLINT(google-runtime-int): curl option values are long
 #if LIBCURL_VERSION_NUM >= 0x073600 // 7.54.0: CURL_SSLVERSION_MAX_DEFAULT available
 	return CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT;
 #else
