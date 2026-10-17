@@ -193,18 +193,29 @@ bool S3UploadConfig::HasPartCapacity(idx_t reserved_parts) const {
 }
 
 void S3Settings::Register(DBConfig &config) {
-	config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_access_key_id", "S3 Access Key ID", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_secret_access_key", "S3 Access Key", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_session_token", "S3 Session Token", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_endpoint", "S3 Endpoint", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_url_style", "S3 URL style", LogicalType::VARCHAR, Value("vhost"), SetS3URLStyle);
-	config.AddExtensionOption("s3_use_ssl", "S3 use SSL", LogicalType::BOOLEAN, Value(true));
-	config.AddExtensionOption("s3_kms_key_id", "S3 KMS Key ID", LogicalType::VARCHAR);
+	// Superseded by the matching secret keys
+	config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION,
+	                          false, true);
+	config.AddExtensionOption("s3_access_key_id", "S3 Access Key ID", LogicalType::VARCHAR, Value(), nullptr,
+	                          SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_secret_access_key", "S3 Access Key", LogicalType::VARCHAR, Value(), nullptr,
+	                          SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_session_token", "S3 Session Token", LogicalType::VARCHAR, Value(), nullptr,
+	                          SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_endpoint", "S3 Endpoint", LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION,
+	                          false, true);
+	config.AddExtensionOption("s3_url_style", "S3 URL style", LogicalType::VARCHAR, Value("vhost"), SetS3URLStyle,
+	                          SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_use_ssl", "S3 use SSL", LogicalType::BOOLEAN, Value(true), nullptr, SetScope::SESSION,
+	                          false, true);
+	config.AddExtensionOption("s3_kms_key_id", "S3 KMS Key ID", LogicalType::VARCHAR, Value(), nullptr,
+	                          SetScope::SESSION, false, true);
 	config.AddExtensionOption("s3_url_compatibility_mode", "Disable Globs and Query Parameters on S3 URLs",
-	                          LogicalType::BOOLEAN, Value(false));
-	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false));
-	config.AddExtensionOption("gcs_user_project", "GCS billing project for Requester Pays", LogicalType::VARCHAR);
+	                          LogicalType::BOOLEAN, Value(false), nullptr, SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false),
+	                          nullptr, SetScope::SESSION, false, true);
+	config.AddExtensionOption("gcs_user_project", "GCS billing project for Requester Pays", LogicalType::VARCHAR,
+	                          Value(), nullptr, SetScope::SESSION, false, true);
 	config.AddExtensionOption(
 	    "s3_url_scheme_aliases",
 	    "Additional URL schemes routed to the S3-compatible filesystem (e.g. ['oss', 'cos']). "
