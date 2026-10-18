@@ -75,6 +75,7 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthConfig &config)
 	string endpoint;
 	if (GetQueryParam("s3_endpoint", endpoint, query_params)) {
 		config.endpoint = std::move(endpoint);
+		config.endpoint_from_url = true;
 		auto trimmed_endpoint = config.endpoint;
 		StringUtil::Trim(trimmed_endpoint);
 		config.endpoint_mode = trimmed_endpoint.empty() ? S3EndpointMode::AUTOMATIC : S3EndpointMode::EXPLICIT;

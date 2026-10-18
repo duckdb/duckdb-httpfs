@@ -49,6 +49,8 @@ struct S3AuthURLParams {
 	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
 	S3URLStyle style = S3URLStyle::VIRTUAL_HOSTED;
 	bool compatibility_mode = false;
+	//! The URL's s3_endpoint parameter chose the host, instead of the configuration
+	bool endpoint_from_url = false;
 
 	bool operator==(const S3AuthURLParams &other) const;
 };
@@ -86,6 +88,7 @@ struct S3AuthConfig {
 	string url_style;
 	bool use_ssl = true;
 	bool compatibility_mode = false;
+	bool endpoint_from_url = false;
 
 	//! Request headers
 	S3AuthRequestOptions request_options;
