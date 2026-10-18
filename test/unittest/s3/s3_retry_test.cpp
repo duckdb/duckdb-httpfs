@@ -464,7 +464,7 @@ static void RunSharedReadBudgetScenario(const string &client, bool range, bool c
 		handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 7);
 		REQUIRE(buffer == data.substr(7, buffer.size()));
 	};
-	if (failures > retries || auth_status) {
+	if (failures > retries) {
 		auto error = RequireError(read);
 		REQUIRE(StringUtil::Contains(error, "RequestTimeout"));
 	} else {
@@ -480,10 +480,12 @@ static void RunSharedReadBudgetScenario(const string &client, bool range, bool c
 		}
 	}
 	if (auth_status) {
+		// The corrected re-send after the refresh does not spend a retry.
 		S3TestHelper::AssertSingleRefresh(test_id);
-		REQUIRE(gets.size() == retries + 2);
-		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::STALE_KEY_ID, auth_status) == retries + 1);
-		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::FRESH_KEY_ID, 400) == 1);
+		REQUIRE(gets.size() == MinValue(failures, retries) + 2);
+		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::STALE_KEY_ID, auth_status) == 1);
+		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::FRESH_KEY_ID, 400) ==
+		        MinValue(failures, retries + 1));
 	} else {
 		REQUIRE(gets.size() == MinValue(failures, retries) + 1);
 	}
@@ -1186,12 +1188,13 @@ TEST_CASE("S3 reads share core's retry budget", "[httpfs][s3][retry][shared_retr
 	}
 }
 
-TEST_CASE("S3 credential correction retains spent GET retries", "[httpfs][s3][retry][shared_retry]") {
+TEST_CASE("S3 credential correction does not spend GET retries", "[httpfs][s3][retry][shared_retry]") {
 	for (const auto &client : {"httplib", "curl"}) {
 		for (bool range : {false, true}) {
 			for (int status : {401, 403}) {
 				CAPTURE(client, range, status);
 				RunSharedReadBudgetScenario(client, range, true, 2, 1, status);
+				RunSharedReadBudgetScenario(client, range, true, 2, 3, status);
 			}
 		}
 	}
@@ -1403,9 +1406,11 @@ static void RunParallelGlobExhaustedThrottlingTest(const string &client_implemen
 	REQUIRE(result->HasError());
 	REQUIRE(StringUtil::Contains(result->GetError(), "503"));
 
-	// A full first wave of sixteen exhausted requests, then a single sequential re-issue before failing.
+	// Sixteen parallel requests and one sequential re-issue, cut short by the host's retry quota.
 	REQUIRE(CountListObservations(observations, 200) == 2);
-	REQUIRE(CountListObservations(observations, 503) == 16 * 8 + 8);
+	auto quota_retries = HTTPRetryQuota::INITIAL_CAPACITY / HTTPRetryQuota::RETRY_COST;
+	REQUIRE(CountListObservations(observations, 503) == idx_t(16 + 1 + quota_retries));
+	REQUIRE(StringUtil::Contains(result->GetError(), "retry quota"));
 	REQUIRE(CountShrinkWarnings(con) >= 1);
 }
 

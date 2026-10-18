@@ -62,35 +62,35 @@ endloop
 loop i 1 9
 
 query I
-PRAGMA tpcds({i})
+PRAGMA tpcds({i}, sf=0.01)
 ----
-<FILE>:extension/tpcds/dsdgen/answers/sf0.01/0{i}.csv
+<FILE>:duckdb/extension/tpcds/dsdgen/answers/sf0.01/0{i}.csv
 
 endloop
 
 loop i 10 64
 
 query I
-PRAGMA tpcds({i})
+PRAGMA tpcds({i}, sf=0.01)
 ----
-<FILE>:extension/tpcds/dsdgen/answers/sf0.01/{i}.csv
+<FILE>:duckdb/extension/tpcds/dsdgen/answers/sf0.01/{i}.csv
 
 endloop
 
 loop i 65 85
 
 query I
-PRAGMA tpcds({i})
+PRAGMA tpcds({i}, sf=0.01)
 ----
-<FILE>:extension/tpcds/dsdgen/answers/sf0.01/{i}.csv
+<FILE>:duckdb/extension/tpcds/dsdgen/answers/sf0.01/{i}.csv
 
 endloop
 
 loop i 86 99
 
 query I
-PRAGMA tpcds({i})
+PRAGMA tpcds({i}, sf=0.01)
 ----
-<FILE>:extension/tpcds/dsdgen/answers/sf0.01/{i}.csv
+<FILE>:duckdb/extension/tpcds/dsdgen/answers/sf0.01/{i}.csv
 
 endloop

@@ -1,5 +1,6 @@
 #include "http/httpfs.hpp"
 #include "s3/s3_provider.hpp"
+#include "s3/s3_request.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/logging/log_manager.hpp"
 
@@ -53,6 +54,12 @@ void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> res
 	auto sanitized_request = request;
 	sanitized_request.headers["x-amz-server-side-encryption-customer-key"] = "redacted";
 	HTTPUtil::LogRequest(sanitized_request, response);
+}
+
+bool HTTPFSUtil::ShouldRetry(const BaseRequest &request, const HTTPResponse &response) {
+	// S3 reports a timed-out request as 400 RequestTimeout: the status is final, the error code is not. Core judges
+	// statuses only, received or thrown by a handler; the error document is read here, by the S3 XML parser.
+	return HTTPUtil::ShouldRetry(request, response) || S3RequestUtil::IsRequestTimeout(response);
 }
 
 struct HTTPParametersInitializer {
