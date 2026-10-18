@@ -72,7 +72,7 @@ bool S3AuthCredentials::operator==(const S3AuthCredentials &other) const {
 
 bool S3AuthURLParams::operator==(const S3AuthURLParams &other) const {
 	return endpoint == other.endpoint && endpoint_mode == other.endpoint_mode && style == other.style &&
-	       compatibility_mode == other.compatibility_mode;
+	       compatibility_mode == other.compatibility_mode && endpoint_from_url == other.endpoint_from_url;
 }
 
 bool S3AuthRequestOptions::operator==(const S3AuthRequestOptions &other) const {
@@ -224,7 +224,8 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	S3AuthParams result;
 	result.provider = S3Provider::Resolve(std::move(config.route), endpoint);
 	result.credentials = std::move(credentials);
-	result.url = {std::move(endpoint), config.endpoint_mode, style, config.compatibility_mode};
+	result.url = {std::move(endpoint), config.endpoint_mode, style, config.compatibility_mode,
+	              config.endpoint_from_url};
 	result.request_options = std::move(request_options);
 	result.refresh_identity = {config.use_ssl};
 	if (result.request_options.sse_customer_key) {

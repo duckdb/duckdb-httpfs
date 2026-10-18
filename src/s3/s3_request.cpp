@@ -535,8 +535,10 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	result.captured = captured;
 	auto session_request = snapshot.CreateRequest();
 	result.http_params = std::move(session_request.params);
-	// the file access settings apply to the S3 path, not to the HTTP url it is sent to
-	result.http_params->access_path = spec.url;
+	// the file access settings apply to the S3 path, unless the url itself chose the host it is sent to
+	if (!result.auth_params.GetURLParams().endpoint_from_url) {
+		result.http_params->access_path = spec.url;
+	}
 	auto parsed_s3_url = S3Url::Parse(spec.url, result.auth_params);
 	auto &version = spec.object_version.IsSet() ? spec.object_version : parsed_s3_url.GetObjectVersion();
 	if (version.IsSet() && spec.operation != S3RequestOperation::HEAD_OBJECT &&
