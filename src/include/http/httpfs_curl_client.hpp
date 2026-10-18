@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cerrno>
 #include <curl/curl.h>
 #include <utility>
 
@@ -49,7 +50,14 @@ public:
 		return curl;
 	}
 	CURLcode Execute() {
-		return curl_easy_perform(curl);
+		errno = 0;
+		auto result = curl_easy_perform(curl);
+		execute_errno = errno;
+		return result;
+	}
+	//! errno as the last transfer left it, telling apart failures curl reports by the step that failed.
+	int GetExecuteErrno() const {
+		return execute_errno;
 	}
 	template <class T>
 	void SetOption(CURLoption option, T value) {
@@ -62,6 +70,7 @@ public:
 
 private:
 	CURL *curl = nullptr;
+	int execute_errno = 0;
 };
 
 class CURLRequestHeaders {

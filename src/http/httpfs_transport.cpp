@@ -2,6 +2,15 @@
 
 #include "http/httpfs_client.hpp"
 
+#include "duckdb/common/string_util.hpp"
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
+
 namespace duckdb {
 
 void HTTPFSParams::RefreshTransportReuseDomain() {
@@ -83,6 +92,44 @@ HTTPTransportReusePolicy HTTPFSUtil::GetTransportReusePolicy() const {
 	return HTTPTransportReusePolicy::CLIENT_FREE;
 #else
 	return HTTPTransportReusePolicy::SESSION_LOCAL;
+#endif
+}
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+static bool IsDescriptorExhaustion(int error) {
+	return error == EMFILE || error == ENFILE;
+}
+
+//! Whether the process can open another file descriptor right now.
+static bool DescriptorsExhausted(int &error) {
+	auto fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		close(fd);
+		return false;
+	}
+	error = errno;
+	return IsDescriptorExhaustion(error);
+}
+#endif
+
+string HTTPFSUtil::DescribeRequestError(const string &client_error, int os_errno) {
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	int error = os_errno;
+	if (!IsDescriptorExhaustion(error) && !DescriptorsExhausted(error)) {
+		return client_error;
+	}
+	string limit;
+	struct rlimit rlim;
+	if (error == EMFILE && getrlimit(RLIMIT_NOFILE, &rlim) == 0 && rlim.rlim_cur != RLIM_INFINITY) {
+		limit = StringUtil::Format(" of %llu", static_cast<unsigned long long>(rlim.rlim_cur));
+	}
+	string hint = error == EMFILE ? StringUtil::Format("the process reached its file descriptor limit%s; raise it "
+	                                                   "(ulimit -n) or lower http_client_pool_capacity",
+	                                                   limit)
+	                              : string("the system-wide file table is full");
+	return StringUtil::Format("Too many open files (%s; the HTTP client reported \"%s\")", hint, client_error);
+#else
+	return client_error;
 #endif
 }
 

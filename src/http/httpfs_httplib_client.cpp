@@ -3,6 +3,8 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
+#include <cerrno>
+
 namespace duckdb {
 
 class HTTPFSClient : public HTTPClient {
@@ -257,6 +259,8 @@ private:
 		for (auto &entry : params.extra_headers) {
 			headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
 		}
+		// every request is sent right after its headers: a failed one then reads only its own errno
+		errno = 0;
 		return headers;
 	}
 
@@ -272,12 +276,13 @@ private:
 	}
 
 	static unique_ptr<HTTPResponse> TransformResult(const duckdb_httplib_openssl::Result &res) {
+		const auto os_errno = errno;
 		if (res.error() == duckdb_httplib_openssl::Error::Success) {
 			auto &response = res.value();
 			return TransformResponse(response);
 		} else {
 			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			result->request_error = to_string(res.error());
+			result->request_error = HTTPFSUtil::DescribeRequestError(to_string(res.error()), os_errno);
 			return result;
 		}
 	}

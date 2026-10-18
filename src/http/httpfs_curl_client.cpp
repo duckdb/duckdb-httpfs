@@ -759,7 +759,13 @@ private:
 		auto status_code = HTTPUtil::ToStatusCode(request_info->response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
 		if (res != CURLcode::CURLE_OK) {
-			response->request_error = curl_easy_strerror(res);
+			long os_errno = 0; // NOLINT(google-runtime-int): required by curl_easy_getinfo
+			curl_easy_getinfo(*curl, CURLINFO_OS_ERRNO, &os_errno);
+			if (os_errno == 0) {
+				os_errno = curl->GetExecuteErrno();
+			}
+			response->request_error =
+			    HTTPFSUtil::DescribeRequestError(curl_easy_strerror(res), static_cast<int>(os_errno));
 			return response;
 		}
 		if (include_body) {
