@@ -103,6 +103,14 @@ static CURLSH *GetCurlDNSShare() {
 	return share;
 }
 
+long GetCurlMinTLSVersion() {       // NOLINT(google-runtime-int): curl option values are long
+#if LIBCURL_VERSION_NUM >= 0x073600 // 7.54.0: CURL_SSLVERSION_MAX_DEFAULT available
+	return CURL_SSLVERSION_TLSv1_2 | CURL_SSLVERSION_MAX_DEFAULT;
+#else
+	return CURL_SSLVERSION_TLSv1_2;
+#endif
+}
+
 CURLHandle::CURLHandle() {
 	curl = curl_easy_init();
 	if (!curl) {
@@ -122,6 +130,11 @@ CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
 	}
 	SetOption(CURLOPT_SSL_OPTIONS, ssl_options);
 	SetOption(CURLOPT_PATH_AS_IS, 1L);
+	// The default curl/OpenSSL floor still permits TLS 1.0/1.1, so pin a 1.2 minimum.
+	SetOption(CURLOPT_SSLVERSION, GetCurlMinTLSVersion());
+#if LIBCURL_VERSION_NUM >= 0x073400 // 7.52.0: CURLOPT_PROXY_SSLVERSION available
+	SetOption(CURLOPT_PROXY_SSLVERSION, GetCurlMinTLSVersion());
+#endif
 	// only the protocols httpfs speaks, whatever the library was built with
 	SetOption(CURLOPT_PROTOCOLS_STR, "http,https");
 	SetOption(CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
