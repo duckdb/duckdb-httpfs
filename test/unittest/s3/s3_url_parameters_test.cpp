@@ -21,6 +21,7 @@ static constexpr const char *ENABLE = "SET s3_enable_deprecated_url_parameters=t
 static constexpr const char *DISABLE = "SET s3_enable_deprecated_url_parameters=false";
 static constexpr const char *RESET = "RESET s3_enable_deprecated_url_parameters";
 static constexpr const char *SET_NULL = "SET s3_enable_deprecated_url_parameters=NULL";
+static constexpr const char *MIGRATION_HINT = "opt in with SET s3_enable_deprecated_url_parameters = true";
 
 static bool Enabled(Connection &con) {
 	ClientContextFileOpener opener(*con.context);
@@ -432,6 +433,17 @@ TEST_CASE("S3 redirect policy covers every source of configured authentication",
 			bool called = false;
 			S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request) {
 				REQUIRE(request.http_params->follow_location == (enabled || source == "anonymous"));
+				HTTPResponse redirect(HTTPStatusCode(307));
+				redirect.headers.Insert("Location", "https://storage.example/redirected");
+				redirect.body = "redirect response";
+				auto error = ErrorData(S3RequestUtil::GetRequestError(request, redirect));
+				REQUIRE(StringUtil::Contains(error.RawMessage(), MIGRATION_HINT) ==
+				        (!enabled && source != "anonymous"));
+				REQUIRE(error.ExtraInfo().at("status_code") == "307");
+				REQUIRE(error.ExtraInfo().at("response_body") == redirect.body);
+				S3RequestContext context {request.operation, request.captured, request.display_url};
+				auto context_error = ErrorData(S3RequestUtil::GetRequestError(context, redirect));
+				REQUIRE(context_error.RawMessage() == error.RawMessage());
 				called = true;
 				return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
 			});
@@ -451,11 +463,89 @@ TEST_CASE("S3 configuration errors direct users to the saved configuration", "[h
 	auto invalid = con.Query("FROM read_blob('s3://b/key?s3_endpoint=storage.internal')");
 	REQUIRE(invalid->HasError());
 	REQUIRE(StringUtil::Contains(invalid->GetError(), "Unsupported S3 endpoint scheme 'ftp'"));
+	REQUIRE_FALSE(StringUtil::Contains(invalid->GetError(), MIGRATION_HINT));
 	S3TestHelper::RequireQueryOk(con, "DROP SECRET bad");
 	S3TestHelper::RequireQueryOk(con, "CREATE SECRET r2 (TYPE R2, KEY_ID 'id', SECRET 'secret')");
 	auto missing = con.Query("FROM read_blob('r2://b/key?s3_endpoint=storage.internal')");
 	REQUIRE(missing->HasError());
 	REQUIRE(StringUtil::Contains(missing->GetError(), "set ACCOUNT_ID or ENDPOINT in the R2 secret"));
+	REQUIRE(StringUtil::Contains(missing->GetError(), MIGRATION_HINT));
+	auto without_options = con.Query("FROM read_blob('r2://b/key')");
+	REQUIRE(without_options->HasError());
+	REQUIRE_FALSE(StringUtil::Contains(without_options->GetError(), MIGRATION_HINT));
+	S3TestHelper::RequireQueryOk(con, DISABLE);
+	auto locked = con.Query("FROM read_blob('r2://b/key?s3_endpoint=storage.internal')");
+	REQUIRE(locked->HasError());
+	REQUIRE(StringUtil::Contains(locked->GetError(), "cannot be re-enabled in this database instance"));
+}
+
+TEST_CASE("S3 configuration migration hints respect the captured parsing policy", "[httpfs][s3][url-parameters]") {
+	for (const string prefix : {"r2://", "alias://", "gcs://"}) {
+		for (const bool enabled : {false, true}) {
+			for (const bool compatibility : {false, true}) {
+				CAPTURE(prefix, enabled, compatibility);
+				S3AuthConfig config;
+				config.route = S3UrlScheme::MatchRoutedUrl(prefix);
+				config.enable_deprecated_url_parameters = enabled;
+				config.compatibility_mode = compatibility;
+				config.request_options.requester_pays = true;
+				ErrorData error;
+				try {
+					S3AuthResolver::Resolve(config, prefix + "bucket/key?s3_region=us-east-1");
+				} catch (std::exception &ex) {
+					error = ErrorData(ex);
+				}
+				REQUIRE(error.HasError());
+				REQUIRE(StringUtil::Contains(error.RawMessage(), MIGRATION_HINT) == (!enabled && !compatibility));
+			}
+		}
+	}
+}
+
+TEST_CASE("S3 failed URL parameter reads explain how to restore legacy behavior", "[httpfs][s3][url-parameters]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (const bool full_download : {false, true}) {
+			CAPTURE(client, full_download);
+			MockS3Server server {MockS3ServerConfig()};
+			DuckDB db(nullptr);
+			Connection con(db);
+			S3TestHelper::LoadExtension(db);
+			Configure(con, server, client);
+			S3TestHelper::RequireQueryOk(con, string("SET force_download=") + (full_download ? "true" : "false"));
+			const auto path = server.S3Path() + "?s3_requester_pays=true";
+			auto failed = con.Query("SELECT content FROM read_blob(?)", Value(path));
+			REQUIRE(failed->HasError());
+			REQUIRE(StringUtil::Contains(failed->GetError(), MIGRATION_HINT));
+			REQUIRE(StringUtil::Contains(failed->GetError(), "part of the object key"));
+			S3TestHelper::RequireQueryOk(con, "SET s3_url_compatibility_mode=true");
+			auto compatible = con.Query("SELECT content FROM read_blob(?)", Value(path));
+			REQUIRE(compatible->HasError());
+			REQUIRE_FALSE(StringUtil::Contains(compatible->GetError(), MIGRATION_HINT));
+			S3TestHelper::RequireQueryOk(con, "SET s3_url_compatibility_mode=false");
+			S3TestHelper::RequireQueryOk(con, ENABLE);
+			REQUIRE(ReadBlob(con, path) == server.ObjectData());
+			auto missing = con.Query("SELECT content FROM read_blob(?)",
+			                         Value(server.S3Path() + "/missing?s3_requester_pays=true"));
+			REQUIRE(missing->HasError());
+			REQUIRE_FALSE(StringUtil::Contains(missing->GetError(), MIGRATION_HINT));
+		}
+	}
+}
+
+TEST_CASE("S3 redirect migration hints require the legacy policy to have blocked the redirect",
+          "[httpfs][s3][url-parameters]") {
+	S3AuthConfig config;
+	config.credentials.access_key_id = "id";
+	auto auth_params = S3AuthResolver::Resolve(config, "s3://bucket/key");
+	HTTPFSUtil http_util;
+	HTTPFSParams http_params(http_util);
+	HTTPResponse response(HTTPStatusCode(307));
+	response.headers.Insert("Location", "https://storage.example/redirected");
+	http_params.follow_location = false;
+	S3RequestSnapshot snapshot(http_params, auth_params, "s3://bucket/key");
+	auto error =
+	    ErrorData(S3RequestUtil::GetError(snapshot, response, RequestType::GET_REQUEST, "reading", "s3://bucket/key"));
+	REQUIRE_FALSE(StringUtil::Contains(error.RawMessage(), MIGRATION_HINT));
 }
 
 TEST_CASE("S3 directory removal reconstructs full object paths", "[httpfs][s3][url-parameters]") {

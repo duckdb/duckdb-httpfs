@@ -247,19 +247,29 @@ TEST_CASE("COPY overwrite preserves literal directory prefixes", "[httpfs][s3][u
 }
 
 TEST_CASE("COPY overwrite rejects directory paths that cannot be joined literally", "[httpfs][s3][url-boundary]") {
-	MockS3ServerConfig config;
-	config.list.keys = {"di?r/old.csv", "di/keep.csv"};
-	MockS3Server server(config);
-	DuckDB db(nullptr);
-	Connection con(db);
-	S3TestHelper::LoadExtension(db);
-	S3TestHelper::RequireQueryOk(con, "CREATE SECRET writer (TYPE S3, ENDPOINT '" + server.Endpoint() +
-	                                      "', URL_STYLE 'path', USE_SSL false)");
-	auto result = con.Query("COPY (SELECT 42 AS value, 7 AS payload WHERE false) TO 's3://refresh-bucket/di?r' "
-	                        "(FORMAT CSV, PARTITION_BY(value), OVERWRITE)");
-	REQUIRE(result->HasError());
-	REQUIRE(StringUtil::Contains(result->GetError(), "directory path cannot be represented literally"));
-	REQUIRE(server.Observations().empty());
+	for (const string compatibility_source : {"default", "setting", "secret"}) {
+		CAPTURE(compatibility_source);
+		MockS3ServerConfig config;
+		config.list.keys = {"di?r/old.csv", "di/keep.csv"};
+		MockS3Server server(config);
+		DuckDB db(nullptr);
+		Connection con(db);
+		S3TestHelper::LoadExtension(db);
+		if (compatibility_source == "setting") {
+			S3TestHelper::RequireQueryOk(con, "SET s3_url_compatibility_mode=true");
+		}
+		S3TestHelper::RequireQueryOk(
+		    con, "CREATE SECRET writer (TYPE S3, ENDPOINT '" + server.Endpoint() +
+		             "', URL_STYLE 'path', USE_SSL false" +
+		             (compatibility_source == "secret" ? ", URL_COMPATIBILITY_MODE true" : "") + ")");
+		auto result = con.Query("COPY (SELECT 42 AS value, 7 AS payload WHERE false) TO 's3://refresh-bucket/di?r' "
+		                        "(FORMAT CSV, PARTITION_BY(value), OVERWRITE)");
+		REQUIRE(result->HasError());
+		REQUIRE(StringUtil::Contains(result->GetError(), "directory path cannot be represented literally"));
+		REQUIRE(StringUtil::Contains(result->GetError(), "opt in with SET s3_enable_deprecated_url_parameters = true"));
+		REQUIRE(StringUtil::Contains(result->GetError(), "URL compatibility mode must also be disabled"));
+		REQUIRE(server.Observations().empty());
+	}
 }
 
 TEST_CASE("Ordinary S3 glob and direct writes share HTTP metadata cache invalidation", "[httpfs][s3][url-boundary]") {
@@ -306,6 +316,7 @@ TEST_CASE("COPY overwrite rejects S3 dot segments before deleting any objects", 
 			REQUIRE(result->HasError());
 			INFO(result->GetError());
 			REQUIRE(StringUtil::Contains(result->GetError(), "cannot be represented"));
+			REQUIRE_FALSE(StringUtil::Contains(result->GetError(), "opt in with SET"));
 			auto observations = server.Observations();
 			REQUIRE_FALSE(observations.empty());
 			for (const auto &observation : observations) {

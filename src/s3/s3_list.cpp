@@ -424,8 +424,10 @@ bool S3FileSystem::ListFilesExtended(const string &directory, const std::functio
 	StringUtil::RTrim(trimmed_dir, sep);
 	auto glob_path = JoinPath(trimmed_dir, "**");
 	if (!options.enable_deprecated_url_parameters && glob_path != trimmed_dir + sep + "**") {
+		auto hint = directory.find('?') != string::npos ? S3Settings::LegacyURLBehaviorHint() : string();
 		throw IOException("S3 directory path cannot be represented literally by filesystem path joining; "
-		                  "use a directory without '?' or path normalization");
+		                  "use a directory without '?' or path normalization%s",
+		                  hint);
 	}
 	auto glob_res = make_uniq<S3GlobResult>(*this, glob_path, opener, options);
 

@@ -2,6 +2,7 @@
 #include "duckdb/main/http/http_retry_budget.hpp"
 
 #include "s3/s3fs.hpp"
+#include "s3/s3_settings.hpp"
 #include "s3/s3_xml_response.hpp"
 #include "create_secret_functions.hpp"
 #include "http/http_state.hpp"
@@ -532,6 +533,12 @@ static bool TryRefreshS3AuthMaterial(optional_ptr<ClientContext> context, option
 	});
 }
 
+static bool SuppressAuthenticatedRedirects(const S3RequestSnapshot &snapshot) {
+	return !snapshot.auth_params.GetURLParams().enable_deprecated_url_parameters &&
+	       (snapshot.auth_params.HasAuthenticationMaterial() || !snapshot.Params().extra_headers.empty() ||
+	        !snapshot.Params().bearer_token.empty());
+}
+
 S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_util,
                                                    const CapturedHTTPRequestSnapshot &captured,
                                                    const S3RequestSpec &spec, HTTPRetryBudget &retry_budget) {
@@ -543,9 +550,7 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	result.http_params = std::move(session_request.params);
 	// Ordinary redirects cannot forward configured authentication by default.
 	// S3's region correction still constructs and signs a fresh request.
-	if (!snapshot.auth_params.GetURLParams().enable_deprecated_url_parameters &&
-	    (snapshot.auth_params.HasAuthenticationMaterial() || !snapshot.Params().extra_headers.empty() ||
-	     !snapshot.Params().bearer_token.empty())) {
+	if (SuppressAuthenticatedRedirects(snapshot)) {
 		result.http_params->follow_location = false;
 	}
 	// the file access settings apply to the S3 path, unless the url itself chose the host it is sent to
@@ -862,14 +867,15 @@ unique_ptr<HTTPResponse> S3RequestExecutor::SendHandleRequest(S3FileHandle &s3_h
 
 HTTPException S3RequestUtil::GetRequestError(const S3RequestData &request_data, const HTTPResponse &response) {
 	auto &operation_info = GetOperationInfo(request_data.operation);
-	return S3RequestUtil::GetError(request_data.auth_params, response, operation_info.request_type,
-	                               operation_info.description, request_data.display_url);
+	return S3RequestUtil::GetError(request_data.captured.snapshot->Cast<S3RequestSnapshot>(), response,
+	                               operation_info.request_type, operation_info.description, request_data.display_url);
 }
 
 HTTPException S3RequestUtil::GetRequestError(const S3RequestContext &request_context, const HTTPResponse &response) {
 	auto &operation_info = GetOperationInfo(request_context.operation);
-	return S3RequestUtil::GetError(request_context.GetAuthParams(), response, operation_info.request_type,
-	                               operation_info.description, request_context.display_url);
+	return S3RequestUtil::GetError(request_context.captured.snapshot->Cast<S3RequestSnapshot>(), response,
+	                               operation_info.request_type, operation_info.description,
+	                               request_context.display_url);
 }
 
 S3RequestSnapshot::S3RequestSnapshot(const HTTPFSParams &http_params, const S3AuthParams &auth_params_p,
@@ -1071,14 +1077,26 @@ string S3RequestUtil::ParseError(const string &error) {
 	return result;
 }
 
-HTTPException S3RequestUtil::GetError(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
+HTTPException S3RequestUtil::GetError(const S3RequestSnapshot &snapshot, const HTTPResponse &response,
                                       RequestType request_type, const string &operation, const string &display_url) {
+	auto &s3_auth_params = snapshot.auth_params;
 	string extra_text = S3RequestUtil::ParseError(response.body);
 	if (response.status == HTTPStatusCode::BadRequest_400) {
 		extra_text += s3_auth_params.GetProvider().GetBadRequestError(s3_auth_params);
 	}
 	if (response.status == HTTPStatusCode::Unauthorized_401 || response.status == HTTPStatusCode::Forbidden_403) {
 		extra_text += s3_auth_params.GetProvider().GetAuthError(s3_auth_params);
+	}
+	auto &url_params = s3_auth_params.GetURLParams();
+	const auto status = static_cast<int>(response.status);
+	const bool redirect = (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) &&
+	                      response.headers.HasHeader("Location");
+	if (redirect && snapshot.Params().follow_location && SuppressAuthenticatedRedirects(snapshot)) {
+		extra_text += "\nThe authenticated HTTP redirect was not followed.";
+		extra_text += S3Settings::LegacyURLBehaviorHint();
+	} else if (!url_params.enable_deprecated_url_parameters && !url_params.compatibility_mode &&
+	           display_url.find('?') != string::npos) {
+		extra_text += S3Settings::LegacyURLBehaviorHint();
 	}
 	return HTTPFSUtil::GetHTTPStatusError(response, request_type, operation, display_url, extra_text);
 }
@@ -1087,7 +1105,8 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
                                          const string &url) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	auto captured = s3_handle.request_session->Capture();
-	auto auth_params = captured.snapshot->Cast<S3RequestSnapshot>().auth_params;
+	auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
+	auto &auth_params = snapshot.auth_params;
 	const char *description = "sending a request to";
 	if (request_type == RequestType::HEAD_REQUEST) {
 		description = "checking";
@@ -1098,7 +1117,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 	} else if (request_type == RequestType::DELETE_REQUEST) {
 		description = "deleting";
 	}
-	return S3RequestUtil::GetError(auth_params, response, request_type, description,
+	return S3RequestUtil::GetError(snapshot, response, request_type, description,
 	                               S3Url::GetDisplayUrl(url, auth_params));
 }
 

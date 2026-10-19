@@ -10,19 +10,19 @@ namespace duckdb {
 
 namespace {
 
-static constexpr const char *URL_PARAMETERS_SETTING = "s3_enable_deprecated_url_parameters";
-
 class S3URLParametersOption : public ExtensionOptionInfo {
 private:
 	enum class State : uint8_t { DEFAULT, ENABLED, DISABLED };
 
 public:
+	static constexpr const char *NAME = "s3_enable_deprecated_url_parameters";
+
 	void Set(const Value &value) const {
 		// NULL and true are reversible; only explicit false locks the setting.
 		const auto next = value.IsNull() ? State::DEFAULT : value.GetValue<bool>() ? State::ENABLED : State::DISABLED;
 		lock_guard<mutex> guard(state_lock);
 		if (state == State::DISABLED && next != State::DISABLED) {
-			throw InvalidInputException("%s cannot be changed after being explicitly disabled", URL_PARAMETERS_SETTING);
+			throw InvalidInputException("%s cannot be changed after being explicitly disabled", NAME);
 		}
 		state = next;
 	}
@@ -227,10 +227,10 @@ bool S3UploadConfig::HasPartCapacity(idx_t reserved_parts) const {
 }
 
 void S3Settings::Register(DBConfig &config) {
-	if (!config.HasExtensionOption(URL_PARAMETERS_SETTING)) {
+	if (!config.HasExtensionOption(S3URLParametersOption::NAME)) {
 		auto state = make_shared_ptr<S3URLParametersOption>();
 		Value initial(LogicalType::BOOLEAN);
-		auto entry = config.options.unrecognized_options.find(URL_PARAMETERS_SETTING);
+		auto entry = config.options.unrecognized_options.find(S3URLParametersOption::NAME);
 		if (entry != config.options.unrecognized_options.end()) {
 			initial = entry->second.DefaultCastAs(LogicalType::BOOLEAN);
 		}
@@ -241,9 +241,9 @@ void S3Settings::Register(DBConfig &config) {
 		    LogicalType::BOOLEAN, nullptr, Value(LogicalType::BOOLEAN), SetScope::GLOBAL, false, false);
 		option.supports_session = false;
 		option.info = std::move(state);
-		config.AddExtensionOption(URL_PARAMETERS_SETTING, std::move(option));
+		config.AddExtensionOption(S3URLParametersOption::NAME, std::move(option));
 		// NULL defaults are not stored by AddExtensionOption, but must be readable through current_setting().
-		config.SetOption(URL_PARAMETERS_SETTING, std::move(initial));
+		config.SetOption(S3URLParametersOption::NAME, std::move(initial));
 	}
 	// Superseded by the matching secret keys
 	config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION,
@@ -320,10 +320,20 @@ bool S3Settings::URLParametersEnabled(optional_ptr<FileOpener> opener) {
 		return false;
 	}
 	ExtensionOption option;
-	if (!DBConfig::GetConfig(*db).TryGetExtensionOption(URL_PARAMETERS_SETTING, option)) {
+	if (!DBConfig::GetConfig(*db).TryGetExtensionOption(S3URLParametersOption::NAME, option)) {
 		return false;
 	}
 	return option.info->Cast<S3URLParametersOption>().Enabled();
+}
+
+string S3Settings::LegacyURLBehaviorHint() {
+	return StringUtil::Format(
+	    "\nS3 URL parameters are disabled by default: '?' and the following text are part of the object key. "
+	    "Ordinary authenticated HTTP redirects are also disabled by default. "
+	    "If this workflow requires legacy behavior, opt in with SET %s = true. "
+	    "URL compatibility mode must also be disabled to interpret URL parameters. "
+	    "The setting cannot be re-enabled in this database instance after it has been explicitly set to false.",
+	    S3URLParametersOption::NAME);
 }
 
 } // namespace duckdb
