@@ -223,7 +223,7 @@ TEST_CASE("HTTPFS cache identity separates literal and legacy S3 paths", "[httpf
 				S3TestHelper::LoadExtension(db);
 				Configure(con, literal, client);
 				S3TestHelper::RequireQueryOk(con, "SET enable_http_metadata_cache=true");
-				S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=true");
+				S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
 				S3TestHelper::RequireQueryOk(con, string("SET force_download=") + (force_download ? "true" : "false"));
 				const auto path = literal.S3Path();
 				REQUIRE(ReadBlob(con, path) == literal.ObjectData());
@@ -350,26 +350,30 @@ TEST_CASE("Authenticated S3 redirects require legacy opt-in", "[httpfs][s3][url-
 	}
 }
 
-TEST_CASE("Core cached S3 handles cannot exchange bytes across URL policies", "[httpfs][s3][url-parameters]") {
+TEST_CASE("Core caches S3 question-mark paths under a stable URL policy", "[httpfs][s3][url-parameters]") {
 	for (const string client : {"curl", "httplib"}) {
 		for (const string validation : {"VALIDATE_ALL", "NO_VALIDATION"}) {
-			for (const bool force_download : {false, true}) {
-				CAPTURE(client, validation, force_download);
-				MockS3ServerConfig legacy_config;
-				legacy_config.object.data = "legacy--data";
-				MockS3Server legacy(legacy_config);
+			for (const string policy : {"default", "enabled", "disabled"}) {
+				CAPTURE(client, validation, policy);
 				MockS3ServerConfig config;
-				config.object.key = "object.bin?s3_endpoint=" + legacy.Endpoint();
-				config.object.data = "literal-data";
-				MockS3Server literal(config);
+				if (policy != "enabled") {
+					config.object.key += "?s3_requester_pays=true";
+				}
+				MockS3Server server(config);
+				const auto path = policy == "enabled" ? server.S3Path() + "?s3_requester_pays=true" : server.S3Path();
 				DuckDB db(nullptr);
-				Connection con(db), other(db);
+				Connection con(db);
 				S3TestHelper::LoadExtension(db);
-				Configure(con, literal, client);
+				Configure(con, server, client);
+				if (policy == "enabled") {
+					S3TestHelper::RequireQueryOk(con, ENABLE);
+				} else if (policy == "disabled") {
+					S3TestHelper::RequireQueryOk(con, DISABLE);
+				}
 				S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=true");
 				S3TestHelper::RequireQueryOk(con, "SET validate_external_file_cache='" + validation + "'");
-				S3TestHelper::RequireQueryOk(con, string("SET force_download=") + (force_download ? "true" : "false"));
-				S3TestHelper::RequireQueryOk(con, "BEGIN");
+				S3TestHelper::RequireQueryOk(con, "SET force_download=false");
+				S3TestHelper::RequireQueryOk(con, "SET force_download_threshold=0");
 				auto fs = CachingFileSystem::Get(*con.context);
 				auto read = [](CachingFileHandle &handle) {
 					auto buffer = handle.Read(12, 0);
@@ -377,18 +381,15 @@ TEST_CASE("Core cached S3 handles cannot exchange bytes across URL policies", "[
 					buffer.CopyTo(data_ptr_cast(&data[0]), data.size());
 					return data;
 				};
-				auto first = fs.OpenFile(OpenFileInfo(literal.S3Path()), FileFlags::FILE_FLAGS_READ);
-				REQUIRE(read(*first) == literal.ObjectData());
-				S3TestHelper::RequireQueryOk(other, ENABLE);
-				auto second = fs.OpenFile(OpenFileInfo(literal.S3Path()), FileFlags::FILE_FLAGS_READ);
-				REQUIRE(read(*second) == legacy.ObjectData());
-				REQUIRE(read(*first) == literal.ObjectData());
-				S3TestHelper::RequireQueryOk(other, DISABLE);
-				auto third = fs.OpenFile(OpenFileInfo(literal.S3Path()), FileFlags::FILE_FLAGS_READ);
-				REQUIRE(read(*third) == literal.ObjectData());
-				REQUIRE(read(*second) == legacy.ObjectData());
-				REQUIRE(read(*first) == literal.ObjectData());
-				S3TestHelper::RequireQueryOk(con, "COMMIT");
+				for (idx_t iteration = 0; iteration < 2; iteration++) {
+					S3TestHelper::RequireQueryOk(con, "BEGIN");
+					auto handle = fs.OpenFile(OpenFileInfo(path), FileFlags::FILE_FLAGS_READ);
+					REQUIRE(read(*handle) == server.ObjectData().substr(0, 12));
+					REQUIRE(read(*handle) == server.ObjectData().substr(0, 12));
+					handle.reset();
+					S3TestHelper::RequireQueryOk(con, "COMMIT");
+					REQUIRE(S3TestHelper::CountObservations(server.Observations(), "GET", "id", 206) == 1);
+				}
 			}
 		}
 	}

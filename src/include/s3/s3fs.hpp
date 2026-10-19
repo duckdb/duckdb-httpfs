@@ -102,7 +102,6 @@ public:
 	//! FileSystem overrides.
 	string GetName() const override;
 	string GetVersionTag(FileHandle &handle) override;
-	FileMetadata Stats(FileHandle &handle) override;
 	bool CanHandleFile(const string &fpath) override;
 	bool OnDiskFile(FileHandle &handle) override;
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;

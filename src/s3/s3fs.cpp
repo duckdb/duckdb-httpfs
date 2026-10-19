@@ -111,16 +111,6 @@ string S3FileSystem::GetVersionTag(FileHandle &handle) {
 	    s3_handle.GetObjectVersion(), s3_handle.etag);
 }
 
-FileMetadata S3FileSystem::Stats(FileHandle &handle) {
-	auto metadata = HTTPFileSystem::Stats(handle);
-	if (handle.path.find('?') != string::npos) {
-		// Core shares byte-cache blocks by raw path, including across already-open handles.
-		// It cannot distinguish literal and legacy interpretations, even with different validators.
-		metadata.cache_valid_until = timestamp_t::ninfinity();
-	}
-	return metadata;
-}
-
 shared_ptr<const HTTPRequestSnapshot> S3FileHandle::CreateRequestSnapshot(const HTTPFSParams &params) const {
 	auto captured = request_session->Capture();
 	auto &s3_snapshot = captured.snapshot->Cast<S3RequestSnapshot>();

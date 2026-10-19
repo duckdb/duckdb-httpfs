@@ -59,10 +59,11 @@ After explicit `false`, the setting cannot be reset or enabled; enabling require
 database instance. Already-running operations keep their starting policy.
 After `RESET`, use `duckdb_settings()` to inspect the default: the current core version's
 `current_setting()` cannot read an unset NULL extension default.
-Paths containing `?` bypass DuckDB's core byte cache because it cannot distinguish their
-two interpretations. Httpfs metadata and full-download caches remain available, and paths
-without `?` keep their usual caching. Avoid concurrent setters: explicit opt-out always
-takes effect, but `current_setting()` can report a stale value after concurrent changes.
+Set the URL policy before reading S3 data. DuckDB's core byte cache uses the raw path and
+does not distinguish literal and legacy interpretations. Changing the policy while readers
+or cached data exist can reuse bytes from the other interpretation.
+Avoid concurrent setters: explicit opt-out always takes effect, but `current_setting()`
+can report a stale value after concurrent changes.
 
 ## Testing
 Some tests querying remote resources can be run already without further setup:
