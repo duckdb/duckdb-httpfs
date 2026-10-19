@@ -198,6 +198,13 @@ S3URLStyle S3AuthURLParams::ParseStyle(const string &url_style) {
 	                            url_style);
 }
 
+static string GetLegacyURLParameterHint(const S3AuthConfig &config, const string &file_path) {
+	if (!config.enable_deprecated_url_parameters && !config.compatibility_mode && file_path.find('?') != string::npos) {
+		return S3Settings::LegacyURLBehaviorHint();
+	}
+	return string();
+}
+
 S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_path) {
 	S3Url::ApplyAuthQueryParameters(file_path, config);
 	auto &credentials = config.credentials;
@@ -218,29 +225,21 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	}
 
 	auto style = S3AuthURLParams::ParseStyle(config.url_style);
-	auto with_url_parameter_hint = [&](const char *message) {
-		string result = message;
-		if (!config.enable_deprecated_url_parameters && !config.compatibility_mode &&
-		    file_path.find('?') != string::npos) {
-			result += S3Settings::LegacyURLBehaviorHint();
-		}
-		return result;
-	};
 	if (config.route.type == S3ProviderType::GCS && request_options.requester_pays &&
 	    request_options.user_project.empty()) {
 		throw InvalidInputException(
-		    "%s", with_url_parameter_hint(
-		              "GCS Requester Pays requires a billing project; set USER_PROJECT in the GCS secret, "
-		              "or set gcs_user_project."));
+		    "GCS Requester Pays requires a billing project; set USER_PROJECT in the GCS secret, "
+		    "or set gcs_user_project.%s",
+		    GetLegacyURLParameterHint(config, file_path));
 	}
 	if ((config.route.IsAlias() || config.route.type == S3ProviderType::R2) && EndpointIsUnresolved(config.endpoint)) {
 		if (config.route.type == S3ProviderType::R2) {
-			throw IOException(
-			    "%s", with_url_parameter_hint("R2 requires an endpoint; set ACCOUNT_ID or ENDPOINT in the R2 secret"));
+			throw IOException("R2 requires an endpoint; set ACCOUNT_ID or ENDPOINT in the R2 secret%s",
+			                  GetLegacyURLParameterHint(config, file_path));
 		}
-		throw IOException("%s", with_url_parameter_hint(
-		                            "An aliased URL scheme requires an endpoint; provide ENDPOINT in the secret, set "
-		                            "s3_endpoint"));
+		throw IOException("An aliased URL scheme requires an endpoint; provide ENDPOINT in the secret, set "
+		                  "s3_endpoint%s",
+		                  GetLegacyURLParameterHint(config, file_path));
 	}
 
 	auto endpoint = NormalizedS3Endpoint::Parse(config.endpoint, config.use_ssl);
