@@ -4,7 +4,6 @@
 #include "s3/s3_url.hpp"
 #include "s3/s3_request.hpp"
 #include "s3/s3fs.hpp"
-#include "http/httpfs.hpp"
 #include "crypto.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
@@ -202,50 +201,6 @@ TEST_CASE("S3 default URL parsing treats every parameter as key bytes", "[httpfs
 	}
 }
 
-TEST_CASE("HTTPFS cache identity separates literal and legacy S3 paths", "[httpfs][s3][url-parameters]") {
-	for (const string client : {"curl", "httplib"}) {
-		for (const bool force_download : {false, true}) {
-			for (const string validator : {"different", "equal", "absent"}) {
-				CAPTURE(client, force_download, validator);
-				MockS3ServerConfig legacy_config;
-				legacy_config.object.data = "legacy--data";
-				legacy_config.metadata.etag = validator == "absent" ? "" : "\"legacy-etag\"";
-				MockS3Server legacy(legacy_config);
-				MockS3ServerConfig literal_config;
-				literal_config.object.key =
-				    "object.bin?s3_endpoint=" + legacy.Endpoint() + "&s3_use_ssl=false&s3_url_style=path";
-				literal_config.object.data = "literal-data";
-				literal_config.metadata.etag =
-				    validator == "different" ? "\"literal-etag\"" : legacy_config.metadata.etag;
-				MockS3Server literal(literal_config);
-				DuckDB db(nullptr);
-				Connection con(db), other(db);
-				S3TestHelper::LoadExtension(db);
-				Configure(con, literal, client);
-				S3TestHelper::RequireQueryOk(con, "SET enable_http_metadata_cache=true");
-				S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
-				S3TestHelper::RequireQueryOk(con, string("SET force_download=") + (force_download ? "true" : "false"));
-				const auto path = literal.S3Path();
-				REQUIRE(ReadBlob(con, path) == literal.ObjectData());
-				REQUIRE(legacy.Observations().empty());
-				S3TestHelper::RequireQueryOk(other, ENABLE);
-				REQUIRE(ReadBlob(con, path) == legacy.ObjectData());
-				for (const auto &request : legacy.Observations()) {
-					REQUIRE(request.key_id == "id");
-					REQUIRE(MockS3HeaderValues(request, "x-amz-security-token") == vector<string> {"token"});
-				}
-				S3TestHelper::RequireQueryOk(other, RESET);
-				REQUIRE(ReadBlob(con, path) == literal.ObjectData());
-				S3TestHelper::RequireQueryOk(other, ENABLE);
-				REQUIRE(ReadBlob(con, path) == legacy.ObjectData());
-				S3TestHelper::RequireQueryOk(other, DISABLE);
-				REQUIRE(ReadBlob(con, path) == literal.ObjectData());
-				REQUIRE_FALSE(Enabled(con));
-			}
-		}
-	}
-}
-
 TEST_CASE("S3 refresh keeps the URL policy captured before settings change", "[httpfs][s3][url-parameters]") {
 	for (const string client : {"curl", "httplib"}) {
 		MockS3ServerConfig config;
@@ -276,49 +231,51 @@ TEST_CASE("S3 refresh keeps the URL policy captured before settings change", "[h
 	}
 }
 
-TEST_CASE("Open S3 handles keep separate downloads across URL policy changes", "[httpfs][s3][url-parameters]") {
+TEST_CASE("HTTPFS caches S3 question-mark paths under a stable URL policy", "[httpfs][s3][url-parameters]") {
 	for (const string client : {"curl", "httplib"}) {
 		for (const bool force_download : {false, true}) {
-			CAPTURE(client, force_download);
-			MockS3Server legacy {MockS3ServerConfig()};
-			MockS3ServerConfig config;
-			config.object.key = "object.bin?s3_endpoint=" + legacy.Endpoint();
-			config.object.data = "literal bytes";
-			MockS3Server literal(config);
-			DuckDB db(nullptr);
-			Connection con(db), other(db);
-			S3TestHelper::LoadExtension(db);
-			Configure(con, literal, client);
-			S3TestHelper::RequireQueryOk(con, string("SET force_download=") + (force_download ? "true" : "false"));
-			S3TestHelper::RequireQueryOk(con, "SET enable_http_metadata_cache=true");
-			S3TestHelper::RequireQueryOk(con, "BEGIN");
-			auto &fs = FileSystem::GetFileSystem(*con.context);
-			auto first = fs.OpenFile(literal.S3Path(), FileFlags::FILE_FLAGS_READ);
-			auto read = [&](FileHandle &handle) {
-				string data(handle.GetFileSize(), '\0');
-				handle.Read(QueryContext(*con.context), &data[0], data.size(), 0);
-				return data;
-			};
-			REQUIRE(read(*first) == literal.ObjectData());
-			S3TestHelper::RequireQueryOk(other, ENABLE);
-			auto second = fs.OpenFile(literal.S3Path(), FileFlags::FILE_FLAGS_READ);
-			REQUIRE(read(*second) == legacy.ObjectData());
-			REQUIRE(read(*first) == literal.ObjectData());
-			const auto literal_key = first->Cast<HTTPFileHandle>().GetCacheKey();
-			const auto legacy_key = second->Cast<HTTPFileHandle>().GetCacheKey();
-			REQUIRE(literal_key != legacy_key);
-			auto cache = first->file_system.Cast<HTTPFileSystem>().GetGlobalCache();
-			HTTPMetadataCacheEntry entry;
-			if (!force_download) {
-				REQUIRE(cache->Find(literal_key, entry));
-				REQUIRE(cache->Find(legacy_key, entry));
+			for (const string policy : {"default", "enabled", "disabled"}) {
+				CAPTURE(client, force_download, policy);
+				MockS3ServerConfig config;
+				if (policy != "enabled") {
+					config.object.key += "?s3_requester_pays=true";
+				}
+				MockS3Server server(config);
+				const auto path = policy == "enabled" ? server.S3Path() + "?s3_requester_pays=true" : server.S3Path();
+				DuckDB db(nullptr);
+				Connection con(db);
+				S3TestHelper::LoadExtension(db);
+				Configure(con, server, client);
+				if (policy == "enabled") {
+					S3TestHelper::RequireQueryOk(con, ENABLE);
+				} else if (policy == "disabled") {
+					S3TestHelper::RequireQueryOk(con, DISABLE);
+				}
+				S3TestHelper::RequireQueryOk(con, string("SET force_download=") + (force_download ? "true" : "false"));
+				S3TestHelper::RequireQueryOk(con, "SET force_download_threshold=0");
+				S3TestHelper::RequireQueryOk(con, "SET enable_http_metadata_cache=true");
+				S3TestHelper::RequireQueryOk(con, "BEGIN");
+				auto &fs = FileSystem::GetFileSystem(*con.context);
+				for (idx_t iteration = 0; iteration < 2; iteration++) {
+					auto reader = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+					string data(reader->GetFileSize(), '\0');
+					reader->Read(QueryContext(*con.context), &data[0], data.size(), 0);
+					REQUIRE(data == server.ObjectData());
+				}
+				const auto observations = server.Observations();
+				if (force_download) {
+					REQUIRE(S3TestHelper::CountObservations(observations, "HEAD", "id", 200) == 0);
+					REQUIRE(S3TestHelper::CountObservations(observations, "GET", "id", 200) == 1);
+				} else {
+					REQUIRE(S3TestHelper::CountObservations(observations, "HEAD", "id", 200) == 1);
+					auto writer = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE);
+					writer->AbortWrite();
+					auto reader = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+					REQUIRE(reader->GetFileSize() == server.ObjectData().size());
+					REQUIRE(S3TestHelper::CountObservations(server.Observations(), "HEAD", "id", 200) == 2);
+				}
+				S3TestHelper::RequireQueryOk(con, "COMMIT");
 			}
-			S3TestHelper::RequireQueryOk(other, DISABLE);
-			auto writer = fs.OpenFile(literal.S3Path(), FileFlags::FILE_FLAGS_WRITE);
-			REQUIRE_FALSE(cache->Find(literal_key, entry));
-			REQUIRE_FALSE(cache->Find(legacy_key, entry));
-			writer->AbortWrite();
-			S3TestHelper::RequireQueryOk(con, "COMMIT");
 		}
 	}
 }

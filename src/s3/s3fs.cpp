@@ -29,14 +29,6 @@ S3FileHandle::UploadClaim::~UploadClaim() {
 	}
 }
 
-static string S3CacheKey(const string &path, bool parse_parameters) {
-	if (path.find('?') == string::npos) {
-		return path;
-	}
-	// The leading NUL separates internal identities from ordinary URL keys.
-	return string(1, '\0') + (parse_parameters ? "s3-options:" : "s3-literal:") + path;
-}
-
 S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
                            shared_ptr<HTTPRequestSession> request_session_p, const S3AuthParams &auth_params_p,
                            const S3UploadConfig &upload_config,
@@ -45,7 +37,6 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
                      file.extended_info ? auth_params_p.GetProvider().ReadObjectVersion(*file.extended_info)
                                         : HTTPObjectVersion()),
       requested_version(S3Url::Parse(file.path, auth_params_p).GetObjectVersion()) {
-	cache_key = S3CacheKey(file.path, auth_params_p.GetURLParams().ParseURLParameters());
 	if (flags.OpenForWriting() && requested_version.IsSet()) {
 		throw NotImplementedException("%s is only supported for reading",
 		                              S3Provider::GetVersionParameterName(requested_version.GetType()));
@@ -255,11 +246,6 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 		result.properties["s3_region"] = snapshot.auth_params.GetCredentials().region;
 	}
 	return result;
-}
-
-void S3FileHandle::InvalidateWriteMetadata(HTTPMetadataCache &cache) const {
-	cache.Erase(S3CacheKey(path, false));
-	cache.Erase(S3CacheKey(path, true));
 }
 
 void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {

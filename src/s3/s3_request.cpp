@@ -961,12 +961,12 @@ void S3FileSystem::ValidateResponseVersion(HTTPFileHandle &handle, const HTTPRea
 		actual =
 		    captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider().ReadObjectVersion(response.headers);
 	} catch (...) {
-		EraseGlobalCacheEntry(handle.GetCacheKey());
+		EraseGlobalCacheEntry(handle.path);
 		throw;
 	}
 	if (actual.IsSet() &&
 	    (actual.GetType() != HTTPObjectVersionType::GCS_GENERATION || actual.GetValue() != *expected)) {
-		EraseGlobalCacheEntry(handle.GetCacheKey());
+		EraseGlobalCacheEntry(handle.path);
 		throw HTTPException(response, "GCS generation on reading file \"%s\" was initially %s and now it returned %s",
 		                    handle.path, *expected, actual.GetValue());
 	}

@@ -30,41 +30,6 @@ The resulting binary, that will also statically link and load the `httfps`, it's
 FROM read_blob('https://duckdb.org/');
 ```
 
-## Deprecated S3 URL parameters
-
-S3-family URLs treat `?` and the following text as literal object-key bytes by default.
-Configure credentials, endpoints and request options in secrets. Existing workflows that
-use URL parameters, including `s3_version_id` and `gcs_generation`, can opt in temporarily:
-
-```sql
-LOAD httpfs;
-SET s3_enable_deprecated_url_parameters = true;
-```
-
-This restores the legacy URL parameter behavior, including credential inheritance and
-authenticated HTTP redirects. Without opt-in, authenticated requests do not follow ordinary
-HTTP redirects; S3 region correction still works.
-Literal `?` is supported in object names, but directory operations reject paths containing
-`?` because DuckDB's path joining treats it as a query suffix.
-
-The setting is global to the database instance. Its default `NULL` means disabled but
-undecided. Explicit `false` permanently disables it, including for other connections:
-
-```sql
-SET s3_enable_deprecated_url_parameters = false;
-```
-
-`RESET` or `SET ... = NULL` returns to the default and permits a later opt-in.
-After explicit `false`, the setting cannot be reset or enabled; enabling requires a new
-database instance. Already-running operations keep their starting policy.
-After `RESET`, use `duckdb_settings()` to inspect the default: the current core version's
-`current_setting()` cannot read an unset NULL extension default.
-Set the URL policy before reading S3 data. DuckDB's core byte cache uses the raw path and
-does not distinguish literal and legacy interpretations. Changing the policy while readers
-or cached data exist can reuse bytes from the other interpretation.
-Avoid concurrent setters: explicit opt-out always takes effect, but `current_setting()`
-can report a stale value after concurrent changes.
-
 ## Testing
 Some tests querying remote resources can be run already without further setup:
 ```

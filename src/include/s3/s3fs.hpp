@@ -75,7 +75,6 @@ protected:
 	HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const override;
 	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
 	HTTPMetadataCacheEntry GetCacheEntry() const override;
-	void InvalidateWriteMetadata(HTTPMetadataCache &cache) const override;
 
 private:
 	void SetRegion(const string &region);
