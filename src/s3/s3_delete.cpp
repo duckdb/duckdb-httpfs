@@ -1,7 +1,6 @@
 #include "s3/s3fs.hpp"
 
 #include "s3/s3_request.hpp"
-#include "s3/s3_settings.hpp"
 #include "s3/s3_url.hpp"
 #include "s3/s3_xml_response.hpp"
 
@@ -294,11 +293,11 @@ S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session
 }
 
 void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener) {
-	RemoveFiles(paths, opener, S3Settings::URLParametersEnabled(opener));
+	RemoveFiles(paths, opener, S3AuthResolveOptions::ForOperation(opener));
 }
 
 void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener,
-                               bool url_parameter_policy) {
+                               const S3AuthResolveOptions &options) {
 	if (paths.empty()) {
 		return;
 	}
@@ -307,7 +306,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 
 	for (auto &path : paths) {
 		FileOpenerInfo info = {path};
-		auto auth_params = S3AuthResolver::Resolve(opener, info, url_parameter_policy);
+		auto auth_params = S3AuthResolver::Resolve(opener, info, options);
 		auto parsed_url = S3Url::Parse(path, auth_params);
 		if (parsed_url.GetObjectVersion().IsSet()) {
 			throw NotImplementedException("%s is only supported for reading",
@@ -376,13 +375,12 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 }
 
 void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> opener) {
-	const auto url_parameter_policy = S3Settings::URLParametersEnabled(opener);
+	const auto options = S3AuthResolveOptions::ForOperation(opener);
 	vector<string> files_to_remove;
 	ListFilesExtended(
-	    path, [&](OpenFileInfo &file) { files_to_remove.push_back(JoinPath(path, file.path)); }, opener,
-	    url_parameter_policy);
+	    path, [&](OpenFileInfo &file) { files_to_remove.push_back(JoinPath(path, file.path)); }, opener, options);
 
-	RemoveFiles(files_to_remove, opener, url_parameter_policy);
+	RemoveFiles(files_to_remove, opener, options);
 }
 
 } // namespace duckdb

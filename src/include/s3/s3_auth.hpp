@@ -179,11 +179,23 @@ private:
 	S3AuthRefreshIdentity refresh_identity;
 };
 
+struct S3AuthResolveOptions {
+	//! The database policy captured at operation start. Standalone readers default to disabled.
+	bool enable_deprecated_url_parameters = false;
+	//! Absent: resolve compatibility mode from the per-path configuration.
+	optional<bool> compatibility_mode;
+
+	static S3AuthResolveOptions ForOperation(optional_ptr<FileOpener> opener);
+	static S3AuthResolveOptions ForRefresh(const S3AuthURLParams &previous_url);
+	void ApplyTo(S3AuthConfig &config) const;
+};
+
 struct S3AuthResolver {
+	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
 	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info,
-	                            optional<bool> url_parameter_policy = {}, optional<bool> compatibility_mode = {});
+	                            const S3AuthResolveOptions &options);
 	static S3AuthParams Resolve(S3KeyValueReader &secret_reader, const string &file_path,
-	                            bool enable_deprecated_url_parameters = false);
+	                            const S3AuthResolveOptions &options = {});
 	static S3AuthParams Resolve(S3AuthConfig config, const string &file_path);
 
 private:

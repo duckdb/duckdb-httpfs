@@ -938,7 +938,9 @@ static S3AuthParams ReadSecretAuthParams(Connection &con, KeyValueSecret &secret
                                          const string &path = "s3://bucket/key") {
 	ClientContextFileOpener opener(*con.context);
 	S3KeyValueReader secret_reader {KeyValueSecretReader(secret, opener)};
-	return S3AuthResolver::Resolve(secret_reader, path, true);
+	S3AuthResolveOptions options;
+	options.enable_deprecated_url_parameters = true;
+	return S3AuthResolver::Resolve(secret_reader, path, options);
 }
 
 } // namespace

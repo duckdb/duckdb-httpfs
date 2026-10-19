@@ -82,35 +82,50 @@ bool S3AuthRequestOptions::operator==(const S3AuthRequestOptions &other) const {
 	       requester_pays == other.requester_pays && user_project == other.user_project;
 }
 
-S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info,
-                                     optional<bool> url_parameter_policy, optional<bool> compatibility_mode) {
+S3AuthResolveOptions S3AuthResolveOptions::ForOperation(optional_ptr<FileOpener> opener) {
+	S3AuthResolveOptions options;
+	options.enable_deprecated_url_parameters = S3Settings::URLParametersEnabled(opener);
+	return options;
+}
+
+S3AuthResolveOptions S3AuthResolveOptions::ForRefresh(const S3AuthURLParams &previous_url) {
+	S3AuthResolveOptions options;
+	options.enable_deprecated_url_parameters = previous_url.enable_deprecated_url_parameters;
+	options.compatibility_mode = previous_url.compatibility_mode;
+	return options;
+}
+
+void S3AuthResolveOptions::ApplyTo(S3AuthConfig &config) const {
+	config.enable_deprecated_url_parameters = enable_deprecated_url_parameters;
+	if (compatibility_mode.has_value()) {
+		config.compatibility_mode = *compatibility_mode;
+	}
+}
+
+S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
 	// Capture the database policy before looking up per-path configuration.
-	const bool enable_url_parameters =
-	    url_parameter_policy.has_value() ? *url_parameter_policy : S3Settings::URLParametersEnabled(opener);
+	return Resolve(opener, info, S3AuthResolveOptions::ForOperation(opener));
+}
+
+S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info,
+                                     const S3AuthResolveOptions &options) {
 	// Without a FileOpener we cannot access settings or secrets.
 	if (!opener) {
 		S3AuthConfig config;
-		config.enable_deprecated_url_parameters = enable_url_parameters;
-		config.compatibility_mode = compatibility_mode.has_value() ? *compatibility_mode : false;
 		config.route = S3UrlScheme::MatchRoutedUrl(info.file_path);
+		options.ApplyTo(config);
 		return Resolve(std::move(config), info.file_path);
 	}
 
 	auto secret_types = S3SecretConfig::SecretTypes();
 	S3KeyValueReader secret_reader(*opener, info, secret_types.data(), secret_types.size());
-	auto config = ReadConfig(secret_reader, info.file_path);
-	// An open operation keeps its URL interpretation, including during credential refresh.
-	config.enable_deprecated_url_parameters = enable_url_parameters;
-	if (compatibility_mode.has_value()) {
-		config.compatibility_mode = *compatibility_mode;
-	}
-	return Resolve(std::move(config), info.file_path);
+	return Resolve(secret_reader, info.file_path, options);
 }
 
 S3AuthParams S3AuthResolver::Resolve(S3KeyValueReader &secret_reader, const string &file_path,
-                                     bool enable_deprecated_url_parameters) {
+                                     const S3AuthResolveOptions &options) {
 	auto config = ReadConfig(secret_reader, file_path);
-	config.enable_deprecated_url_parameters = enable_deprecated_url_parameters;
+	options.ApplyTo(config);
 	return Resolve(std::move(config), file_path);
 }
 

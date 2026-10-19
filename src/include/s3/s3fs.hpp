@@ -153,9 +153,9 @@ protected:
 	                                        optional_ptr<FileOpener> opener) override;
 
 private:
-	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener, bool url_parameter_policy);
+	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener, const S3AuthResolveOptions &options);
 	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
-	                       optional_ptr<FileOpener> opener, bool url_parameter_policy);
+	                       optional_ptr<FileOpener> opener, const S3AuthResolveOptions &options);
 	S3RequestResult RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
 	                                       const string &body, idx_t key_count, string &result);
 

@@ -1,8 +1,8 @@
 #include "s3/s3_settings.hpp"
 
 #include "s3/s3_auth.hpp"
-#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/storage/storage_info.hpp"
 
@@ -13,17 +13,18 @@ namespace {
 static constexpr const char *URL_PARAMETERS_SETTING = "s3_enable_deprecated_url_parameters";
 
 class S3URLParametersOption : public ExtensionOptionInfo {
+private:
+	enum class State : uint8_t { DEFAULT, ENABLED, DISABLED };
+
 public:
 	void Set(const Value &value) const {
 		// NULL and true are reversible; only explicit false locks the setting.
-		const auto next = value.IsNull() ? 2 : value.GetValue<bool>() ? 1 : 0;
-		auto current = state.load();
-		do {
-			if (current == 0 && next != 0) {
-				throw InvalidInputException("%s cannot be changed after being explicitly disabled",
-				                            URL_PARAMETERS_SETTING);
-			}
-		} while (!state.compare_exchange_weak(current, next));
+		const auto next = value.IsNull() ? State::DEFAULT : value.GetValue<bool>() ? State::ENABLED : State::DISABLED;
+		lock_guard<mutex> guard(state_lock);
+		if (state == State::DISABLED && next != State::DISABLED) {
+			throw InvalidInputException("%s cannot be changed after being explicitly disabled", URL_PARAMETERS_SETTING);
+		}
+		state = next;
 	}
 
 	void OnSet(ClientContext &, SetScope, Value &parameter, bool) const override {
@@ -31,13 +32,15 @@ public:
 	}
 
 	bool Enabled() const {
-		return state.load() == 1;
+		lock_guard<mutex> guard(state_lock);
+		return state == State::ENABLED;
 	}
 
 private:
 	// Core stores the SQL value after OnSet. This state remains authoritative even
 	// if concurrent setters publish their SQL values in a different order.
-	mutable atomic<int> state {2};
+	mutable mutex state_lock;
+	mutable State state = State::DEFAULT;
 };
 
 struct S3UploadSizing {

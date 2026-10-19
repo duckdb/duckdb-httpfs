@@ -61,7 +61,7 @@ enum GlobType { HIERARCHICAL, LISTING, UNKNOWN };
 struct S3GlobResult : public LazyMultiFileList {
 public:
 	S3GlobResult(S3FileSystem &fs_p, const string &path, optional_ptr<FileOpener> opener,
-	             optional<bool> url_parameter_policy = {});
+	             const S3AuthResolveOptions &options);
 
 protected:
 	bool ExpandNextPath() const override;
@@ -137,7 +137,7 @@ private:
 };
 
 S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, optional_ptr<FileOpener> opener,
-                           optional<bool> url_parameter_policy)
+                           const S3AuthResolveOptions &options)
     : LazyMultiFileList(FileOpener::TryGetClientContext(opener)), fs(fs_p), glob_pattern(glob_pattern_p),
       opener(opener) {
 	if (!opener) {
@@ -150,7 +150,7 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 	FileOpenerInfo info = {glob_pattern};
 
 	// Trim any query parameters from the string
-	auto s3_auth_params = S3AuthResolver::Resolve(opener, info, url_parameter_policy);
+	auto s3_auth_params = S3AuthResolver::Resolve(opener, info, options);
 
 	// In url compatibility mode, we ignore globs allowing users to query files with the glob chars
 	if (s3_auth_params.GetURLParams().compatibility_mode) {
@@ -409,25 +409,25 @@ void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
 
 unique_ptr<MultiFileList> S3FileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
                                                           optional_ptr<FileOpener> opener) {
-	return make_uniq<S3GlobResult>(*this, path, opener);
+	return make_uniq<S3GlobResult>(*this, path, opener, S3AuthResolveOptions::ForOperation(opener));
 }
 
 bool S3FileSystem::ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
                                      optional_ptr<FileOpener> opener) {
-	return ListFilesExtended(directory, callback, opener, S3Settings::URLParametersEnabled(opener));
+	return ListFilesExtended(directory, callback, opener, S3AuthResolveOptions::ForOperation(opener));
 }
 
 bool S3FileSystem::ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
-                                     optional_ptr<FileOpener> opener, bool url_parameter_policy) {
+                                     optional_ptr<FileOpener> opener, const S3AuthResolveOptions &options) {
 	string trimmed_dir = directory;
 	auto sep = PathSeparator(trimmed_dir);
 	StringUtil::RTrim(trimmed_dir, sep);
 	auto glob_path = JoinPath(trimmed_dir, "**");
-	if (!url_parameter_policy && glob_path != trimmed_dir + sep + "**") {
+	if (!options.enable_deprecated_url_parameters && glob_path != trimmed_dir + sep + "**") {
 		throw IOException("S3 directory path cannot be represented literally by filesystem path joining; "
 		                  "use a directory without '?' or path normalization");
 	}
-	auto glob_res = make_uniq<S3GlobResult>(*this, glob_path, opener, url_parameter_policy);
+	auto glob_res = make_uniq<S3GlobResult>(*this, glob_path, opener, options);
 
 	if (glob_res->GetExpandResult() == FileExpandResult::NO_FILES) {
 		return false;

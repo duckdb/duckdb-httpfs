@@ -245,7 +245,7 @@ TEST_CASE("HTTPFS cache identity separates literal and legacy S3 paths", "[httpf
 	}
 }
 
-TEST_CASE("S3 refresh keeps the URL policy captured before explicit opt-out", "[httpfs][s3][url-parameters]") {
+TEST_CASE("S3 refresh keeps the URL policy captured before settings change", "[httpfs][s3][url-parameters]") {
 	for (const string client : {"curl", "httplib"}) {
 		MockS3ServerConfig config;
 		config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
@@ -255,7 +255,10 @@ TEST_CASE("S3 refresh keeps the URL policy captured before explicit opt-out", "[
 		Connection con(db), other(db);
 		auto test_id = S3TestHelper::ConfigureRefresh(db, con, server, client, false);
 		S3TestHelper::RequireQueryOk(con, ENABLE);
-		S3ProviderRefreshHook hook(test_id, [&] { S3TestHelper::RequireQueryOk(other, DISABLE); });
+		S3ProviderRefreshHook hook(test_id, [&] {
+			S3TestHelper::RequireQueryOk(other, DISABLE);
+			S3TestHelper::RequireQueryOk(other, "SET GLOBAL s3_url_compatibility_mode=true");
+		});
 		S3TestHelper::RequireQueryOk(con, "BEGIN");
 		auto &fs = FileSystem::GetFileSystem(*con.context);
 		auto handle = fs.OpenFile(server.S3Path() + "?s3_version_id=v1",
@@ -485,27 +488,41 @@ TEST_CASE("Bulk S3 deletion keeps the URL policy for every entry", "[httpfs][s3]
 	Connection con(db), other(db);
 	S3TestHelper::LoadExtension(db);
 	Configure(con, server, "curl");
+	S3TestHelper::RequireQueryOk(
+	    con, "CREATE SECRET literal_reader (TYPE S3, KEY_ID 'id', SECRET 'secret', ENDPOINT '" + server.Endpoint() +
+	             "', URL_STYLE 'path', USE_SSL false, URL_COMPATIBILITY_MODE true, "
+	             "SCOPE 's3://refresh-bucket/third')");
 	S3TestHelper::RequireQueryOk(con, ENABLE);
 	S3TestHelper::RequireQueryOk(con, "BEGIN");
 	S3FileSystem fs(BufferManager::GetBufferManager(*db.instance));
 	ChangePolicyDuringRequest opener(*con.context, other, DISABLE);
-	fs.RemoveFiles(
-	    {"s3://refresh-bucket/first?s3_requester_pays=true", "s3://refresh-bucket/second?s3_requester_pays=true"},
-	    &opener);
+	fs.RemoveFiles({"s3://refresh-bucket/first?s3_requester_pays=true",
+	                "s3://refresh-bucket/second?s3_requester_pays=true",
+	                "s3://refresh-bucket/third?s3_requester_pays=true"},
+	               &opener);
 	REQUIRE(opener.changed);
 	REQUIRE_FALSE(Enabled(other));
 	const string expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 	                        "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
 	                        "<Object><Key>first</Key></Object><Object><Key>second</Key></Object>"
 	                        "<Quiet>true</Quiet></Delete>";
-	idx_t requests = 0;
+	const string literal_expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+	                                "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+	                                "<Object><Key>third?s3_requester_pays=true</Key></Object>"
+	                                "<Quiet>true</Quiet></Delete>";
+	idx_t parsed_requests = 0, literal_requests = 0;
 	for (const auto &request : server.Observations()) {
 		if (request.method == "POST") {
-			REQUIRE(request.body_digest == MockS3DigestBody(expected));
-			requests++;
+			if (request.body_digest == MockS3DigestBody(expected)) {
+				parsed_requests++;
+			} else {
+				REQUIRE(request.body_digest == MockS3DigestBody(literal_expected));
+				literal_requests++;
+			}
 		}
 	}
-	REQUIRE(requests == 1);
+	REQUIRE(parsed_requests == 1);
+	REQUIRE(literal_requests == 1);
 	S3TestHelper::RequireQueryOk(con, "COMMIT");
 }
 

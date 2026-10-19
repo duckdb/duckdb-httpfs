@@ -452,8 +452,7 @@ static bool IsAuthRefreshStatus(const HTTPResponse &response) {
 static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path,
                                      const S3AuthURLParams &previous_url) {
 	FileOpenerInfo info = {path};
-	return S3AuthResolver::Resolve(opener, info, previous_url.enable_deprecated_url_parameters,
-	                               previous_url.compatibility_mode);
+	return S3AuthResolver::Resolve(opener, info, S3AuthResolveOptions::ForRefresh(previous_url));
 }
 
 S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(HTTPFSUtil &http_util,
