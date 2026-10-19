@@ -288,8 +288,9 @@ TEST_CASE("S3 COPY preserves ordinary legacy and direct literal writes", "[httpf
 			S3TestHelper::LoadExtension(db);
 			S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
 			S3TestHelper::RequireQueryOk(con, "SET httpfs_client_implementation='" + client + "'");
-			S3TestHelper::RequireQueryOk(con, "CREATE SECRET writer (TYPE S3, KEY_ID 'id', SECRET 'secret', ENDPOINT '" +
-			                                      server.Endpoint() + "', URL_STYLE 'path', USE_SSL false)");
+			S3TestHelper::RequireQueryOk(con,
+			                             "CREATE SECRET writer (TYPE S3, KEY_ID 'id', SECRET 'secret', ENDPOINT '" +
+			                                 server.Endpoint() + "', URL_STYLE 'path', USE_SSL false)");
 			if (legacy) {
 				S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 			}

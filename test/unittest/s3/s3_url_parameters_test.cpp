@@ -65,7 +65,7 @@ public:
 class PauseAfterPolicySet : public ExtensionOptionInfo {
 public:
 	PauseAfterPolicySet(shared_ptr<ExtensionOptionInfo> target, std::promise<void> &callback_completed,
-	                   std::shared_future<void> resume)
+	                    std::shared_future<void> resume)
 	    : target(std::move(target)), callback_completed(callback_completed), resume(std::move(resume)) {
 	}
 
@@ -157,7 +157,8 @@ TEST_CASE("Concurrent setters cannot undo explicit S3 URL parameter opt-out", "[
 		std::promise<void> callback_completed, resume;
 		auto completed = callback_completed.get_future();
 		// Wrap a copy: the registered option must retain the real enforcement state.
-		option.info = make_shared_ptr<PauseAfterPolicySet>(option.info, callback_completed, resume.get_future().share());
+		option.info =
+		    make_shared_ptr<PauseAfterPolicySet>(option.info, callback_completed, resume.get_future().share());
 		auto setter = std::async(std::launch::async, [&] {
 			PhysicalSet::SetExtensionVariable(*changing.context, option, SetScope::GLOBAL, delayed_value);
 		});

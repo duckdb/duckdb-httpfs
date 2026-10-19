@@ -235,10 +235,10 @@ void S3Settings::Register(DBConfig &config) {
 			initial = entry->second.DefaultCastAs(LogicalType::BOOLEAN);
 		}
 		state->Set(initial);
-		ExtensionOption option(
-		    "Enable deprecated S3 URL parameters. NULL disables them by default; "
-		    "false permanently disables them for this database instance.",
-		    LogicalType::BOOLEAN, nullptr, Value(LogicalType::BOOLEAN), SetScope::GLOBAL, false, false);
+		ExtensionOption option("Enable deprecated S3 URL parameters. NULL disables them by default; "
+		                       "false permanently disables them for this database instance.",
+		                       LogicalType::BOOLEAN, nullptr, Value(LogicalType::BOOLEAN), SetScope::GLOBAL, false,
+		                       false);
 		option.supports_session = false;
 		option.info = std::move(state);
 		config.AddExtensionOption(S3URLParametersOption::NAME, std::move(option));

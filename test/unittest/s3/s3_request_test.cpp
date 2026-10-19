@@ -2129,8 +2129,8 @@ TEST_CASE("S3 HTTP diagnostics stay within their provider", "[httpfs][s3][provid
 		auto config = TestAuthConfig(provider_type);
 		config.credentials.region = "test-region";
 		auto auth_params = ResolveTestAuth(std::move(config));
-		auto error = ErrorData(
-		    S3RequestUtil::GetError(auth_params, bad_request, RequestType::POST_REQUEST, "listing", "provider://bucket"));
+		auto error = ErrorData(S3RequestUtil::GetError(auth_params, bad_request, RequestType::POST_REQUEST, "listing",
+		                                               "provider://bucket"));
 		CHECK(StringUtil::Contains(error.RawMessage(), "Bad Request - this can be caused by the S3 region") ==
 		      (provider_type == S3ProviderType::S3));
 		CHECK_FALSE(StringUtil::Contains(error.RawMessage(), "not XML"));
