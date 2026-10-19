@@ -1825,7 +1825,7 @@ TEST_CASE("GCS generation URL validation and signing", "[httpfs][s3][gcs-generat
 	}
 }
 
-TEST_CASE("GCS generation conditions are owned and signed before dispatch", "[httpfs][s3][gcs-generation]") {
+TEST_CASE("GCS generation conditions are owned and omitted from HMAC requests", "[httpfs][s3][gcs-generation]") {
 	auto config = TestAuthConfig(S3ProviderType::GCS);
 	config.credentials.access_key_id = "key";
 	config.credentials.secret_access_key = "secret";
@@ -1847,11 +1847,18 @@ TEST_CASE("GCS generation conditions are owned and signed before dispatch", "[ht
 		auto unconditional = S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(),
 		                                                  auth, timestamp.substr(0, 8), timestamp);
 		REQUIRE(request.http_url == parsed.GetHTTPUrl());
-		REQUIRE(request.headers.GetHeaderValue("x-goog-if-generation-match") == "123");
+		// GCS rejects x-goog-* headers on AWS4-HMAC-SHA256 requests with 400 ExcessHeaderValues.
+		REQUIRE_FALSE(request.headers.HasHeader("x-goog-if-generation-match"));
 		REQUIRE(request.headers.GetHeaderValue("Authorization") == expected.GetHeaderValue("Authorization"));
-		REQUIRE(request.headers.GetHeaderValue("Authorization") != unconditional.GetHeaderValue("Authorization"));
+		REQUIRE(request.headers.GetHeaderValue("Authorization") == unconditional.GetHeaderValue("Authorization"));
 		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
 	});
+	auto bearer_config = TestAuthConfig(S3ProviderType::GCS);
+	bearer_config.credentials.oauth2_bearer_token = "gcs-token";
+	auto bearer = ResolveTestAuth(bearer_config);
+	auto bearer_headers = S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(),
+	                                                   bearer, "", "", "", "", "", {}, spec.read_condition);
+	REQUIRE(bearer_headers.GetHeaderValue("x-goog-if-generation-match") == "123");
 	HTTPConfiguredHeaders overrides {"", {{"X-GoOg-If-GeNeRaTiOn-MaTcH", "456"}}};
 	REQUIRE_THROWS(S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(), auth, "", "",
 	                                            "", "", "", overrides));
