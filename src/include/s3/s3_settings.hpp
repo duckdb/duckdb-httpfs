@@ -38,6 +38,7 @@ struct S3Settings {
 
 	static void Register(DBConfig &config);
 	static void Initialize(DBConfig &config);
+	static bool URLParametersEnabled(optional_ptr<FileOpener> opener);
 };
 
 } // namespace duckdb

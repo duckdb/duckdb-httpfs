@@ -17,8 +17,6 @@ public:
 	const string &GetBucket() const;
 	const string &GetKey() const;
 	const string &GetQueryString() const;
-	string GetObjectUrl(const string &object_key) const;
-	string GetRelativeObjectUrl(const string &object_key, const string &base_key) const;
 	const HTTPObjectVersion &GetObjectVersion() const;
 
 	//! HTTP request target
@@ -29,7 +27,6 @@ public:
 	const string &GetEncodedBucketPath() const;
 
 private:
-	string GetObjectQuery(const string &object_key) const;
 	string BuildHTTPUrl(const string &request_path, const string &http_query_string) const;
 
 private:
@@ -38,7 +35,6 @@ private:
 	string bucket;
 	string key;
 	string query_string;
-	S3URLQueryMode query_mode = S3URLQueryMode::PARSE_OPTIONS;
 
 	//! Explicit object version, independent of credentials and endpoint routing
 	HTTPObjectVersion object_version;
@@ -53,21 +49,15 @@ private:
 enum class S3URLEncodeMode : uint8_t { PATH, QUERY_COMPONENT };
 
 struct S3Url {
-	struct PathComponents {
-		string path;
-		string query;
-	};
-
-	static PathComponents Split(const string &url, S3URLQueryMode mode);
 	static string Decode(const string &input);
 	static string Encode(const string &input, S3URLEncodeMode mode);
-	static S3AuthQueryParameters ParseAuthQueryParameters(const string &query, S3ProviderType provider);
+	static void ApplyAuthQueryParameters(const string &url, S3AuthConfig &config);
 	static ParsedS3Url Parse(const string &url, const S3AuthParams &params);
-	static ParsedS3Url Parse(const string &url, const S3ProviderMatch &route, const S3AuthURLParams &params);
 	static string GetDisplayUrl(const string &url, const S3AuthParams &params);
 
 private:
 	static unordered_map<string, string> ParseQueryParameters(const string &url_query_param);
+	static void ReadQueryParams(const string &url_query_param, S3AuthConfig &config);
 };
 
 } // namespace duckdb

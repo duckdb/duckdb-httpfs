@@ -23,6 +23,13 @@ set ignore_error_messages
 
 # Different versions must remain separate in both caches.
 # Header names arrive in whatever case the server sends them (MinIO: x-amz-version-id, SeaweedFS: X-Amz-Version-Id).
+# Exercise the deprecated URL parameter interface explicitly.
+statement ok
+LOAD httpfs;
+
+statement ok
+SET s3_enable_deprecated_url_parameters=true;
+
 statement ok
 CREATE MACRO http_header(h, name) AS (SELECT any_value(e.value) FROM unnest(map_entries(h)) AS t(e) WHERE lower(e.key) = lower(name));
 

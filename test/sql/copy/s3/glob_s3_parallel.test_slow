@@ -111,9 +111,8 @@ SELECT 's3://test-bucket/glob_parallel/dense/' || path AS file
 FROM (
     SELECT 'a/target/f' || i || '.parquet' AS path FROM range(1001) files(i)
     UNION ALL SELECT 'p' || i || '/target/file.parquet' FROM range(1001) dirs(i)
-    -- The empty query delimiter preserves the literal '?' when reopening the listed URL.
     UNION ALL SELECT unnest(['a/target/sub/file.parquet', 'a/skip/file.parquet',
-                            'a/tail.parquet', 'a0.parquet', 'z.parquet', 'é?/file.parquet?'])
+                            'a/tail.parquet', 'a0.parquet', 'z.parquet', 'é?/file.parquet'])
 );
 CALL enable_logging('HTTP');
 

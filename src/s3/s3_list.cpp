@@ -60,7 +60,8 @@ enum GlobType { HIERARCHICAL, LISTING, UNKNOWN };
 
 struct S3GlobResult : public LazyMultiFileList {
 public:
-	S3GlobResult(S3FileSystem &fs_p, const string &path, optional_ptr<FileOpener> opener);
+	S3GlobResult(S3FileSystem &fs_p, const string &path, optional_ptr<FileOpener> opener,
+	             optional<bool> url_parameter_policy = {});
 
 protected:
 	bool ExpandNextPath() const override;
@@ -135,7 +136,8 @@ private:
 	PrefixResult &result;
 };
 
-S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, optional_ptr<FileOpener> opener)
+S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, optional_ptr<FileOpener> opener,
+                           optional<bool> url_parameter_policy)
     : LazyMultiFileList(FileOpener::TryGetClientContext(opener)), fs(fs_p), glob_pattern(glob_pattern_p),
       opener(opener) {
 	if (!opener) {
@@ -148,19 +150,20 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 	FileOpenerInfo info = {glob_pattern};
 
 	// Trim any query parameters from the string
-	auto s3_auth_params = S3AuthResolver::Resolve(opener, info);
+	auto s3_auth_params = S3AuthResolver::Resolve(opener, info, url_parameter_policy);
 
 	// In url compatibility mode, we ignore globs allowing users to query files with the glob chars
-	if (s3_auth_params.GetURLParams().query_mode == S3URLQueryMode::LITERAL_KEY) {
+	if (s3_auth_params.GetURLParams().compatibility_mode) {
 		expanded_files.emplace_back(glob_pattern);
 		finished = true;
 		return;
 	}
 
 	parsed_s3_url = S3Url::Parse(glob_pattern, s3_auth_params);
+	auto parsed_glob_url = S3Url::GetDisplayUrl(glob_pattern, s3_auth_params);
 
 	// AWS matches on prefix, not glob pattern, so we take a substring until the first wildcard char for the aws calls
-	auto first_wildcard_pos = parsed_s3_url->GetKey().find_first_of("*[\\");
+	auto first_wildcard_pos = parsed_glob_url.find_first_of("*[\\");
 	if (first_wildcard_pos == string::npos) {
 		expanded_files.emplace_back(glob_pattern);
 		finished = true;
@@ -171,7 +174,7 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 		                              S3Provider::GetVersionParameterName(parsed_s3_url->GetObjectVersion().GetType()));
 	}
 
-	shared_path = parsed_s3_url->GetObjectUrl(parsed_s3_url->GetKey().substr(0, first_wildcard_pos));
+	shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
 
 	request_session = S3RequestExecutor::CreateSession(opener, glob_pattern, s3_auth_params);
 }
@@ -388,7 +391,11 @@ void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
 		auto key_splits = StringUtil::Split(s3_key.path, "/");
 		if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
 		          S3GlobMatchMode::COMPLETE)) {
-			s3_key.path = parsed_s3_url->GetObjectUrl(s3_key.path);
+			auto result_full_url = parsed_s3_url->GetPrefix() + parsed_s3_url->GetBucket() + "/" + s3_key.path;
+			if (!parsed_s3_url->GetQueryString().empty()) {
+				result_full_url += '?' + parsed_s3_url->GetQueryString();
+			}
+			s3_key.path = std::move(result_full_url);
 			auto captured = request_session->Capture();
 			auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
 			if (snapshot.region_redirected) {
@@ -405,67 +412,44 @@ unique_ptr<MultiFileList> S3FileSystem::GlobFilesExtended(const string &path, co
 	return make_uniq<S3GlobResult>(*this, path, opener);
 }
 
-bool S3FileSystem::ListObjectsInDirectory(const string &directory,
-                                          const std::function<void(OpenFileInfo &, const string &, bool)> &callback,
-                                          optional_ptr<FileOpener> opener) {
-	FileOpenerInfo info {directory};
-	auto auth_params = S3AuthResolver::Resolve(opener, info);
-	auto directory_url = directory;
-	auto directory_path = S3Url::GetDisplayUrl(directory, auth_params);
-	if (directory_path.find('/', auth_params.GetProvider().GetRoute().prefix.size()) == string::npos) {
-		directory_url.insert(directory_path.size(), "/");
-	}
-	auto parsed = S3Url::Parse(directory_url, auth_params);
-	auto base_key = parsed.GetKey();
-	if (!base_key.empty() && !StringUtil::EndsWith(base_key, "/")) {
-		base_key += '/';
-	}
-	auto session = S3RequestExecutor::CreateSession(opener, directory, auth_params);
-	auto context = FileOpener::TryGetClientContext(opener);
-	string continuation;
-	bool found = false;
-	do {
-		if (context && context->IsInterrupted()) {
-			throw InterruptException();
-		}
-		auto response = AWSListObjectV2::Request(GetEncryptionUtil(), *session, parsed.GetObjectUrl(base_key),
-		                                         continuation, S3ListMode::FLAT, {}, &base_key);
-		continuation = std::move(response.continuation_token);
-		vector<OpenFileInfo> entries;
-		AWSListObjectV2::AppendFileList(response, entries);
-		for (auto &entry : entries) {
-			auto relative_path = parsed.GetRelativeObjectUrl(entry.path, base_key);
-			entry.path = parsed.GetObjectUrl(entry.path);
-			found = true;
-			callback(entry, relative_path, !parsed.GetQueryString().empty());
-		}
-	} while (!continuation.empty());
-	return found;
+bool S3FileSystem::ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
+                                     optional_ptr<FileOpener> opener) {
+	return ListFilesExtended(directory, callback, opener, S3Settings::URLParametersEnabled(opener));
 }
 
 bool S3FileSystem::ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
-                                     optional_ptr<FileOpener> opener) {
-	return ListObjectsInDirectory(
-	    directory,
-	    [&](OpenFileInfo &file, const string &relative_path, bool has_directory_options) {
-		    auto joined_path = JoinPath(directory, relative_path);
-		    if (joined_path != file.path) {
-			    if (has_directory_options) {
-				    throw IOException("S3 directory URL options cannot be preserved when joining listed filenames. "
-				                      "Move supported options into the S3 secret, for example REQUESTER_PAYS true.");
-			    }
-			    auto literal_join = directory + (StringUtil::EndsWith(directory, "/") ? "" : "/") + relative_path;
-			    if (joined_path != literal_join) {
-				    throw IOException("S3 directory entry cannot be represented without changing its path; "
-				                      "filesystem path normalization changes the listed object key");
-			    }
-			    throw IOException("S3 directory entry cannot be represented without changing its path; "
-			                      "joining the directory and filename does not reconstruct the listed object URL");
-		    }
-		    file.path = relative_path;
-		    callback(file);
-	    },
-	    opener);
+                                     optional_ptr<FileOpener> opener, bool url_parameter_policy) {
+	string trimmed_dir = directory;
+	auto sep = PathSeparator(trimmed_dir);
+	StringUtil::RTrim(trimmed_dir, sep);
+	auto glob_path = JoinPath(trimmed_dir, "**");
+	if (!url_parameter_policy && glob_path != trimmed_dir + sep + "**") {
+		throw IOException("S3 directory path cannot be represented literally by filesystem path joining; "
+		                  "use a directory without '?' or path normalization");
+	}
+	auto glob_res = make_uniq<S3GlobResult>(*this, glob_path, opener, url_parameter_policy);
+
+	if (glob_res->GetExpandResult() == FileExpandResult::NO_FILES) {
+		return false;
+	}
+	auto base_path = trimmed_dir + sep;
+
+	for (auto file : glob_res->Files()) {
+		if (!StringUtil::StartsWith(file.path, base_path)) {
+			throw InvalidInputException(
+			    "Globbed directory \"%s\", but found file \"%s\" that does not start with base path \"%s\"", directory,
+			    file.path, base_path);
+		}
+		auto relative_path = file.path.substr(base_path.size());
+		if (JoinPath(directory, relative_path) != file.path) {
+			throw IOException("S3 directory entry cannot be represented without changing its path; "
+			                  "filesystem path normalization changes the listed object key");
+		}
+		file.path = std::move(relative_path);
+		callback(file);
+	}
+
+	return true;
 }
 
 struct S3ListRequest {

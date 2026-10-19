@@ -6,18 +6,16 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "http/http_object_version.hpp"
-#include "s3/s3_endpoint.hpp"
 
 namespace duckdb {
 
 class CreateSecretFunction;
 struct DBConfig;
 class KeyValueSecret;
+class NormalizedS3Endpoint;
 class Value;
 struct CreateSecretInput;
 class S3AuthParams;
-struct S3AuthConfig;
-struct S3AuthURLParams;
 class S3KeyValueReader;
 struct HTTPHeaders;
 struct ExtendedOpenFileInfo;
@@ -32,15 +30,6 @@ enum class S3UrlSchemeOrigin : uint8_t { BUILTIN, ALIAS };
 enum class S3AuthType : uint8_t { ANONYMOUS, SIGV4, BEARER };
 
 enum class S3URLStyle : uint8_t { VIRTUAL_HOSTED, PATH };
-
-enum class S3EndpointMode : uint8_t { AUTOMATIC, EXPLICIT };
-
-struct S3ResolvedEndpoint {
-	NormalizedS3Endpoint endpoint;
-	S3EndpointMode mode;
-	S3URLStyle style;
-	string region;
-};
 
 enum class S3MultipartPartSizeStrategy : uint8_t { ADAPTIVE, FIXED };
 
@@ -95,11 +84,6 @@ struct S3SecretConfig {
 class S3Provider {
 public:
 	static S3Provider Resolve(S3ProviderMatch route, const NormalizedS3Endpoint &endpoint);
-
-	//! Endpoint defaults and service-specific routing policy
-	static S3ResolvedEndpoint ResolveEndpoint(const S3AuthConfig &config);
-	NormalizedS3Endpoint GetEndpointForRegion(const S3AuthURLParams &url, const string &region) const;
-	bool AllowsAutomaticEndpointChange(const S3AuthURLParams &configured, const S3AuthURLParams &resolved) const;
 
 	const S3ProviderMatch &GetRoute() const {
 		return route;

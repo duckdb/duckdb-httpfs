@@ -382,11 +382,16 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	auto &credentials = auth_params.GetCredentials();
 	auto &request_options = auth_params.GetRequestOptions();
 	auto headers = CreateConfiguredS3Headers(configured_headers, provider.GetType());
-	provider.ApplyReadCondition(read_condition, headers);
+	auto auth_type = provider.GetAuthType(auth_params);
+	// GCS rejects x-goog-if-generation-match on AWS4-HMAC-SHA256 (HMAC key) requests with 400 ExcessHeaderValues.
+	// The response generation is still validated after the read.
+	if (provider.GetType() != S3ProviderType::GCS || auth_type != S3AuthType::SIGV4) {
+		provider.ApplyReadCondition(read_condition, headers);
+	}
 	if (provider.GetType() == S3ProviderType::GCS && !request_options.user_project.empty()) {
 		headers["x-goog-user-project"] = request_options.user_project;
 	}
-	switch (provider.GetAuthType(auth_params)) {
+	switch (auth_type) {
 	case S3AuthType::ANONYMOUS: {
 		headers["Host"] = host;
 		return headers;
@@ -444,9 +449,11 @@ static bool IsAuthRefreshStatus(const HTTPResponse &response) {
 	return response.status == HTTPStatusCode::BadRequest_400 && IsAuthRefreshErrorBody(response.body);
 }
 
-static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path) {
+static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path,
+                                     const S3AuthURLParams &previous_url) {
 	FileOpenerInfo info = {path};
-	return S3AuthResolver::Resolve(opener, info);
+	return S3AuthResolver::Resolve(opener, info, previous_url.enable_deprecated_url_parameters,
+	                               previous_url.compatibility_mode);
 }
 
 S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(HTTPFSUtil &http_util,
@@ -484,7 +491,7 @@ static bool ReloadS3AuthMaterial(optional_ptr<FileOpener> opener, const string &
 	}
 
 	auto previous_region = auth_params.GetCredentials().region;
-	auto reloaded_auth_params = ReadS3AuthParams(opener, path);
+	auto reloaded_auth_params = ReadS3AuthParams(opener, path, auth_params.GetURLParams());
 	if (preserve_region && !previous_region.empty() &&
 	    reloaded_auth_params.GetCredentials().region != previous_region) {
 		reloaded_auth_params = reloaded_auth_params.WithRegion(std::move(previous_region));
@@ -530,16 +537,21 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
                                                    const CapturedHTTPRequestSnapshot &captured,
                                                    const S3RequestSpec &spec, HTTPRetryBudget &retry_budget) {
 	auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-	auto has_configured_headers = !snapshot.Params().extra_headers.empty() || !snapshot.Params().bearer_token.empty();
-	snapshot.auth_params.ValidateInheritedMaterial(has_configured_headers);
 	auto &operation_info = S3RequestUtil::GetOperationInfo(spec.operation);
 	S3RequestData result(spec.operation, snapshot.auth_params, retry_budget);
 	result.captured = captured;
 	auto session_request = snapshot.CreateRequest();
 	result.http_params = std::move(session_request.params);
-	// Sensitive requests use only the validated and re-signed region redirect path.
-	if (has_configured_headers || snapshot.auth_params.HasAuthenticationMaterial()) {
+	// Ordinary redirects cannot forward configured authentication by default.
+	// S3's region correction still constructs and signs a fresh request.
+	if (!snapshot.auth_params.GetURLParams().enable_deprecated_url_parameters &&
+	    (snapshot.auth_params.HasAuthenticationMaterial() || !snapshot.Params().extra_headers.empty() ||
+	     !snapshot.Params().bearer_token.empty())) {
 		result.http_params->follow_location = false;
+	}
+	// the file access settings apply to the S3 path, unless the url itself chose the host it is sent to
+	if (!result.auth_params.GetURLParams().endpoint_from_url) {
+		result.http_params->access_path = spec.url;
 	}
 	auto parsed_s3_url = S3Url::Parse(spec.url, result.auth_params);
 	auto &version = spec.object_version.IsSet() ? spec.object_version : parsed_s3_url.GetObjectVersion();
@@ -944,12 +956,12 @@ void S3FileSystem::ValidateResponseVersion(HTTPFileHandle &handle, const HTTPRea
 		actual =
 		    captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider().ReadObjectVersion(response.headers);
 	} catch (...) {
-		EraseGlobalCacheEntry(handle.path);
+		EraseGlobalCacheEntry(handle.GetCacheKey());
 		throw;
 	}
 	if (actual.IsSet() &&
 	    (actual.GetType() != HTTPObjectVersionType::GCS_GENERATION || actual.GetValue() != *expected)) {
-		EraseGlobalCacheEntry(handle.path);
+		EraseGlobalCacheEntry(handle.GetCacheKey());
 		throw HTTPException(response, "GCS generation on reading file \"%s\" was initially %s and now it returned %s",
 		                    handle.path, *expected, actual.GetValue());
 	}

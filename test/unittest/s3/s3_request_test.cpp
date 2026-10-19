@@ -32,6 +32,7 @@ namespace {
 
 static S3AuthConfig TestAuthConfig(S3ProviderType provider_type = S3ProviderType::S3, bool scheme_is_alias = false) {
 	S3AuthConfig config;
+	config.enable_deprecated_url_parameters = true;
 	const char *prefix = provider_type == S3ProviderType::GCS  ? "gcs://"
 	                     : provider_type == S3ProviderType::R2 ? "r2://"
 	                                                           : "s3://";
@@ -200,6 +201,7 @@ static void RunNormalizedEndpointWireScenario(const string &client_implementatio
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	S3TestHelper::RequireQueryOk(con,
 	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
 	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
@@ -677,6 +679,7 @@ static void RunGCSBulkDeleteProjectIdentityScenario(const string &client_impleme
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	ConfigureGCSClient(con, client_implementation);
 	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
 	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
@@ -736,6 +739,7 @@ static void RunBulkDeleteEndpointModeIdentityScenario(const string &client_imple
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
 	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	S3TestHelper::RequireQueryOk(con,
 	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
 	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
@@ -934,7 +938,7 @@ static S3AuthParams ReadSecretAuthParams(Connection &con, KeyValueSecret &secret
                                          const string &path = "s3://bucket/key") {
 	ClientContextFileOpener opener(*con.context);
 	S3KeyValueReader secret_reader {KeyValueSecretReader(secret, opener)};
-	return S3AuthResolver::Resolve(secret_reader, path);
+	return S3AuthResolver::Resolve(secret_reader, path, true);
 }
 
 } // namespace
@@ -1314,7 +1318,7 @@ TEST_CASE("GCS billing projects follow provider configuration precedence",
 			REQUIRE(StringUtil::Contains(error, "GCS Requester Pays requires a billing project"));
 			REQUIRE(StringUtil::Contains(error, "USER_PROJECT in the GCS secret"));
 			REQUIRE(StringUtil::Contains(error, "set gcs_user_project"));
-			REQUIRE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
+			REQUIRE_FALSE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
 		};
 
 		auto requester_pays = TestAuthConfig(S3ProviderType::GCS);
@@ -1352,7 +1356,7 @@ TEST_CASE("S3 URL styles share one validation policy", "[httpfs][s3][provider][u
 
 	SECTION("compatibility mode keeps query-looking key text literal") {
 		auto config = TestAuthConfig();
-		config.query_mode = S3URLQueryMode::LITERAL_KEY;
+		config.compatibility_mode = true;
 		auto auth_params = ResolveTestAuth(std::move(config));
 		auto parsed = S3Url::Parse("s3://bucket/key?s3_url_style=handwritten", auth_params);
 		REQUIRE(parsed.GetQueryString().empty());
@@ -1443,7 +1447,7 @@ CREATE SECRET invalid_gcs_requester_pays (
 	REQUIRE(StringUtil::Contains(error, "GCS Requester Pays requires a billing project"));
 	REQUIRE(StringUtil::Contains(error, "USER_PROJECT in the GCS secret"));
 	REQUIRE(StringUtil::Contains(error, "set gcs_user_project"));
-	REQUIRE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
 	REQUIRE(server.Observations().empty());
 	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
 }
@@ -1624,7 +1628,7 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 
 	SECTION("compatibility mode treats the version parameter as key bytes") {
 		auto config = TestAuthConfig();
-		config.query_mode = S3URLQueryMode::LITERAL_KEY;
+		config.compatibility_mode = true;
 		const string path = "s3://bucket/key?s3_version_id=abc";
 		auto auth_params = ResolveTestAuth(std::move(config), path);
 		auto parsed_url = S3Url::Parse(path, auth_params);
@@ -1645,7 +1649,7 @@ TEST_CASE("S3 URL query settings are resolved independently of the HTTP client",
 		auto auth_params = ResolveTestAuth(TestAuthConfig());
 		REQUIRE(S3Url::GetDisplayUrl("s3://bucket/key?s3_secret_access_key=secret", auth_params) == "s3://bucket/key");
 		auto compatibility_config = TestAuthConfig();
-		compatibility_config.query_mode = S3URLQueryMode::LITERAL_KEY;
+		compatibility_config.compatibility_mode = true;
 		auto compatibility_params = ResolveTestAuth(std::move(compatibility_config));
 		REQUIRE(S3Url::GetDisplayUrl("s3://bucket/key?literal", compatibility_params) == "s3://bucket/key?literal");
 	}
@@ -1659,26 +1663,26 @@ TEST_CASE("S3 URL compatibility mode reads canonical and legacy secret keys", "[
 	SECTION("canonical key") {
 		KeyValueSecret secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("canonical"));
 		secret.secret_map["url_compatibility_mode"] = Value(true);
-		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().query_mode == S3URLQueryMode::LITERAL_KEY);
+		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().compatibility_mode);
 	}
 
 	SECTION("canonical key takes precedence") {
 		KeyValueSecret secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("precedence"));
 		secret.secret_map["url_compatibility_mode"] = Value(false);
 		secret.secret_map["s3_url_compatibility_mode"] = Value(true);
-		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().query_mode == S3URLQueryMode::PARSE_OPTIONS);
+		REQUIRE_FALSE(ReadSecretAuthParams(con, secret).GetURLParams().compatibility_mode);
 	}
 
 	SECTION("legacy key") {
 		KeyValueSecret secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("legacy"));
 		secret.secret_map["s3_url_compatibility_mode"] = Value(true);
-		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().query_mode == S3URLQueryMode::LITERAL_KEY);
+		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().compatibility_mode);
 	}
 
 	SECTION("global setting fallback") {
 		S3TestHelper::RequireQueryOk(con, "SET s3_url_compatibility_mode=true");
 		KeyValueSecret secret({"s3://"}, Identifier("s3"), Identifier("config"), Identifier("setting"));
-		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().query_mode == S3URLQueryMode::LITERAL_KEY);
+		REQUIRE(ReadSecretAuthParams(con, secret).GetURLParams().compatibility_mode);
 	}
 
 	SECTION("invalid legacy URL style") {
@@ -1802,7 +1806,7 @@ TEST_CASE("GCS generation URL validation and signing", "[httpfs][s3][gcs-generat
 		REQUIRE_THROWS(other.GetProvider().GetVersionQueryParameter(parsed.GetObjectVersion()));
 		REQUIRE_THROWS(S3Url::Parse(other.GetProvider().GetRoute().prefix + "bucket/key?gcs_generation=123", other));
 	}
-	config.query_mode = S3URLQueryMode::LITERAL_KEY;
+	config.compatibility_mode = true;
 	auto literal = S3Url::Parse(path, ResolveTestAuth(config, path));
 	REQUIRE_FALSE(literal.GetObjectVersion().IsSet());
 	REQUIRE(literal.GetKey() == "key?gcs_generation=000123");
@@ -1826,7 +1830,7 @@ TEST_CASE("GCS generation URL validation and signing", "[httpfs][s3][gcs-generat
 	}
 }
 
-TEST_CASE("GCS generation conditions are owned and signed before dispatch", "[httpfs][s3][gcs-generation]") {
+TEST_CASE("GCS generation conditions are owned and omitted from HMAC requests", "[httpfs][s3][gcs-generation]") {
 	auto config = TestAuthConfig(S3ProviderType::GCS);
 	config.credentials.access_key_id = "key";
 	config.credentials.secret_access_key = "secret";
@@ -1848,11 +1852,18 @@ TEST_CASE("GCS generation conditions are owned and signed before dispatch", "[ht
 		auto unconditional = S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(),
 		                                                  auth, timestamp.substr(0, 8), timestamp);
 		REQUIRE(request.http_url == parsed.GetHTTPUrl());
-		REQUIRE(request.headers.GetHeaderValue("x-goog-if-generation-match") == "123");
+		// GCS rejects x-goog-* headers on AWS4-HMAC-SHA256 requests with 400 ExcessHeaderValues.
+		REQUIRE_FALSE(request.headers.HasHeader("x-goog-if-generation-match"));
 		REQUIRE(request.headers.GetHeaderValue("Authorization") == expected.GetHeaderValue("Authorization"));
-		REQUIRE(request.headers.GetHeaderValue("Authorization") != unconditional.GetHeaderValue("Authorization"));
+		REQUIRE(request.headers.GetHeaderValue("Authorization") == unconditional.GetHeaderValue("Authorization"));
 		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
 	});
+	auto bearer_config = TestAuthConfig(S3ProviderType::GCS);
+	bearer_config.credentials.oauth2_bearer_token = "gcs-token";
+	auto bearer = ResolveTestAuth(bearer_config);
+	auto bearer_headers = S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(),
+	                                                   bearer, "", "", "", "", "", {}, spec.read_condition);
+	REQUIRE(bearer_headers.GetHeaderValue("x-goog-if-generation-match") == "123");
 	HTTPConfiguredHeaders overrides {"", {{"X-GoOg-If-GeNeRaTiOn-MaTcH", "456"}}};
 	REQUIRE_THROWS(S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(), auth, "", "",
 	                                            "", "", "", overrides));

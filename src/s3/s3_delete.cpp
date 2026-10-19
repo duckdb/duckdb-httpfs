@@ -1,6 +1,7 @@
 #include "s3/s3fs.hpp"
 
 #include "s3/s3_request.hpp"
+#include "s3/s3_settings.hpp"
 #include "s3/s3_url.hpp"
 #include "s3/s3_xml_response.hpp"
 
@@ -50,7 +51,8 @@ static void AddDeleteAuthHash(hash_t &result, const S3AuthParams &auth_params) {
 	AddDeleteHash(result, url.endpoint.GetCanonicalValue());
 	AddDeleteEnumHash(result, url.endpoint_mode);
 	AddDeleteEnumHash(result, url.style);
-	AddDeleteEnumHash(result, url.query_mode);
+	AddDeleteHash(result, static_cast<idx_t>(url.compatibility_mode));
+	AddDeleteHash(result, static_cast<idx_t>(url.enable_deprecated_url_parameters));
 
 	auto &request_options = auth_params.GetRequestOptions();
 	AddDeleteHash(result, request_options.kms_key_id);
@@ -292,6 +294,11 @@ S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session
 }
 
 void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener) {
+	RemoveFiles(paths, opener, S3Settings::URLParametersEnabled(opener));
+}
+
+void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener,
+                               bool url_parameter_policy) {
 	if (paths.empty()) {
 		return;
 	}
@@ -300,7 +307,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 
 	for (auto &path : paths) {
 		FileOpenerInfo info = {path};
-		auto auth_params = S3AuthResolver::Resolve(opener, info);
+		auto auth_params = S3AuthResolver::Resolve(opener, info, url_parameter_policy);
 		auto parsed_url = S3Url::Parse(path, auth_params);
 		if (parsed_url.GetObjectVersion().IsSet()) {
 			throw NotImplementedException("%s is only supported for reading",
@@ -369,11 +376,13 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 }
 
 void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> opener) {
+	const auto url_parameter_policy = S3Settings::URLParametersEnabled(opener);
 	vector<string> files_to_remove;
-	ListObjectsInDirectory(
-	    path, [&](OpenFileInfo &file, const string &, bool) { files_to_remove.push_back(file.path); }, opener);
+	ListFilesExtended(
+	    path, [&](OpenFileInfo &file) { files_to_remove.push_back(JoinPath(path, file.path)); }, opener,
+	    url_parameter_policy);
 
-	RemoveFiles(files_to_remove, opener);
+	RemoveFiles(files_to_remove, opener, url_parameter_policy);
 }
 
 } // namespace duckdb

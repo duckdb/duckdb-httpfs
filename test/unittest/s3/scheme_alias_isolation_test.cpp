@@ -66,6 +66,7 @@ TEST_CASE("a required endpoint may arrive from any source, but must arrive", "[h
 
 	auto make_config = [](const EndpointCase &test_case) {
 		S3AuthConfig config;
+		config.enable_deprecated_url_parameters = true;
 		config.route = test_case.is_alias ? S3ProviderMatch {S3ProviderType::S3, "oss://", S3UrlSchemeOrigin::ALIAS}
 		                                  : S3UrlScheme::Match("r2://");
 		return config;

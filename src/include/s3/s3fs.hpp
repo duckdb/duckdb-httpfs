@@ -102,6 +102,7 @@ public:
 	//! FileSystem overrides.
 	string GetName() const override;
 	string GetVersionTag(FileHandle &handle) override;
+	FileMetadata Stats(FileHandle &handle) override;
 	bool CanHandleFile(const string &fpath) override;
 	bool OnDiskFile(FileHandle &handle) override;
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
@@ -152,10 +153,9 @@ protected:
 	                                        optional_ptr<FileOpener> opener) override;
 
 private:
-	bool ListObjectsInDirectory(
-	    const string &directory,
-	    const std::function<void(OpenFileInfo &, const string &relative_path, bool has_directory_options)> &callback,
-	    optional_ptr<FileOpener> opener);
+	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener, bool url_parameter_policy);
+	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
+	                       optional_ptr<FileOpener> opener, bool url_parameter_policy);
 	S3RequestResult RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
 	                                       const string &body, idx_t key_count, string &result);
 

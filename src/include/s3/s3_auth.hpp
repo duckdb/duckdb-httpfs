@@ -9,7 +9,7 @@
 
 namespace duckdb {
 
-enum class S3URLQueryMode : uint8_t { PARSE_OPTIONS, LITERAL_KEY };
+enum class S3EndpointMode : uint8_t { AUTOMATIC, EXPLICIT };
 
 class S3SSECustomerKey {
 public:
@@ -39,8 +39,6 @@ struct S3AuthCredentials {
 	string session_token;
 	string oauth2_bearer_token;
 
-	bool HasAuthentication() const;
-	bool HasSameAuthentication(const S3AuthCredentials &other) const;
 	bool operator==(const S3AuthCredentials &other) const;
 };
 
@@ -50,7 +48,14 @@ struct S3AuthURLParams {
 	NormalizedS3Endpoint endpoint;
 	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
 	S3URLStyle style = S3URLStyle::VIRTUAL_HOSTED;
-	S3URLQueryMode query_mode = S3URLQueryMode::PARSE_OPTIONS;
+	bool compatibility_mode = false;
+	//! The URL's s3_endpoint parameter chose the host, instead of the configuration
+	bool endpoint_from_url = false;
+	bool enable_deprecated_url_parameters = false;
+
+	bool ParseURLParameters() const {
+		return enable_deprecated_url_parameters && !compatibility_mode;
+	}
 
 	bool operator==(const S3AuthURLParams &other) const;
 };
@@ -87,33 +92,12 @@ struct S3AuthConfig {
 	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
 	string url_style;
 	bool use_ssl = true;
-	S3URLQueryMode query_mode = S3URLQueryMode::PARSE_OPTIONS;
+	bool compatibility_mode = false;
+	bool endpoint_from_url = false;
+	bool enable_deprecated_url_parameters = false;
 
 	//! Request headers
 	S3AuthRequestOptions request_options;
-};
-
-class S3AuthQueryParameters {
-public:
-	void ApplyTo(S3AuthConfig &config) const;
-	S3AuthCredentials GetExplicitCredentials() const;
-	bool OverridesSSECustomerKey() const;
-
-private:
-	friend struct S3Url;
-	S3AuthQueryParameters() = default;
-	void ApplyCredentials(S3AuthCredentials &credentials) const;
-
-	optional<string> region;
-	optional<string> access_key_id;
-	optional<string> secret_access_key;
-	optional<string> session_token;
-	optional<string> endpoint;
-	optional<string> url_style;
-	optional<bool> use_ssl;
-	optional<bool> requester_pays;
-	optional<string> sse_c_key;
-	optional<string> user_project;
 };
 
 class S3KeyValueReader {
@@ -163,18 +147,6 @@ private:
 	KeyValueSecretReader reader;
 };
 
-struct S3AuthRoutingPolicy {
-	enum class Inheritance : uint8_t { ALLOW_CONFIGURED, REQUIRE_EXPLICIT };
-
-	void ValidateInheritedMaterial(bool has_configured_headers) const;
-	bool operator==(const S3AuthRoutingPolicy &other) const;
-
-	Inheritance inheritance = Inheritance::ALLOW_CONFIGURED;
-	bool has_inherited_credentials = false;
-	bool has_inherited_sse_key = false;
-	string configured_destination_error;
-};
-
 class S3AuthParams {
 public:
 	const S3Provider &GetProvider() const {
@@ -193,7 +165,6 @@ public:
 		return refresh_identity;
 	}
 	bool HasAuthenticationMaterial() const;
-	void ValidateInheritedMaterial(bool has_configured_headers) const;
 	S3AuthParams WithRegion(string region) const;
 	bool operator==(const S3AuthParams &other) const;
 
@@ -206,19 +177,17 @@ private:
 	S3AuthURLParams url;
 	S3AuthRequestOptions request_options;
 	S3AuthRefreshIdentity refresh_identity;
-	S3AuthRoutingPolicy routing;
 };
 
 struct S3AuthResolver {
-	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
-	static S3AuthParams Resolve(S3KeyValueReader &secret_reader, const string &file_path);
+	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info,
+	                            optional<bool> url_parameter_policy = {}, optional<bool> compatibility_mode = {});
+	static S3AuthParams Resolve(S3KeyValueReader &secret_reader, const string &file_path,
+	                            bool enable_deprecated_url_parameters = false);
 	static S3AuthParams Resolve(S3AuthConfig config, const string &file_path);
 
 private:
 	static S3AuthConfig ReadConfig(S3KeyValueReader &secret_reader, const string &file_path);
-	static S3AuthParams ResolveConfig(S3AuthConfig config);
-	static S3AuthRoutingPolicy ResolveRoutingPolicy(const S3AuthConfig &configured, const S3AuthParams &resolved,
-	                                                const S3AuthQueryParameters &url_options, const string &file_path);
 };
 
 struct AWSEnvironmentCredentialsProvider {

@@ -64,6 +64,9 @@ public:
 	virtual void Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener);
 	const HTTPReadConfig &GetReadConfig() const;
 	const HTTPObjectVersion &GetObjectVersion() const;
+	const string &GetCacheKey() const {
+		return cache_key;
+	}
 
 	//! Record a completed range request in the network throughput estimate
 	void RecordNetworkSample(double total_seconds, idx_t bytes, bool sample_has_ttfb, double ttfb_seconds)
@@ -86,8 +89,10 @@ protected:
 
 	virtual void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) DUCKDB_EXCLUDES(cache_policy_lock);
 	virtual HTTPMetadataCacheEntry GetCacheEntry() const;
-	//! Invalidate metadata affected by a write, including filesystem-specific URL aliases.
 	virtual void InvalidateWriteMetadata(HTTPMetadataCache &cache) const;
+
+	//! Internal identity, finalized by construction before Initialize accesses any cache.
+	string cache_key;
 
 private:
 	void FinalizeReadConfig();

@@ -1,5 +1,6 @@
 #include "http/httpfs.hpp"
 #include "s3/s3_provider.hpp"
+#include "s3/s3_request.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/logging/log_manager.hpp"
 
@@ -53,6 +54,12 @@ void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> res
 	auto sanitized_request = request;
 	sanitized_request.headers["x-amz-server-side-encryption-customer-key"] = "redacted";
 	HTTPUtil::LogRequest(sanitized_request, response);
+}
+
+bool HTTPFSUtil::ShouldRetry(const BaseRequest &request, const HTTPResponse &response) {
+	// S3 reports a timed-out request as 400 RequestTimeout: the status is final, the error code is not. Core judges
+	// statuses only, received or thrown by a handler; the error document is read here, by the S3 XML parser.
+	return HTTPUtil::ShouldRetry(request, response) || S3RequestUtil::IsRequestTimeout(response);
 }
 
 struct HTTPParametersInitializer {
@@ -233,8 +240,9 @@ static bool IsStrongETag(string etag) {
 
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
                                shared_ptr<HTTPRequestSession> request_session_p, HTTPObjectVersion object_version_p)
-    : FileHandle(fs, file.path, flags), request_session(std::move(request_session_p)), flags(flags), length(0),
-      last_modified(0), force_full_download(false), file_offset(0), object_version(std::move(object_version_p)) {
+    : FileHandle(fs, file.path, flags), cache_key(file.path), request_session(std::move(request_session_p)),
+      flags(flags), length(0), last_modified(0), force_full_download(false), file_offset(0),
+      object_version(std::move(object_version_p)) {
 	D_ASSERT(request_session);
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
@@ -474,7 +482,7 @@ void HTTPFileSystem::ReadAtWithFallback(FileHandle &handle, data_ptr_t buffer, i
 	const auto downloaded_length = cached_file->GetSize();
 	if (downloaded_length != head_reported_length) {
 		hfh.file_state->InvalidateCachedFile();
-		hfh.request_session->Capture().snapshot->Params().state->EraseFileState(hfh.path);
+		hfh.request_session->Capture().snapshot->Params().state->EraseFileState(hfh.GetCacheKey());
 		throw HTTPException(Exception::ConstructMessage(
 		    "The size reported by HEAD for '%s' was %llu bytes, but the full GET downloaded %llu bytes. You can try "
 		    "to resolve this by enabling `SET force_download=true`",
@@ -1148,7 +1156,7 @@ void HTTPFileHandle::InitializeRequestState(const OpenFileInfo &file, optional_p
 	}
 	request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
 	auto request_snapshot = request_session->Capture().snapshot;
-	file_state = request_snapshot->Params().state->GetFileState(path);
+	file_state = request_snapshot->Params().state->GetFileState(GetCacheKey());
 
 	if (opener) {
 		InitializeLogger(*opener);
@@ -1172,7 +1180,7 @@ bool HTTPFileHandle::TryInitializeRead(HTTPFileSystem &hfs, optional_ptr<HTTPMet
 
 	if (cache) {
 		HTTPMetadataCacheEntry value;
-		if (cache->Find(path, value)) {
+		if (cache->Find(GetCacheKey(), value)) {
 			InitializeFromCacheEntry(value);
 			FinalizeReadConfig();
 			return true;
@@ -1207,7 +1215,7 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 			length = hfs.FullDownload(*this, GetReadConfig(), should_write_cache)->GetSize();
 		}
 		if (should_write_cache && (cache->OverridesResponseCachePolicy() || CanReuseCachedData())) {
-			cache->Insert(path, GetCacheEntry());
+			cache->Insert(GetCacheKey(), GetCacheEntry());
 		}
 	}
 }
@@ -1229,7 +1237,7 @@ void HTTPFileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpene
 }
 
 void HTTPFileHandle::InvalidateWriteMetadata(HTTPMetadataCache &cache) const {
-	cache.Erase(path);
+	cache.Erase(GetCacheKey());
 }
 
 shared_ptr<const HTTPRequestSnapshot> HTTPFileHandle::CreateRequestSnapshot(const HTTPFSParams &params) const {

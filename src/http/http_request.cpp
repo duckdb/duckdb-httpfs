@@ -341,7 +341,7 @@ void HTTPFileSystem::ValidateResponseVersion(HTTPFileHandle &hfh, const HTTPRead
 	if (response_etag.empty() || StripETagQuotes(response_etag) == StripETagQuotes(read_config.etag)) {
 		return;
 	}
-	EraseGlobalCacheEntry(hfh.path);
+	EraseGlobalCacheEntry(hfh.GetCacheKey());
 	throw HTTPException(
 	    response,
 	    "ETag on reading file \"%s\" was initially %s and now it returned %s, this likely means "
@@ -367,7 +367,7 @@ void HTTPFileSystem::ValidateCachedFile(HTTPFileHandle &hfh, const HTTPReadConfi
 	                          metadata.etag == read_config.etag ||
 	                          StripETagQuotes(metadata.etag) == StripETagQuotes(read_config.etag);
 	if (!version_matches || !etag_matches) {
-		EraseGlobalCacheEntry(hfh.path);
+		EraseGlobalCacheEntry(hfh.GetCacheKey());
 		throw HTTPException(Exception::ConstructMessage(
 		    "Cached contents of file \"%s\" do not match the version captured when it was opened", hfh.path));
 	}
@@ -379,7 +379,7 @@ void HTTPFileSystem::ThrowIfReadConditionFailed(HTTPFileHandle &hfh, const HTTPR
 	    read_config.condition.type == HTTPReadConditionType::NONE) {
 		return;
 	}
-	EraseGlobalCacheEntry(hfh.path);
+	EraseGlobalCacheEntry(hfh.GetCacheKey());
 	auto kind = read_config.condition.type == HTTPReadConditionType::ETAG ? "ETag" : "Object version";
 	throw HTTPException(response, "%s on reading file \"%s\" changed after it was opened: the server rejected %s", kind,
 	                    hfh.path, read_config.condition.value);

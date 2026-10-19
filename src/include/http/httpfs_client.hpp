@@ -63,7 +63,7 @@ public:
 	static constexpr bool DEFAULT_FORCE_DOWNLOAD = false;
 	static constexpr bool AUTO_FALLBACK_TO_FULL_DOWNLOAD = true;
 
-	//! Runtime parameters; append new fields and propagate them to duckdb-wasm
+	//! Runtime parameters owned by HTTPFS; browser clients consume only the HTTPParams base.
 	bool force_download = DEFAULT_FORCE_DOWNLOAD;
 	bool auto_fallback_to_full_download = AUTO_FALLBACK_TO_FULL_DOWNLOAD;
 	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
@@ -103,6 +103,8 @@ public:
 	                                                        optional_ptr<FileOpenerInfo> info);
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
+	//! S3's 400 RequestTimeout is retryable; core only knows the generic statuses.
+	bool ShouldRetry(const BaseRequest &request, const HTTPResponse &response) override;
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
@@ -118,6 +120,9 @@ public:
 	//! Returns nullptr when no bundle is available, in which case the client relies on the platform's own store.
 	shared_ptr<const string> GetCertificateBundle(const string &ca_cert_file);
 	static bool IsSecureConnection(const string &proto_host_port);
+	//! A client's transport error, naming file descriptor exhaustion when that is what made it fail: the clients
+	//! report it as whatever step could not open its socket or file (a host lookup, a connection, memory).
+	static string DescribeRequestError(const string &client_error, int os_errno = 0);
 
 protected:
 	optional_ptr<DatabaseInstance> db;

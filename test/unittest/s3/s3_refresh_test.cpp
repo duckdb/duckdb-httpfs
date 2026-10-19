@@ -679,6 +679,7 @@ TEST_CASE("Explicit S3 versions survive credential refresh", "[httpfs][s3][refre
 				auto observations =
 				    RunRefreshScenario(target, client, false, [&](Connection &con, const string &object_data) {
 					    const bool full_download = target == MockS3RefreshTarget::FULL_GET;
+					    S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 					    S3TestHelper::RequireQueryOk(con, "SET s3_version_id_pinning=false");
 					    S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
 					    if (full_download) {

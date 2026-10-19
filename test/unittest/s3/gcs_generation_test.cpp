@@ -81,12 +81,10 @@ TEST_CASE("GCS generation checks reject replacement between reads", "[httpfs][s3
 					for (auto &observation : server.Observations()) {
 						REQUIRE(observation.target == "/refresh-bucket/object.bin");
 						if (observation.method == "GET") {
+							// HMAC (AWS4-signed) requests rely on the response generation check instead.
 							REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match") ==
-							        vector<string> {"123"});
+							        (bearer ? vector<string> {"123"} : vector<string>()));
 							REQUIRE(observation.if_match.empty());
-							if (!bearer) {
-								REQUIRE(StringUtil::Contains(observation.authorization, "x-goog-if-generation-match"));
-							}
 						}
 					}
 					// A failed read invalidates global metadata; reopening observes the replacement.
@@ -109,6 +107,7 @@ TEST_CASE("GCS automatic checks can be disabled without disabling explicit selec
 		DuckDB db(nullptr);
 		Connection con(db);
 		ConfigureGenerationTest(db, con, server, client, true);
+		S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 		S3TestHelper::RequireQueryOk(con, "SET unsafe_disable_etag_checks=true");
 		S3TestHelper::RequireQueryOk(con, "BEGIN");
 		auto &fs = FileSystem::GetFileSystem(*con.context);
@@ -260,6 +259,7 @@ TEST_CASE("GCS explicit generations select historical objects on every read", "[
 					DuckDB db(nullptr);
 					Connection con(db);
 					ConfigureGenerationTest(db, con, server, client, bearer);
+					S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 					S3TestHelper::RequireQueryOk(con,
 					                             string("SET force_download=") + (full_download ? "true" : "false"));
 					S3TestHelper::RequireQueryOk(con, "BEGIN");
@@ -325,6 +325,7 @@ TEST_CASE("GCS generation selection and checks survive credential refresh", "[ht
 				DuckDB db(nullptr);
 				Connection con(db);
 				ConfigureGenerationTest(db, con, server, client, false);
+				S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 				S3TestHelper::RegisterRefreshProvider(db);
 				S3TestHelper::RequireQueryOk(con, "SET s3_use_ssl=false");
 				const auto test_id = S3TestHelper::NextTestId();
@@ -351,10 +352,8 @@ CREATE OR REPLACE SECRET generation_test (
 				for (auto &observation : server.Observations()) {
 					REQUIRE(observation.target ==
 					        string("/refresh-bucket/object.bin") + (explicit_selection ? "?generation=123" : ""));
-					const bool conditional =
-					    !explicit_selection && target != MockS3RefreshTarget::FULL_GET && observation.method == "GET";
-					REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match") ==
-					        (conditional ? vector<string> {"123"} : vector<string>()));
+					// HMAC (AWS4-signed) requests never carry the generation precondition header.
+					REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match").empty());
 				}
 				S3TestHelper::RequireQueryOk(con, "COMMIT");
 			}
@@ -367,6 +366,7 @@ TEST_CASE("GCS generation deletes are rejected before dispatch", "[httpfs][s3][g
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureGenerationTest(db, con, server, "curl", false);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	S3TestHelper::RequireQueryOk(con, "BEGIN");
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	const string path = "gcs://refresh-bucket/object.bin?gcs_generation=123";
@@ -453,6 +453,7 @@ TEST_CASE("GCS generation metadata roundtrips through extended file information"
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureGenerationTest(db, con, server, "curl", true);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	S3TestHelper::RequireQueryOk(con, "BEGIN");
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	auto initial =
@@ -504,7 +505,7 @@ TEST_CASE("GCS cached metadata remains stable during full downloads", "[httpfs][
 		for (auto &observation : server.Observations()) {
 			if (observation.method == "GET") {
 				saw_full_get |= observation.range.empty();
-				REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match") == vector<string> {"123"});
+				REQUIRE(MockS3HeaderValues(observation, "x-goog-if-generation-match").empty());
 			}
 		}
 		REQUIRE(saw_full_get);
