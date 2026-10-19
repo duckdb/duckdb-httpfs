@@ -2,6 +2,7 @@
 #include "duckdb/main/http/http_retry_budget.hpp"
 
 #include "s3/s3fs.hpp"
+#include "s3/s3_settings.hpp"
 #include "s3/s3_xml_response.hpp"
 #include "create_secret_functions.hpp"
 #include "http/http_state.hpp"
@@ -449,9 +450,10 @@ static bool IsAuthRefreshStatus(const HTTPResponse &response) {
 	return response.status == HTTPStatusCode::BadRequest_400 && IsAuthRefreshErrorBody(response.body);
 }
 
-static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path) {
+static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path,
+                                     const S3AuthURLParams &previous_url) {
 	FileOpenerInfo info = {path};
-	return S3AuthResolver::Resolve(opener, info);
+	return S3AuthResolver::Resolve(opener, info, S3AuthResolveOptions::ForRefresh(previous_url));
 }
 
 S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(HTTPFSUtil &http_util,
@@ -489,7 +491,7 @@ static bool ReloadS3AuthMaterial(optional_ptr<FileOpener> opener, const string &
 	}
 
 	auto previous_region = auth_params.GetCredentials().region;
-	auto reloaded_auth_params = ReadS3AuthParams(opener, path);
+	auto reloaded_auth_params = ReadS3AuthParams(opener, path, auth_params.GetURLParams());
 	if (preserve_region && !previous_region.empty() &&
 	    reloaded_auth_params.GetCredentials().region != previous_region) {
 		reloaded_auth_params = reloaded_auth_params.WithRegion(std::move(previous_region));
@@ -1072,6 +1074,11 @@ HTTPException S3RequestUtil::GetError(const S3AuthParams &s3_auth_params, const 
 	if (response.status == HTTPStatusCode::Unauthorized_401 || response.status == HTTPStatusCode::Forbidden_403) {
 		extra_text += s3_auth_params.GetProvider().GetAuthError(s3_auth_params);
 	}
+	auto &url_params = s3_auth_params.GetURLParams();
+	if (!url_params.enable_deprecated_url_parameters && !url_params.compatibility_mode &&
+	    display_url.find('?') != string::npos) {
+		extra_text += S3Settings::LegacyURLBehaviorHint();
+	}
 	return HTTPFSUtil::GetHTTPStatusError(response, request_type, operation, display_url, extra_text);
 }
 
@@ -1079,7 +1086,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
                                          const string &url) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	auto captured = s3_handle.request_session->Capture();
-	auto auth_params = captured.snapshot->Cast<S3RequestSnapshot>().auth_params;
+	auto &auth_params = captured.snapshot->Cast<S3RequestSnapshot>().auth_params;
 	const char *description = "sending a request to";
 	if (request_type == RequestType::HEAD_REQUEST) {
 		description = "checking";

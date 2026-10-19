@@ -4,6 +4,13 @@
 
 require httpfs
 
+# Exercise the deprecated URL parameter interface explicitly.
+statement ok
+LOAD httpfs;
+
+statement ok
+SET s3_enable_deprecated_url_parameters=true;
+
 statement ok
 SET allow_persistent_secrets = false;
 

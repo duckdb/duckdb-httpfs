@@ -51,6 +51,11 @@ struct S3AuthURLParams {
 	bool compatibility_mode = false;
 	//! The URL's s3_endpoint parameter chose the host, instead of the configuration
 	bool endpoint_from_url = false;
+	bool enable_deprecated_url_parameters = false;
+
+	bool ParseURLParameters() const {
+		return enable_deprecated_url_parameters && !compatibility_mode;
+	}
 
 	bool operator==(const S3AuthURLParams &other) const;
 };
@@ -89,6 +94,7 @@ struct S3AuthConfig {
 	bool use_ssl = true;
 	bool compatibility_mode = false;
 	bool endpoint_from_url = false;
+	bool enable_deprecated_url_parameters = false;
 
 	//! Request headers
 	S3AuthRequestOptions request_options;
@@ -172,9 +178,23 @@ private:
 	S3AuthRefreshIdentity refresh_identity;
 };
 
+struct S3AuthResolveOptions {
+	//! The database policy captured at operation start. Standalone readers default to disabled.
+	bool enable_deprecated_url_parameters = false;
+	//! Absent: resolve compatibility mode from the per-path configuration.
+	optional<bool> compatibility_mode;
+
+	static S3AuthResolveOptions ForOperation(optional_ptr<FileOpener> opener);
+	static S3AuthResolveOptions ForRefresh(const S3AuthURLParams &previous_url);
+	void ApplyTo(S3AuthConfig &config) const;
+};
+
 struct S3AuthResolver {
 	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
-	static S3AuthParams Resolve(S3KeyValueReader &secret_reader, const string &file_path);
+	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info,
+	                            const S3AuthResolveOptions &options);
+	static S3AuthParams Resolve(S3KeyValueReader &secret_reader, const string &file_path,
+	                            const S3AuthResolveOptions &options = {});
 	static S3AuthParams Resolve(S3AuthConfig config, const string &file_path);
 
 private:

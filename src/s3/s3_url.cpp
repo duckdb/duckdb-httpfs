@@ -130,7 +130,7 @@ void S3Url::ReadQueryParams(const string &url_query_param, S3AuthConfig &config)
 }
 
 void S3Url::ApplyAuthQueryParameters(const string &url, S3AuthConfig &config) {
-	if (config.compatibility_mode) {
+	if (!config.enable_deprecated_url_parameters || config.compatibility_mode) {
 		return;
 	}
 	auto question_pos = url.find_first_of('?');
@@ -140,7 +140,7 @@ void S3Url::ApplyAuthQueryParameters(const string &url, S3AuthConfig &config) {
 }
 
 string S3Url::GetDisplayUrl(const string &url, const S3AuthParams &params) {
-	if (params.GetURLParams().compatibility_mode) {
+	if (!params.GetURLParams().ParseURLParameters()) {
 		return url;
 	}
 	auto query_position = url.find('?');
@@ -163,8 +163,8 @@ ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 		throw IOException("URL needs to contain a bucket name");
 	}
 
-	if (params.GetURLParams().compatibility_mode) {
-		// In url compatibility mode, we will ignore any special chars, so query param strings are disabled
+	if (!params.GetURLParams().ParseURLParameters()) {
+		// With URL parameters disabled, the entire suffix is part of the object key.
 		key += url.substr(slash_pos);
 	} else {
 		// Parse query parameters
@@ -210,7 +210,7 @@ ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 	if (use_path) {
 		encoded_path += "/" + Encode(bucket, S3URLEncodeMode::PATH);
 	} else if (use_vhost) {
-		host = bucket + "." + host;
+		host = NormalizedS3Endpoint::Parse(bucket + "." + host, url_params.endpoint.UsesSSL()).GetAuthority();
 	}
 	encoded_bucket_path = encoded_path.empty() ? "/" : encoded_path + "/";
 

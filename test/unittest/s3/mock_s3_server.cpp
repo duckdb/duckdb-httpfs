@@ -939,25 +939,34 @@ public:
 		response.status = 200;
 		auto unquoted_etag = StringUtil::Replace(config.metadata.etag, "\"", "");
 		auto first_page = config.list.paginate && GetParameter(request, "continuation-token").empty();
-		auto key = first_page ? "first-page.bin" : config.object.key;
+		auto keys = config.list.keys;
+		if (keys.empty()) {
+			keys.push_back(first_page ? "first-page.bin" : config.object.key);
+		}
+		const auto prefix = GetParameter(request, "prefix");
+		string contents;
+		idx_t count = 0;
+		for (auto key : keys) {
+			if (!StringUtil::StartsWith(key, prefix)) {
+				continue;
+			}
+			if (GetParameter(request, "encoding-type") == "url") {
+				key = StringUtil::URLEncode(key, false);
+			}
+			contents +=
+			    StringUtil::Format("<Contents><Key>%s</Key><ETag>&quot;%s&quot;</ETag>"
+			                       "<Size>%llu</Size></Contents>",
+			                       key, unquoted_etag, static_cast<unsigned long long>(config.object.data.size()));
+			count++;
+		}
 		auto continuation = first_page ? "<NextContinuationToken>page two&amp;token</NextContinuationToken>" : "";
 		response.set_content(StringUtil::Format("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 		                                        "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
-		                                        "<Name>%s</Name>"
-		                                        "<Prefix></Prefix>"
-		                                        "<KeyCount>1</KeyCount>"
-		                                        "<MaxKeys>1000</MaxKeys>"
-		                                        "<IsTruncated>%s</IsTruncated>"
-		                                        "%s"
-		                                        "<Contents>"
-		                                        "<Key>%s</Key>"
-		                                        "<ETag>&quot;%s&quot;</ETag>"
-		                                        "<Size>%llu</Size>"
-		                                        "</Contents>"
+		                                        "<Name>%s</Name><Prefix></Prefix><KeyCount>%llu</KeyCount>"
+		                                        "<MaxKeys>1000</MaxKeys><IsTruncated>%s</IsTruncated>%s%s"
 		                                        "</ListBucketResult>",
-		                                        config.object.bucket, first_page ? "true" : "false", continuation, key,
-		                                        unquoted_etag,
-		                                        static_cast<unsigned long long>(config.object.data.size())),
+		                                        config.object.bucket, static_cast<unsigned long long>(count),
+		                                        first_page ? "true" : "false", continuation, contents),
 		                     "application/xml");
 		Record(request, response.status);
 	}
@@ -1086,7 +1095,15 @@ public:
 		         (config.endpoint_base_path[0] == '/' && config.endpoint_base_path.back() != '/'));
 		const string path =
 		    config.endpoint_base_path + StringUtil::Format("/%s/%s", config.object.bucket, config.object.key);
-		const string proxy_path = "https?://[^/]+" + path;
+		string route_path;
+		const string regex_characters = "\\.^$|()[]{}*+?";
+		for (const auto character : path) {
+			if (regex_characters.find(character) != string::npos) {
+				route_path += '\\';
+			}
+			route_path += character;
+		}
+		const string proxy_path = "https?://[^/]+" + route_path;
 		const string bucket_path = config.endpoint_base_path + StringUtil::Format("/%s", config.object.bucket);
 		const string bucket_path_with_slash = bucket_path + "/";
 		const string proxy_bucket_path = "https?://[^/]+" + bucket_path;
@@ -1108,7 +1125,8 @@ public:
 				return httplib::Server::HandlerResponse::Unhandled;
 			}
 			if (config.metadata.redirect_head && !request.has_param("redirected")) {
-				response.set_redirect(path + "?redirected=true");
+				response.set_redirect(config.metadata.redirect_location.empty() ? path + "?redirected=true"
+				                                                                : config.metadata.redirect_location);
 				for (const auto &header : config.metadata.redirect_response_headers) {
 					response.set_header(header.first, header.second);
 				}
@@ -1147,7 +1165,7 @@ public:
 			return httplib::Server::HandlerResponse::Handled;
 		});
 
-		server.Get(path, [this](const httplib::Request &request, httplib::Response &response) {
+		server.Get(route_path, [this](const httplib::Request &request, httplib::Response &response) {
 			auto generation = GetGeneration(request);
 			auto object_data = GetObjectData(generation);
 			if (!object_data) {
@@ -1379,14 +1397,14 @@ public:
 		server.Get(bucket_path, list_objects);
 		server.Get(bucket_path_with_slash, list_objects);
 
-		server.Put(path, [this](const httplib::Request &request, httplib::Response &response) {
+		server.Put(route_path, [this](const httplib::Request &request, httplib::Response &response) {
 			HandleObjectPut(request, response);
 		});
 		server.Put(proxy_path, [this](const httplib::Request &request, httplib::Response &response) {
 			HandleObjectPut(request, response);
 		});
 
-		server.Post(path, [this](const httplib::Request &request, httplib::Response &response) {
+		server.Post(route_path, [this](const httplib::Request &request, httplib::Response &response) {
 			HandleObjectPost(request, response);
 		});
 		server.Post(proxy_path, [this](const httplib::Request &request, httplib::Response &response) {
@@ -1405,7 +1423,7 @@ public:
 		server.Post(proxy_bucket_path, bulk_delete);
 		server.Post(proxy_bucket_path_with_slash, bulk_delete);
 
-		server.Delete(path, [this](const httplib::Request &request, httplib::Response &response) {
+		server.Delete(route_path, [this](const httplib::Request &request, httplib::Response &response) {
 			HandleObjectDelete(request, response);
 		});
 		server.Delete(proxy_path, [this](const httplib::Request &request, httplib::Response &response) {
@@ -1413,7 +1431,7 @@ public:
 		});
 
 		if (!config.http_response.options_body.empty()) {
-			server.Options(path, [this](const httplib::Request &request, httplib::Response &response) {
+			server.Options(route_path, [this](const httplib::Request &request, httplib::Response &response) {
 				response.status = 200;
 				response.set_content(config.http_response.options_body, "application/octet-stream");
 				Record(request, response.status);
@@ -1569,6 +1587,10 @@ bool MockS3Server::WaitForFullGet() {
 
 void MockS3Server::ReleaseFullGet() {
 	impl->ReleaseFullGet();
+}
+
+string MockS3DigestBody(const string &body) {
+	return MockS3BodyDigest::Compute(body);
 }
 
 string MockS3RefreshTargetName(MockS3RefreshTarget target) {

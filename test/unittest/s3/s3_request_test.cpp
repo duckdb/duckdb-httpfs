@@ -32,6 +32,7 @@ namespace {
 
 static S3AuthConfig TestAuthConfig(S3ProviderType provider_type = S3ProviderType::S3, bool scheme_is_alias = false) {
 	S3AuthConfig config;
+	config.enable_deprecated_url_parameters = true;
 	const char *prefix = provider_type == S3ProviderType::GCS  ? "gcs://"
 	                     : provider_type == S3ProviderType::R2 ? "r2://"
 	                                                           : "s3://";
@@ -200,6 +201,7 @@ static void RunNormalizedEndpointWireScenario(const string &client_implementatio
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	S3TestHelper::RequireQueryOk(con,
 	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
 	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
@@ -677,6 +679,7 @@ static void RunGCSBulkDeleteProjectIdentityScenario(const string &client_impleme
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	ConfigureGCSClient(con, client_implementation);
 	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
 	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
@@ -735,6 +738,8 @@ static void RunBulkDeleteEndpointModeIdentityScenario(const string &client_imple
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	S3TestHelper::RequireQueryOk(con,
 	                             StringUtil::Format("SET httpfs_client_implementation='%s'", client_implementation));
 	S3TestHelper::RequireQueryOk(con, "SET httpfs_connection_caching=false");
@@ -933,7 +938,9 @@ static S3AuthParams ReadSecretAuthParams(Connection &con, KeyValueSecret &secret
                                          const string &path = "s3://bucket/key") {
 	ClientContextFileOpener opener(*con.context);
 	S3KeyValueReader secret_reader {KeyValueSecretReader(secret, opener)};
-	return S3AuthResolver::Resolve(secret_reader, path);
+	S3AuthResolveOptions options;
+	options.enable_deprecated_url_parameters = true;
+	return S3AuthResolver::Resolve(secret_reader, path, options);
 }
 
 } // namespace
@@ -1313,7 +1320,7 @@ TEST_CASE("GCS billing projects follow provider configuration precedence",
 			REQUIRE(StringUtil::Contains(error, "GCS Requester Pays requires a billing project"));
 			REQUIRE(StringUtil::Contains(error, "USER_PROJECT in the GCS secret"));
 			REQUIRE(StringUtil::Contains(error, "set gcs_user_project"));
-			REQUIRE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
+			REQUIRE_FALSE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
 		};
 
 		auto requester_pays = TestAuthConfig(S3ProviderType::GCS);
@@ -1442,7 +1449,7 @@ CREATE SECRET invalid_gcs_requester_pays (
 	REQUIRE(StringUtil::Contains(error, "GCS Requester Pays requires a billing project"));
 	REQUIRE(StringUtil::Contains(error, "USER_PROJECT in the GCS secret"));
 	REQUIRE(StringUtil::Contains(error, "set gcs_user_project"));
-	REQUIRE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
+	REQUIRE_FALSE(StringUtil::Contains(error, "pass gcs_user_project in the URL"));
 	REQUIRE(server.Observations().empty());
 	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
 }

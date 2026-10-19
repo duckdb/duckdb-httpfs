@@ -107,6 +107,7 @@ TEST_CASE("GCS automatic checks can be disabled without disabling explicit selec
 		DuckDB db(nullptr);
 		Connection con(db);
 		ConfigureGenerationTest(db, con, server, client, true);
+		S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 		S3TestHelper::RequireQueryOk(con, "SET unsafe_disable_etag_checks=true");
 		S3TestHelper::RequireQueryOk(con, "BEGIN");
 		auto &fs = FileSystem::GetFileSystem(*con.context);
@@ -258,6 +259,7 @@ TEST_CASE("GCS explicit generations select historical objects on every read", "[
 					DuckDB db(nullptr);
 					Connection con(db);
 					ConfigureGenerationTest(db, con, server, client, bearer);
+					S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 					S3TestHelper::RequireQueryOk(con,
 					                             string("SET force_download=") + (full_download ? "true" : "false"));
 					S3TestHelper::RequireQueryOk(con, "BEGIN");
@@ -323,6 +325,7 @@ TEST_CASE("GCS generation selection and checks survive credential refresh", "[ht
 				DuckDB db(nullptr);
 				Connection con(db);
 				ConfigureGenerationTest(db, con, server, client, false);
+				S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 				S3TestHelper::RegisterRefreshProvider(db);
 				S3TestHelper::RequireQueryOk(con, "SET s3_use_ssl=false");
 				const auto test_id = S3TestHelper::NextTestId();
@@ -363,6 +366,7 @@ TEST_CASE("GCS generation deletes are rejected before dispatch", "[httpfs][s3][g
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureGenerationTest(db, con, server, "curl", false);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	S3TestHelper::RequireQueryOk(con, "BEGIN");
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	const string path = "gcs://refresh-bucket/object.bin?gcs_generation=123";
@@ -449,6 +453,7 @@ TEST_CASE("GCS generation metadata roundtrips through extended file information"
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureGenerationTest(db, con, server, "curl", true);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	S3TestHelper::RequireQueryOk(con, "BEGIN");
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	auto initial =
