@@ -272,6 +272,53 @@ TEST_CASE("COPY overwrite rejects directory paths that cannot be joined literall
 	}
 }
 
+TEST_CASE("S3 COPY preserves ordinary legacy and direct literal writes", "[httpfs][s3][url-boundary]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (const string kind : {"directory", "legacy-directory", "literal-object", "new-literal-object"}) {
+			CAPTURE(client, kind);
+			const bool missing = kind == "new-literal-object";
+			const bool direct = kind == "literal-object" || missing;
+			const bool legacy = kind == "legacy-directory";
+			MockS3ServerConfig config;
+			config.object.key = direct ? "dir?literal" : "dir/value=42/data_0.csv";
+			config.failures.head_not_found_requests = missing ? 1 : 0;
+			MockS3Server server(config);
+			DuckDB db(nullptr);
+			Connection con(db);
+			S3TestHelper::LoadExtension(db);
+			S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+			S3TestHelper::RequireQueryOk(con, "SET httpfs_client_implementation='" + client + "'");
+			S3TestHelper::RequireQueryOk(con, "CREATE SECRET writer (TYPE S3, KEY_ID 'id', SECRET 'secret', ENDPOINT '" +
+			                                      server.Endpoint() + "', URL_STYLE 'path', USE_SSL false)");
+			if (legacy) {
+				S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
+			}
+			const string suffix = direct ? "?literal" : legacy ? "?s3_requester_pays=true" : "/";
+			S3TestHelper::RequireQueryOk(con, "COPY (SELECT 42 AS value, 7 AS payload) TO 's3://refresh-bucket/dir" +
+			                                      suffix + "' (FORMAT CSV" +
+			                                      (direct ? "" : ", PARTITION_BY(value), OVERWRITE_OR_IGNORE") + ")");
+			idx_t puts = 0;
+			idx_t not_found = 0;
+			for (const auto &request : server.Observations()) {
+				if (request.method == "HEAD" && request.status == 404) {
+					not_found++;
+				}
+				if (request.method != "PUT") {
+					continue;
+				}
+				puts++;
+				REQUIRE(request.path == "/" + config.object.bucket + "/" + config.object.key);
+				REQUIRE(request.body_digest == MockS3DigestBody(direct ? "value,payload\n42,7\n" : "payload\n7\n"));
+				if (legacy) {
+					REQUIRE(MockS3HeaderValues(request, "x-amz-request-payer") == vector<string> {"requester"});
+				}
+			}
+			REQUIRE(puts == 1);
+			REQUIRE(not_found == (missing ? 1 : 0));
+		}
+	}
+}
+
 TEST_CASE("Ordinary S3 glob and direct writes share HTTP metadata cache invalidation", "[httpfs][s3][url-boundary]") {
 	MockS3ServerConfig config;
 	config.object.key = "My Report%20+.csv";

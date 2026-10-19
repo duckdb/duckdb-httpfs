@@ -2105,11 +2105,8 @@ TEST_CASE("S3 HTTP errors preserve metadata and provider-specific context", "[ht
 	config.credentials.region = "eu-west-1";
 	auto auth_params = ResolveTestAuth(std::move(config));
 	auto display_url = S3Url::GetDisplayUrl("s3://bucket/key?s3_secret_access_key=hidden", auth_params);
-	HTTPFSUtil http_util;
-	HTTPFSParams http_params(http_util);
-	S3RequestSnapshot snapshot(http_params, auth_params, display_url);
 	auto error =
-	    ErrorData(S3RequestUtil::GetError(snapshot, response, RequestType::GET_REQUEST, "reading", display_url));
+	    ErrorData(S3RequestUtil::GetError(auth_params, response, RequestType::GET_REQUEST, "reading", display_url));
 
 	CHECK(error.Type() == ExceptionType::HTTP);
 	CHECK(error.ExtraInfo().at("status_code") == "403");
@@ -2127,16 +2124,13 @@ TEST_CASE("S3 HTTP diagnostics stay within their provider", "[httpfs][s3][provid
 	HTTPResponse bad_request(HTTPStatusCode::BadRequest_400);
 	bad_request.reason = "Bad Request";
 	bad_request.body = "not XML";
-	HTTPFSUtil http_util;
-	HTTPFSParams http_params(http_util);
 
 	for (const auto provider_type : {S3ProviderType::S3, S3ProviderType::GCS, S3ProviderType::R2}) {
 		auto config = TestAuthConfig(provider_type);
 		config.credentials.region = "test-region";
 		auto auth_params = ResolveTestAuth(std::move(config));
-		S3RequestSnapshot snapshot(http_params, auth_params, "provider://bucket");
 		auto error = ErrorData(
-		    S3RequestUtil::GetError(snapshot, bad_request, RequestType::POST_REQUEST, "listing", "provider://bucket"));
+		    S3RequestUtil::GetError(auth_params, bad_request, RequestType::POST_REQUEST, "listing", "provider://bucket"));
 		CHECK(StringUtil::Contains(error.RawMessage(), "Bad Request - this can be caused by the S3 region") ==
 		      (provider_type == S3ProviderType::S3));
 		CHECK_FALSE(StringUtil::Contains(error.RawMessage(), "not XML"));
@@ -2148,8 +2142,7 @@ TEST_CASE("S3 HTTP diagnostics stay within their provider", "[httpfs][s3][provid
 	                          pair<S3ProviderType, string> {S3ProviderType::GCS, "GCS authentication failed"},
 	                          pair<S3ProviderType, string> {S3ProviderType::R2, "R2 authentication failed"}}) {
 		auto auth_params = ResolveTestAuth(TestAuthConfig(entry.first));
-		S3RequestSnapshot snapshot(http_params, auth_params, "provider://bucket/key");
-		auto error = ErrorData(S3RequestUtil::GetError(snapshot, unauthorized, RequestType::HEAD_REQUEST, "checking",
+		auto error = ErrorData(S3RequestUtil::GetError(auth_params, unauthorized, RequestType::HEAD_REQUEST, "checking",
 		                                               "provider://bucket/key"));
 		CHECK(StringUtil::Contains(error.RawMessage(), entry.second));
 	}

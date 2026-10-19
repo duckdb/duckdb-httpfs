@@ -236,7 +236,7 @@ void S3Settings::Register(DBConfig &config) {
 		}
 		state->Set(initial);
 		ExtensionOption option(
-		    "Enable deprecated S3 URL parameters and authenticated redirects. NULL disables them by default; "
+		    "Enable deprecated S3 URL parameters. NULL disables them by default; "
 		    "false permanently disables them for this database instance.",
 		    LogicalType::BOOLEAN, nullptr, Value(LogicalType::BOOLEAN), SetScope::GLOBAL, false, false);
 		option.supports_session = false;
@@ -329,7 +329,6 @@ bool S3Settings::URLParametersEnabled(optional_ptr<FileOpener> opener) {
 string S3Settings::LegacyURLBehaviorHint() {
 	return StringUtil::Format(
 	    "\nS3 URL parameters are disabled by default: '?' and the following text are part of the object key. "
-	    "Ordinary authenticated HTTP redirects are also disabled by default. "
 	    "If this workflow requires legacy behavior, opt in with SET %s = true. "
 	    "URL compatibility mode must also be disabled to interpret URL parameters. "
 	    "The setting cannot be re-enabled in this database instance after it has been explicitly set to false.",

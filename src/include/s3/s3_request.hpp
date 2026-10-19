@@ -163,7 +163,7 @@ struct S3RequestUtil {
 	static bool IsThrottledError(const ErrorData &error);
 
 	static string ParseError(const string &error);
-	static HTTPException GetError(const S3RequestSnapshot &snapshot, const HTTPResponse &response,
+	static HTTPException GetError(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
 	                              RequestType request_type, const string &operation, const string &display_url);
 	static HTTPException GetRequestError(const S3RequestContext &request_context, const HTTPResponse &response);
 	static HTTPException GetRequestError(const S3RequestData &request_data, const HTTPResponse &response);

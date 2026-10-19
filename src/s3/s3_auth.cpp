@@ -287,12 +287,6 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	return result;
 }
 
-bool S3AuthParams::HasAuthenticationMaterial() const {
-	return !credentials.access_key_id.empty() || !credentials.secret_access_key.empty() ||
-	       !credentials.session_token.empty() || !credentials.oauth2_bearer_token.empty() ||
-	       request_options.sse_customer_key.has_value();
-}
-
 S3AuthParams S3AuthParams::WithRegion(string region) const {
 	auto result = *this;
 	result.credentials.region = std::move(region);

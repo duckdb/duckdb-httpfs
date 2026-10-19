@@ -164,7 +164,6 @@ public:
 	const S3AuthRefreshIdentity &GetRefreshIdentity() const {
 		return refresh_identity;
 	}
-	bool HasAuthenticationMaterial() const;
 	S3AuthParams WithRegion(string region) const;
 	bool operator==(const S3AuthParams &other) const;
 

@@ -6,12 +6,13 @@
 #include "s3/s3fs.hpp"
 #include "crypto.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/execution/operator/helper/physical_set.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/external_file_cache/caching_file_system.hpp"
 
-#include <atomic>
-#include <thread>
+#include <chrono>
+#include <future>
 
 namespace duckdb {
 namespace {
@@ -59,6 +60,25 @@ public:
 	bool changed = false;
 	Connection &other;
 	string statement;
+};
+
+class PauseAfterPolicySet : public ExtensionOptionInfo {
+public:
+	PauseAfterPolicySet(shared_ptr<ExtensionOptionInfo> target, std::promise<void> &callback_completed,
+	                   std::shared_future<void> resume)
+	    : target(std::move(target)), callback_completed(callback_completed), resume(std::move(resume)) {
+	}
+
+	void OnSet(ClientContext &context, SetScope scope, Value &value, bool reset) const override {
+		target->OnSet(context, scope, value, reset);
+		callback_completed.set_value();
+		resume.wait();
+	}
+
+private:
+	shared_ptr<ExtensionOptionInfo> target;
+	std::promise<void> &callback_completed;
+	std::shared_future<void> resume;
 };
 
 } // namespace
@@ -125,34 +145,41 @@ TEST_CASE("Only explicit S3 URL parameter opt-out is irreversible", "[httpfs][s3
 }
 
 TEST_CASE("Concurrent setters cannot undo explicit S3 URL parameter opt-out", "[httpfs][s3][url-parameters]") {
-	const char *statement = ENABLE;
-	SECTION("enable") {
-	}
-	SECTION("reset") {
-		statement = RESET;
-	}
-	SECTION("set null") {
-		statement = SET_NULL;
-	}
-	for (idx_t iteration = 0; iteration < 20; iteration++) {
+	for (const auto &delayed_value : {Value(true), Value(LogicalType::BOOLEAN)}) {
+		CAPTURE(delayed_value);
 		DuckDB db(nullptr);
 		Connection changing(db), disabling(db);
 		S3TestHelper::LoadExtension(db);
 		S3TestHelper::RequireQueryOk(changing, ENABLE);
-		std::atomic<bool> start {false};
-		unique_ptr<QueryResult> changed_result;
-		std::thread change_thread([&] {
-			while (!start.load()) {
-				std::this_thread::yield();
-			}
-			changed_result = changing.Query(statement);
+
+		ExtensionOption option;
+		REQUIRE(DBConfig::GetConfig(*db.instance).TryGetExtensionOption("s3_enable_deprecated_url_parameters", option));
+		std::promise<void> callback_completed, resume;
+		auto completed = callback_completed.get_future();
+		// Wrap a copy: the registered option must retain the real enforcement state.
+		option.info = make_shared_ptr<PauseAfterPolicySet>(option.info, callback_completed, resume.get_future().share());
+		auto setter = std::async(std::launch::async, [&] {
+			PhysicalSet::SetExtensionVariable(*changing.context, option, SetScope::GLOBAL, delayed_value);
 		});
-		start = true;
-		auto disabled_result = disabling.Query(DISABLE);
-		change_thread.join();
-		REQUIRE(changed_result);
+		const auto status = completed.wait_for(std::chrono::seconds(10));
+		unique_ptr<QueryResult> disabled_result;
+		try {
+			if (status == std::future_status::ready) {
+				// Finish opt-out before the earlier SET publishes its SQL value.
+				disabled_result = disabling.Query(DISABLE);
+			}
+		} catch (...) {
+			resume.set_value();
+			setter.wait();
+			throw;
+		}
+		resume.set_value();
+		setter.get();
+		REQUIRE(status == std::future_status::ready);
+		REQUIRE(disabled_result);
 		REQUIRE_FALSE(disabled_result->HasError());
 		REQUIRE_FALSE(Enabled(changing));
+		REQUIRE_FALSE(Enabled(disabling));
 		REQUIRE(changing.Query(ENABLE)->HasError());
 		REQUIRE(disabling.Query(RESET)->HasError());
 		REQUIRE(changing.Query(SET_NULL)->HasError());
@@ -280,28 +307,36 @@ TEST_CASE("HTTPFS caches S3 question-mark paths under a stable URL policy", "[ht
 	}
 }
 
-TEST_CASE("Authenticated S3 redirects require legacy opt-in", "[httpfs][s3][url-parameters]") {
+TEST_CASE("S3 URL policy preserves same-origin HTTP redirects", "[httpfs][s3][url-parameters]") {
 	for (const string client : {"curl", "httplib"}) {
-		for (const bool enabled : {false, true}) {
-			MockS3Server receiver {MockS3ServerConfig()};
-			MockS3ServerConfig config;
-			config.metadata.redirect_head = true;
-			config.metadata.redirect_location = "http://" + receiver.Endpoint() + "/refresh-bucket/object.bin";
-			MockS3Server origin(config);
-			DuckDB db(nullptr);
-			Connection con(db);
-			S3TestHelper::LoadExtension(db);
-			Configure(con, origin, client);
-			if (enabled) {
-				S3TestHelper::RequireQueryOk(con, ENABLE);
-			}
-			auto result = con.Query("SELECT content FROM read_blob(?)", Value(origin.S3Path()));
-			INFO((result->HasError() ? result->GetError() : ""));
-			REQUIRE_FALSE(result->HasError());
-			if (!enabled) {
-				REQUIRE(receiver.Observations().empty());
-			} else {
-				REQUIRE_FALSE(receiver.Observations().empty());
+		for (const string policy : {"default", "enabled", "disabled"}) {
+			for (const bool signed_request : {false, true}) {
+				CAPTURE(client, policy, signed_request);
+				MockS3ServerConfig config;
+				config.metadata.redirect_head = true;
+				MockS3Server server(config);
+				DuckDB db(nullptr);
+				Connection con(db);
+				S3TestHelper::LoadExtension(db);
+				S3TestHelper::RequireQueryOk(con, "SET enable_global_s3_configuration=false");
+				S3TestHelper::RequireQueryOk(con, "SET httpfs_client_implementation='" + client + "'");
+				S3TestHelper::RequireQueryOk(
+				    con, "CREATE SECRET reader (TYPE S3, ENDPOINT '" + server.Endpoint() +
+				             "', URL_STYLE 'path', USE_SSL false" +
+				             (signed_request ? ", KEY_ID 'id', SECRET 'secret', SESSION_TOKEN 'token'" : "") + ")");
+				if (!signed_request) {
+					S3TestHelper::RequireQueryOk(con, "SET extra_http_headers=MAP {'X-Trace-Label': 'trace'}");
+				}
+				if (policy == "enabled") {
+					S3TestHelper::RequireQueryOk(con, ENABLE);
+				} else if (policy == "disabled") {
+					S3TestHelper::RequireQueryOk(con, DISABLE);
+				}
+				REQUIRE(ReadBlob(con, server.S3Path()) == server.ObjectData());
+				const auto observations = server.Observations();
+				const string key_id = signed_request ? "id" : "";
+				REQUIRE(S3TestHelper::CountObservations(observations, "HEAD", key_id, 302) == 1);
+				REQUIRE(S3TestHelper::CountObservations(observations, "HEAD", key_id, 200) == 1);
 			}
 		}
 	}
@@ -352,37 +387,19 @@ TEST_CASE("Core caches S3 question-mark paths under a stable URL policy", "[http
 	}
 }
 
-TEST_CASE("S3 redirect policy covers every source of configured authentication", "[httpfs][s3][url-parameters]") {
+TEST_CASE("S3 URL policy preserves the configured HTTP redirect setting", "[httpfs][s3][url-parameters]") {
 	for (const bool enabled : {false, true}) {
-		for (const string source : {"key", "secret", "token", "oauth", "sse", "header", "bearer", "anonymous"}) {
-			CAPTURE(enabled, source);
+		for (const bool follow_location : {false, true}) {
+			CAPTURE(enabled, follow_location);
 			S3AuthConfig config;
 			config.enable_deprecated_url_parameters = enabled;
-			if (source == "key") {
-				config.credentials.access_key_id = "id";
-			} else if (source == "secret") {
-				config.credentials.secret_access_key = "secret";
-			} else if (source == "token") {
-				config.credentials.session_token = "token";
-			} else if (source == "oauth") {
-				config.route = S3UrlScheme::MatchRoutedUrl("gcs://");
-				config.credentials.oauth2_bearer_token = "token";
-			} else if (source == "sse") {
-				config.credentials.access_key_id = "id";
-				config.credentials.secret_access_key = "secret";
-				config.request_options.sse_customer_key =
-				    S3SSECustomerKey::Create("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=");
-			}
+			config.credentials.access_key_id = "id";
+			config.credentials.secret_access_key = "secret";
 			const auto path = config.route.prefix + "bucket/key";
 			auto params = S3AuthResolver::Resolve(config, path);
 			HTTPFSUtil http_util;
 			HTTPFSParams http_params(http_util);
-			http_params.follow_location = true;
-			if (source == "header") {
-				http_params.extra_headers["X-Private"] = "value";
-			} else if (source == "bearer") {
-				http_params.bearer_token = "token";
-			}
+			http_params.follow_location = follow_location;
 			auto snapshot =
 			    make_shared_ptr<S3RequestSnapshot>(http_params, params, path, weak_ptr<ClientContext>(), false);
 			HTTPRequestSession session(snapshot);
@@ -390,13 +407,12 @@ TEST_CASE("S3 redirect policy covers every source of configured authentication",
 			S3RequestSpec spec {path, S3RequestOperation::GET_OBJECT};
 			bool called = false;
 			S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request) {
-				REQUIRE(request.http_params->follow_location == (enabled || source == "anonymous"));
+				REQUIRE(request.http_params->follow_location == follow_location);
 				HTTPResponse redirect(HTTPStatusCode(307));
 				redirect.headers.Insert("Location", "https://storage.example/redirected");
 				redirect.body = "redirect response";
 				auto error = ErrorData(S3RequestUtil::GetRequestError(request, redirect));
-				REQUIRE(StringUtil::Contains(error.RawMessage(), MIGRATION_HINT) ==
-				        (!enabled && source != "anonymous"));
+				REQUIRE_FALSE(StringUtil::Contains(error.RawMessage(), MIGRATION_HINT));
 				REQUIRE(error.ExtraInfo().at("status_code") == "307");
 				REQUIRE(error.ExtraInfo().at("response_body") == redirect.body);
 				S3RequestContext context {request.operation, request.captured, request.display_url};
@@ -406,7 +422,7 @@ TEST_CASE("S3 redirect policy covers every source of configured authentication",
 				return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
 			});
 			REQUIRE(called);
-			REQUIRE(snapshot->Params().follow_location);
+			REQUIRE(snapshot->Params().follow_location == follow_location);
 		}
 	}
 }
@@ -488,22 +504,6 @@ TEST_CASE("S3 failed URL parameter reads explain how to restore legacy behavior"
 			REQUIRE_FALSE(StringUtil::Contains(missing->GetError(), MIGRATION_HINT));
 		}
 	}
-}
-
-TEST_CASE("S3 redirect migration hints require the legacy policy to have blocked the redirect",
-          "[httpfs][s3][url-parameters]") {
-	S3AuthConfig config;
-	config.credentials.access_key_id = "id";
-	auto auth_params = S3AuthResolver::Resolve(config, "s3://bucket/key");
-	HTTPFSUtil http_util;
-	HTTPFSParams http_params(http_util);
-	HTTPResponse response(HTTPStatusCode(307));
-	response.headers.Insert("Location", "https://storage.example/redirected");
-	http_params.follow_location = false;
-	S3RequestSnapshot snapshot(http_params, auth_params, "s3://bucket/key");
-	auto error =
-	    ErrorData(S3RequestUtil::GetError(snapshot, response, RequestType::GET_REQUEST, "reading", "s3://bucket/key"));
-	REQUIRE_FALSE(StringUtil::Contains(error.RawMessage(), MIGRATION_HINT));
 }
 
 TEST_CASE("S3 directory removal reconstructs full object paths", "[httpfs][s3][url-parameters]") {
