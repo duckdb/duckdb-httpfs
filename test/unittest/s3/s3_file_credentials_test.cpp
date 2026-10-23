@@ -89,6 +89,8 @@ void LoadParquet(DuckDB &db) {
 // Key ids. The mock server reads the key id from the Authorization header and checks no signature.
 constexpr const char *ORDERS_KEY = "AKIAORDERSGRANT00001";
 constexpr const char *ORDERS_KEY_REFRESHED = "AKIAORDERSGRANT00002";
+//! The key of a second table at the location of orders (GovernedHost::AddTableAt)
+constexpr const char *ORDERS_SECOND_KEY = "AKIAORDERSSECOND0001";
 constexpr const char *ITEMS_KEY = "AKIAITEMSGRANT000001";
 constexpr const char *USER_KEY = "AKIAUSERPATHSECRET01";
 //! The secret part of each credential is the key id with this suffix; a test looks for it in outputs
@@ -238,6 +240,14 @@ public:
 	void SetKeys(const string &table, vector<string> keys) {
 		lock_guard<mutex> guard(lock);
 		Find(table).keys = std::move(keys);
+	}
+	//! A table `name` at the location of `table`, whose vends return `keys`
+	void AddTableAt(const string &name, const string &table, vector<string> keys) {
+		lock_guard<mutex> guard(lock);
+		auto added = Find(table);
+		added.keys = std::move(keys);
+		added.vends = 0;
+		tables[name] = std::move(added);
 	}
 	void SetRefreshDelay(const string &table, idx_t delay_ms) {
 		lock_guard<mutex> guard(lock);
@@ -748,6 +758,99 @@ TEST_CASE("Another connection does not read with a transaction's table credentia
 	INFO(ResultText(*r));
 	REQUIRE(r->HasError());
 	REQUIRE(Count(f.Since(mark), ORDERS_BUCKET, ORDERS_KEY) == 0);
+}
+
+namespace {
+//! A fixture whose orders bucket also answers ORDERS_SECOND_KEY, the key of the table orders_second at the same
+//! location, with every cache on and one thread, so that a scan always sends the same requests
+struct SameLocationFixture : public Fixture {
+	SameLocationFixture() : Fixture(Config()) {
+		GovernedHost::Get().AddTableAt("orders_second", "orders", {ORDERS_SECOND_KEY});
+		ConfigureCached(con);
+	}
+	static MockS3ServerConfig Config() {
+		auto config = MakeConfig();
+		config.auth.bucket_key_ids[ORDERS_BUCKET].push_back(ORDERS_SECOND_KEY);
+		return config;
+	}
+	//! Configure, then every cache on and one thread
+	void ConfigureCached(Connection &c) {
+		Configure(c);
+		Ok(c, "SET threads=1");
+		Ok(c, "SET enable_external_file_cache=true");
+		Ok(c, "SET parquet_metadata_cache=true");
+		Ok(c, "SET enable_http_metadata_cache=true");
+		Ok(c, "SET validate_external_file_cache='NO_VALIDATION'");
+	}
+	//! The successful requests signed with `key_id` that a scan of `table` on `c` alone sends
+	idx_t RequestsAlone(Connection &c, const string &table, const string &key_id) {
+		auto mark = Mark();
+		RequireOrdersResult(*c.Query("SELECT count(*), sum(i) FROM governed_scan('" + table + "')"));
+		return Count(Since(mark), ORDERS_BUCKET, key_id, "", true);
+	}
+};
+} // namespace
+
+TEST_CASE("Two tables at one location, scanned in one query, each read every file with their own credentials",
+          "[httpfs][s3][file_credentials][file_credentials_r2][file_credentials_r4]") {
+	SameLocationFixture f;
+	f.CreateUserSecret(f.con);
+	auto alone = f.RequestsAlone(f.con, "orders", ORDERS_KEY);
+	auto alone_second = f.RequestsAlone(f.con, "orders_second", ORDERS_SECOND_KEY);
+	REQUIRE(alone > 0);
+	auto mark = f.Mark();
+	auto r = f.con.Query(
+	    "SELECT (SELECT sum(i) FROM governed_scan('orders')), (SELECT sum(i) FROM governed_scan('orders_second'))");
+	INFO(ResultText(*r));
+	REQUIRE_FALSE(r->HasError());
+	REQUIRE(r->Collection().GetValue(0, 0).ToString() == EXPECTED_SUM);
+	REQUIRE(r->Collection().GetValue(1, 0).ToString() == EXPECTED_SUM);
+	auto os = f.Since(mark);
+	INFO(MockS3DescribeObservations(os));
+	REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY, ORDERS_SECOND_KEY}));
+	auto files = GovernedHost::Get().Table("orders").files;
+	REQUIRE(EveryFileFetchedWith(os, files, ORDERS_KEY));
+	REQUIRE(EveryFileFetchedWith(os, files, ORDERS_SECOND_KEY));
+	// neither scan is served what the other fetched
+	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_KEY, "", true) == alone);
+	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_SECOND_KEY, "", true) == alone_second);
+}
+
+TEST_CASE("Two connections scanning tables at one location at once each read with their own credentials",
+          "[httpfs][s3][file_credentials][file_credentials_r2][file_credentials_r4]") {
+	SameLocationFixture f;
+	Connection other(f.db);
+	f.ConfigureCached(other);
+	f.CreateUserSecret(f.con);
+	auto alone = f.RequestsAlone(f.con, "orders", ORDERS_KEY);
+	auto alone_second = f.RequestsAlone(other, "orders_second", ORDERS_SECOND_KEY);
+	constexpr idx_t RUNS = 5;
+	auto mark = f.Mark();
+	vector<unique_ptr<QueryResult>> results;
+	vector<unique_ptr<QueryResult>> results_second;
+	std::thread first([&]() {
+		for (idx_t i = 0; i < RUNS; i++) {
+			results.push_back(f.con.Query("SELECT count(*), sum(i) FROM governed_scan('orders')"));
+		}
+	});
+	std::thread second([&]() {
+		for (idx_t i = 0; i < RUNS; i++) {
+			results_second.push_back(other.Query("SELECT count(*), sum(i) FROM governed_scan('orders_second')"));
+		}
+	});
+	first.join();
+	second.join();
+	for (auto all : {&results, &results_second}) {
+		for (auto &result : *all) {
+			RequireOrdersResult(*result);
+		}
+	}
+	auto os = f.Since(mark);
+	INFO(MockS3DescribeObservations(os));
+	// a read that took the other connection's credentials would fail; one that lost its own would use the user's key
+	REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY, ORDERS_SECOND_KEY}));
+	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_KEY, "", true) == alone * RUNS);
+	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_SECOND_KEY, "", true) == alone_second * RUNS);
 }
 
 //===--------------------------------------------------------------------===//
