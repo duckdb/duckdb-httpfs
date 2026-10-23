@@ -490,7 +490,33 @@ public:
 		}
 	}
 
+	//! The bucket a path-style request names: the first path segment after the endpoint's base path,
+	//! or an empty string for a path outside the base path
+	string RequestBucket(const httplib::Request &request) const {
+		if (!StringUtil::StartsWith(request.path, config.endpoint_base_path + "/")) {
+			return string();
+		}
+		auto path = request.path.substr(config.endpoint_base_path.size());
+		auto bucket_end = path.find('/', 1);
+		return path.substr(1, bucket_end == string::npos ? string::npos : bucket_end - 1);
+	}
+
+	//! Whether the request's bucket answers only some key ids (`bucket_key_ids`) and the request is
+	//! signed with none of them
+	bool IsKeyRefusedForBucket(const httplib::Request &request) const {
+		auto entry = config.auth.bucket_key_ids.find(RequestBucket(request));
+		if (entry == config.auth.bucket_key_ids.end()) {
+			return false;
+		}
+		auto &allowed_keys = entry->second;
+		auto key_id = ExtractCredentialKey(GetHeader(request, "Authorization"));
+		return std::find(allowed_keys.begin(), allowed_keys.end(), key_id) == allowed_keys.end();
+	}
+
 	bool ShouldRejectStaleCredentials(const httplib::Request &request) const {
+		if (IsKeyRefusedForBucket(request)) {
+			return true;
+		}
 		auto authorization = GetHeader(request, "Authorization");
 		if (!config.auth.stale_authorization.empty()) {
 			return authorization == config.auth.stale_authorization && MatchesRefreshTarget(request);
@@ -1090,6 +1116,142 @@ public:
 		Record(request, response.status);
 	}
 
+	//! The extra object served at this request path, or nullptr when the path names none of them
+	optional_ptr<const MockS3ObjectConfig> FindExtraObject(const string &request_path) const {
+		for (auto &object : config.extra_objects) {
+			if (request_path == ExtraObjectPath(object)) {
+				return object;
+			}
+		}
+		return nullptr;
+	}
+
+	string ExtraObjectPath(const MockS3ObjectConfig &object) const {
+		return config.endpoint_base_path + StringUtil::Format("/%s/%s", object.bucket, object.key);
+	}
+
+	//! Send a region redirect or an auth failure when the request gets one, and return whether it did
+	bool SendRegionRedirectOrAuthFailure(const httplib::Request &request, httplib::Response &response) const {
+		if (ShouldRedirectRegion(request)) {
+			SendRegionRedirect(request, response);
+			return true;
+		}
+		if (ShouldRejectStaleCredentials(request)) {
+			SendAuthFailure(request, response);
+			return true;
+		}
+		return false;
+	}
+
+	//! Answer HEAD, GET and ListObjectsV2 for every extra object, with the credential and region
+	//! checks of the configured object and none of its injected failures
+	void RegisterExtraObjectRoutes() {
+		set<string> extra_buckets;
+		for (idx_t index = 0; index < config.extra_objects.size(); index++) {
+			auto &object = config.extra_objects[index];
+			if (object.bucket == config.object.bucket) {
+				// the routes of the two would collide, and the release build these tests run in
+				// compiles an assertion out
+				throw InternalException("MockS3Server: extra object bucket \"%s\" is the configured object's bucket",
+				                        object.bucket);
+			}
+			extra_buckets.insert(object.bucket);
+			const auto object_path = ExtraObjectPath(object);
+			auto get_object = [this, index](const httplib::Request &request, httplib::Response &response) {
+				HandleExtraObjectGet(request, response, index);
+			};
+			server.Get(object_path, get_object);
+			server.Get("https?://[^/]+" + object_path, get_object);
+		}
+		for (auto &bucket : extra_buckets) {
+			auto list_extra_objects = [this, bucket](const httplib::Request &request, httplib::Response &response) {
+				HandleExtraObjectList(request, response, bucket);
+			};
+			const auto bucket_path = config.endpoint_base_path + StringUtil::Format("/%s", bucket);
+			server.Get(bucket_path, list_extra_objects);
+			server.Get(bucket_path + "/", list_extra_objects);
+		}
+	}
+
+	//! GET of the extra object at `index`: the whole object, or the requested range of it
+	void HandleExtraObjectGet(const httplib::Request &request, httplib::Response &response, idx_t index) {
+		if (SendRegionRedirectOrAuthFailure(request, response)) {
+			return;
+		}
+		auto &data = config.extra_objects[index].data;
+		auto range = GetHeader(request, "Range");
+		if (range.empty()) {
+			response.status = 200;
+			SetGetHeaders(response, string());
+			response.set_content(data, "application/octet-stream");
+			Record(request, response.status);
+			return;
+		}
+		idx_t range_start;
+		idx_t range_end;
+		if (!ParseRange(range, data.size(), range_start, range_end)) {
+			response.status = 416;
+			Record(request, response.status);
+			return;
+		}
+		response.status = 206;
+		response.set_header("Accept-Ranges", "bytes");
+		SetGetHeaders(response, string());
+		// the whole object: the HTTP server answers the request's range from it
+		response.set_content(data, "application/octet-stream");
+		Record(request, response.status);
+	}
+
+	//! ListObjectsV2 of a bucket that holds extra objects; any other GET of the bucket gets a 404
+	void HandleExtraObjectList(const httplib::Request &request, httplib::Response &response, const string &bucket) {
+		if (request.target.find("list-type=2") == string::npos) {
+			response.status = 404;
+			Record(request, response.status);
+			return;
+		}
+		if (SendRegionRedirectOrAuthFailure(request, response)) {
+			return;
+		}
+		SendExtraObjectListSuccess(request, response, bucket);
+	}
+
+	//! One <Contents> element of a ListObjectsV2 result
+	static string ListObjectsContents(const string &key, const string &unquoted_etag, idx_t size) {
+		return StringUtil::Format("<Contents><Key>%s</Key><ETag>&quot;%s&quot;</ETag><Size>%llu</Size></Contents>", key,
+		                          unquoted_etag, static_cast<unsigned long long>(size));
+	}
+
+	//! A ListObjectsV2 result of one page that is not truncated, around `entries`, the page's <Contents> elements
+	static string ListObjectsBody(const string &bucket, const string &prefix, idx_t key_count, const string &entries) {
+		//! The MaxKeys S3 reports when the request sets none
+		static constexpr idx_t DEFAULT_MAX_KEYS = 1000;
+		return StringUtil::Format("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+		                          "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+		                          "<Name>%s</Name><Prefix>%s</Prefix><KeyCount>%llu</KeyCount>"
+		                          "<MaxKeys>%llu</MaxKeys><IsTruncated>false</IsTruncated>%s</ListBucketResult>",
+		                          bucket, prefix, static_cast<unsigned long long>(key_count),
+		                          static_cast<unsigned long long>(DEFAULT_MAX_KEYS), entries);
+	}
+
+	//! List every extra object of one bucket whose key starts with the requested prefix
+	void SendExtraObjectListSuccess(const httplib::Request &request, httplib::Response &response,
+	                                const string &bucket) const {
+		auto prefix = GetParameter(request, "prefix");
+		auto unquoted_etag = StringUtil::Replace(config.metadata.etag, "\"", "");
+		string entries;
+		idx_t key_count = 0;
+		for (auto &object : config.extra_objects) {
+			if (object.bucket != bucket || !StringUtil::StartsWith(object.key, prefix)) {
+				continue;
+			}
+			key_count++;
+			entries += ListObjectsContents(object.key, unquoted_etag, object.data.size());
+		}
+		response.status = 200;
+		response.set_content(ListObjectsBody(bucket, prefix, key_count, entries), "application/xml");
+		Record(request, response.status);
+	}
+
 	void RegisterRoutes() {
 		D_ASSERT(config.endpoint_base_path.empty() ||
 		         (config.endpoint_base_path[0] == '/' && config.endpoint_base_path.back() != '/'));
@@ -1121,8 +1283,21 @@ public:
 		});
 
 		server.set_pre_routing_handler([this, path](const httplib::Request &request, httplib::Response &response) {
-			if (request.method != "HEAD" || request.path != path) {
+			if (request.method != "HEAD") {
 				return httplib::Server::HandlerResponse::Unhandled;
+			}
+			if (request.path != path) {
+				auto extra = FindExtraObject(request.path);
+				if (!extra) {
+					return httplib::Server::HandlerResponse::Unhandled;
+				}
+				if (SendRegionRedirectOrAuthFailure(request, response)) {
+					return httplib::Server::HandlerResponse::Handled;
+				}
+				response.status = 200;
+				SetObjectHeaders(response, extra->data, string());
+				Record(request, response.status);
+				return httplib::Server::HandlerResponse::Handled;
 			}
 			if (config.metadata.redirect_head && !request.has_param("redirected")) {
 				response.set_redirect(config.metadata.redirect_location.empty() ? path + "?redirected=true"
@@ -1396,6 +1571,7 @@ public:
 		};
 		server.Get(bucket_path, list_objects);
 		server.Get(bucket_path_with_slash, list_objects);
+		RegisterExtraObjectRoutes();
 
 		server.Put(route_path, [this](const httplib::Request &request, httplib::Response &response) {
 			HandleObjectPut(request, response);
