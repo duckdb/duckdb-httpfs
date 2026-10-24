@@ -26,6 +26,10 @@ static void AddDeleteHash(hash_t &result, idx_t value) {
 	CombineDeleteHash(result, std::hash<idx_t> {}(value));
 }
 
+static void AddDeleteHash(hash_t &result, int64_t value) {
+	CombineDeleteHash(result, std::hash<int64_t> {}(value));
+}
+
 template <class ENUM_TYPE>
 static void AddDeleteEnumHash(hash_t &result, ENUM_TYPE value) {
 	AddDeleteHash(result, static_cast<idx_t>(value));
@@ -112,12 +116,13 @@ struct S3DeleteSecretIdentity {
 	string storage_mode;
 	idx_t persist_type = 0;
 	vector<string> scope;
-	optional_idx score;
+	bool has_score = false;
+	int64_t score = 0;
 
 	bool operator==(const S3DeleteSecretIdentity &other) const {
 		return lookup_type == other.lookup_type && secret_type == other.secret_type && provider == other.provider &&
 		       name == other.name && storage_mode == other.storage_mode && persist_type == other.persist_type &&
-		       scope == other.scope && score == other.score;
+		       scope == other.scope && has_score == other.has_score && score == other.score;
 	}
 
 	void AddHash(hash_t &result) const {
@@ -130,10 +135,8 @@ struct S3DeleteSecretIdentity {
 		for (const auto &entry : scope) {
 			AddDeleteHash(result, entry);
 		}
-		AddDeleteHash(result, static_cast<idx_t>(score.IsValid()));
-		if (score.IsValid()) {
-			AddDeleteHash(result, score.GetIndex());
-		}
+		AddDeleteHash(result, static_cast<idx_t>(has_score));
+		AddDeleteHash(result, score);
 	}
 };
 
@@ -187,7 +190,7 @@ struct S3DeleteBatchEntry {
 };
 
 static S3DeleteSecretIdentity GetDeleteSecretIdentity(const string &lookup_type, const SecretEntry &secret_entry,
-                                                      idx_t score) {
+                                                      int64_t score) {
 	auto &secret = *secret_entry.secret;
 	return {lookup_type,
 	        static_cast<const string &>(secret.GetType()),
@@ -196,6 +199,7 @@ static S3DeleteSecretIdentity GetDeleteSecretIdentity(const string &lookup_type,
 	        secret_entry.storage_mode,
 	        static_cast<idx_t>(secret_entry.persist_type),
 	        secret.GetScope(),
+	        true,
 	        score};
 }
 
@@ -213,7 +217,7 @@ static vector<S3DeleteSecretIdentity> GetSelectedSecretIdentities(optional_ptr<F
 			result.push_back({type, {}});
 			continue;
 		}
-		result.push_back(GetDeleteSecretIdentity(type, *match.secret_entry, NumericCast<idx_t>(match.score)));
+		result.push_back(GetDeleteSecretIdentity(type, *match.secret_entry, match.score));
 	}
 	return result;
 }
