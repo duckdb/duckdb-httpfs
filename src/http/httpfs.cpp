@@ -84,6 +84,9 @@ private:
 			return std::move(result);
 		}
 		ReadSettings();
+		if (info && info->credentials) {
+			ResetSettingsForFileCredentials();
+		}
 		SetUserAgent();
 		auto settings_reader = CreateSettingsReader();
 		ReadSecrets(*settings_reader);
@@ -122,6 +125,19 @@ private:
 		if (TryGetSetting("extra_http_headers", extra_http_headers)) {
 			MergeExtraHeaders(extra_http_headers);
 		}
+	}
+
+	//! A request signed with a file's credentials uses only the proxy their secret sets, and verifies the server
+	//! certificate with the default CA store: the query's caller can change these settings, and either would let
+	//! another host read the credentials. ReadSecrets reads the secret's own values after this.
+	void ResetSettingsForFileCredentials() {
+		result->http_proxy.clear();
+		result->http_proxy_port = 0;
+		result->http_proxy_username.clear();
+		result->http_proxy_password.clear();
+		result->enable_server_cert_verification = true;
+		result->enable_curl_server_cert_verification = true;
+		result->ca_cert_file.clear();
 	}
 
 	SettingLookupResult TryGetSetting(const Identifier &key, Value &value) {
@@ -243,6 +259,7 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
     : FileHandle(fs, file.path, flags), request_session(std::move(request_session_p)), flags(flags), length(0),
       last_modified(0), force_full_download(false), file_offset(0), object_version(std::move(object_version_p)) {
 	D_ASSERT(request_session);
+	can_use_shared_caches = !file.HasCredentials();
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {
@@ -1153,9 +1170,14 @@ void HTTPFileHandle::InitializeRequestState(const OpenFileInfo &file, optional_p
 	if (!snapshot_params.state) {
 		snapshot_params.state = make_shared_ptr<HTTPState>();
 	}
-	request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
-	auto request_snapshot = request_session->Capture().snapshot;
-	file_state = request_snapshot->Params().state->GetFileState(path);
+	auto publication = request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
+	if (can_use_shared_caches) {
+		auto &http_state = *publication.current.snapshot->Params().state;
+		file_state = http_state.GetFileState(path);
+	} else {
+		// the downloaded object is kept by this handle alone
+		file_state = make_shared_ptr<HTTPFileState>();
+	}
 
 	if (opener) {
 		InitializeLogger(*opener);
@@ -1222,7 +1244,10 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 void HTTPFileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
 	auto &hfs = file_system.Cast<HTTPFileSystem>();
 	InitializeRequestState(file, opener);
-	auto current_cache = TryGetMetadataCache(opener, hfs);
+	optional_ptr<HTTPMetadataCache> current_cache;
+	if (can_use_shared_caches) {
+		current_cache = TryGetMetadataCache(opener, hfs);
+	}
 	bool should_write_cache = false;
 	if (TryInitializeRead(hfs, current_cache, should_write_cache)) {
 		return;
