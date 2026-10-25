@@ -116,13 +116,12 @@ struct S3DeleteSecretIdentity {
 	string storage_mode;
 	idx_t persist_type = 0;
 	vector<string> scope;
-	bool has_score = false;
-	int64_t score = 0;
+	optional<int64_t> score;
 
 	bool operator==(const S3DeleteSecretIdentity &other) const {
 		return lookup_type == other.lookup_type && secret_type == other.secret_type && provider == other.provider &&
 		       name == other.name && storage_mode == other.storage_mode && persist_type == other.persist_type &&
-		       scope == other.scope && has_score == other.has_score && score == other.score;
+		       scope == other.scope && score == other.score;
 	}
 
 	void AddHash(hash_t &result) const {
@@ -135,8 +134,10 @@ struct S3DeleteSecretIdentity {
 		for (const auto &entry : scope) {
 			AddDeleteHash(result, entry);
 		}
-		AddDeleteHash(result, static_cast<idx_t>(has_score));
-		AddDeleteHash(result, score);
+		AddDeleteHash(result, static_cast<idx_t>(score.has_value()));
+		if (score) {
+			AddDeleteHash(result, *score);
+		}
 	}
 };
 
@@ -199,7 +200,6 @@ static S3DeleteSecretIdentity GetDeleteSecretIdentity(const string &lookup_type,
 	        secret_entry.storage_mode,
 	        static_cast<idx_t>(secret_entry.persist_type),
 	        secret.GetScope(),
-	        true,
 	        score};
 }
 
