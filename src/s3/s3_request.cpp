@@ -569,20 +569,75 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	return result;
 }
 
-static optional_idx GetRegionRedirect(const HTTPResponse &response, const S3AuthParams &auth_params,
-                                      string &region_out) {
-	if (response.status != HTTPStatusCode::MovedPermanently_301 && response.status != HTTPStatusCode::BadRequest_400) {
-		return {};
+// The region of an S3 endpoint host: s3.<region>.amazonaws.com, s3-<region>.amazonaws.com, or with a
+// dualstack / fips label in between; empty when the host is not of that form
+static string RegionFromS3Host(const string &host) {
+	static constexpr const char *SUFFIX = ".amazonaws.com";
+	auto lower = StringUtil::Lower(host);
+	if (!StringUtil::EndsWith(lower, SUFFIX)) {
+		return string();
 	}
-	if (!response.HasHeader("x-amz-bucket-region")) {
-		return {};
+	lower = lower.substr(0, lower.size() - strlen(SUFFIX));
+	auto labels = StringUtil::Split(lower, '.');
+	// the bucket may precede the s3 label: <bucket>.s3.<region>
+	idx_t s3_label = labels.size();
+	for (idx_t i = 0; i < labels.size(); i++) {
+		if (labels[i] == "s3" || StringUtil::StartsWith(labels[i], "s3-")) {
+			s3_label = i;
+		}
 	}
-	auto response_region = response.GetHeaderValue("x-amz-bucket-region");
+	if (s3_label == labels.size()) {
+		return string();
+	}
+	if (labels[s3_label] != "s3") {
+		// s3-<region>, the legacy form
+		auto region = labels[s3_label].substr(3);
+		return (region == "accelerate" || region == "external-1") ? string() : region;
+	}
+	// s3.[dualstack.|fips.]<region>
+	for (idx_t i = s3_label + 1; i < labels.size(); i++) {
+		if (labels[i] != "dualstack" && labels[i] != "fips") {
+			return labels[i];
+		}
+	}
+	return string();
+}
+
+// The bucket's region named in the body of a 301 (PermanentRedirect, as the endpoint) or 400
+// (AuthorizationHeaderMalformed, as the region); empty when the body names none
+static string RegionFromErrorBody(const string &body) {
+	S3XMLError error;
+	if (body.empty() || !S3XMLResponseParser::TryParseError(body, error)) {
+		return string();
+	}
+	if (!error.region.empty()) {
+		return error.region;
+	}
+	return RegionFromS3Host(error.endpoint);
+}
+
+// A browser only hands over the response headers the bucket's CORS rules expose, which rarely include
+// x-amz-bucket-region, while the body of the error is readable whenever the request was allowed at all
+static optional_idx RegionRedirectFrom(const string &header_region, const string &body, const S3AuthParams &auth_params,
+                                       string &region_out) {
+	auto response_region = header_region.empty() ? RegionFromErrorBody(body) : header_region;
 	if (response_region.empty() || response_region == auth_params.GetCredentials().region) {
 		return {};
 	}
 	region_out = std::move(response_region);
 	return {0};
+}
+
+static optional_idx GetRegionRedirect(const HTTPResponse &response, const S3AuthParams &auth_params,
+                                      string &region_out) {
+	if (response.status != HTTPStatusCode::MovedPermanently_301 && response.status != HTTPStatusCode::BadRequest_400) {
+		return {};
+	}
+	string header_region;
+	if (response.HasHeader("x-amz-bucket-region")) {
+		header_region = response.GetHeaderValue("x-amz-bucket-region");
+	}
+	return RegionRedirectFrom(header_region, response.body, auth_params, region_out);
 }
 
 static optional_idx GetRegionRedirect(const ErrorData &error, const S3AuthParams &auth_params, string &region_out) {
@@ -591,13 +646,25 @@ static optional_idx GetRegionRedirect(const ErrorData &error, const S3AuthParams
 	if (entry == extra_info.end() || (entry->second != "301" && entry->second != "400")) {
 		return {};
 	}
+	string header_region;
 	auto new_region = extra_info.find("header_x-amz-bucket-region");
-	if (new_region == extra_info.end() || new_region->second.empty() ||
-	    new_region->second == auth_params.GetCredentials().region) {
-		return {};
+	if (new_region != extra_info.end()) {
+		header_region = new_region->second;
 	}
-	region_out = new_region->second;
-	return {0};
+	string body;
+	auto body_entry = extra_info.find("response_body");
+	if (body_entry != extra_info.end()) {
+		body = body_entry->second;
+	}
+	return RegionRedirectFrom(header_region, body, auth_params, region_out);
+}
+
+// A response the browser did not let DuckDB read: duckdb-wasm reports it as a 404 with no body whose reason names
+// CORS. A regional endpoint answers a bucket of another region with a 301 that carries no CORS headers, so this is
+// what such a bucket looks like from a browser.
+static bool IsBrowserBlockedResponse(const HTTPResponse &response) {
+	return response.status == HTTPStatusCode::NotFound_404 && response.body.empty() &&
+	       StringUtil::Contains(response.reason, "CORS");
 }
 
 // Core's status-based retry can't catch this: the discriminator is only in the S3 error body.
@@ -660,6 +727,7 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
                                        const ReceivedResponseCallback &response_callback) {
 	bool retried_auth_refresh = false;
 	bool retried_region = false;
+	bool retried_global_endpoint = false;
 	HTTPRetryBudget retry_budget(session.Capture().snapshot->Params());
 	S3RequestResult result {};
 	retry_budget.Run([&]() {
@@ -679,6 +747,14 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 				    GetRegionRedirect(*response, request_data.auth_params, correct_region).IsValid()) {
 					set_region(request_data, correct_region);
 					retried_region = true;
+					continue;
+				}
+				// The global endpoint answers a wrong signature region with a 400 that carries the bucket's CORS
+				// headers and names the region in its body, which the browser can read where it could not read the
+				// regional endpoint's 301
+				if (received_response && !retried_global_endpoint && IsBrowserBlockedResponse(*response) &&
+				    TrySetSessionGlobalEndpoint(session)) {
+					retried_global_endpoint = true;
 					continue;
 				}
 				bool should_retry = received_response && ShouldRetryReceivedResponse(request_data, *response);
@@ -782,6 +858,25 @@ bool S3RequestExecutor::SetSessionRegion(HTTPRequestSession &session, const stri
 		    make_shared_ptr<S3RequestSnapshot>(snapshot.Params(), auth_params, snapshot.refresh_path,
 		                                       snapshot.client_context, snapshot.credential_refresh_enabled, true,
 		                                       snapshot.credential_generation, snapshot.multipart_upload_policy);
+		auto publication = session.TryPublish(current.snapshot, std::move(replacement));
+		if (publication.published) {
+			return true;
+		}
+	}
+}
+
+bool S3RequestExecutor::TrySetSessionGlobalEndpoint(HTTPRequestSession &session) {
+	for (;;) {
+		auto current = session.Capture();
+		auto &snapshot = current.snapshot->Cast<S3RequestSnapshot>();
+		if (!snapshot.auth_params.CanUseGlobalEndpoint()) {
+			return false;
+		}
+		auto auth_params = snapshot.auth_params.WithGlobalEndpoint();
+		auto replacement = make_shared_ptr<S3RequestSnapshot>(
+		    snapshot.Params(), auth_params, snapshot.refresh_path, snapshot.client_context,
+		    snapshot.credential_refresh_enabled, snapshot.region_redirected, snapshot.credential_generation,
+		    snapshot.multipart_upload_policy);
 		auto publication = session.TryPublish(current.snapshot, std::move(replacement));
 		if (publication.published) {
 			return true;
@@ -960,19 +1055,43 @@ void S3FileSystem::ValidateResponseVersion(HTTPFileHandle &handle, const HTTPRea
 	}
 }
 
+// A 301 that names the bucket's region nowhere the client can see it. A 400 needs no such care: a HEAD that fails
+// with it is retried as a ranged GET, whose body carries the region.
+static bool IsUnreadableRegionRedirect(const HTTPResponse &response) {
+	return response.status == HTTPStatusCode::MovedPermanently_301 && !response.HasHeader("x-amz-bucket-region") &&
+	       RegionFromErrorBody(response.body).empty();
+}
+
 unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
-	return S3RequestExecutor::RunHandle(
-	           GetEncryptionUtil(), s3_handle,
-	           S3RequestSpec {s3_url, S3RequestOperation::HEAD_OBJECT, {}, "", "", "", s3_handle.requested_version},
-	           [&](S3RequestData &request_data) {
-		           auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		           return RunHeadRequest(
-		               request_data.http_url, request_data.headers, params, [&](BaseRequest &request) {
-			               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
-		               });
-	           })
-	    .response;
+	auto run_head = [&]() {
+		return S3RequestExecutor::RunHandle(
+		           GetEncryptionUtil(), s3_handle,
+		           S3RequestSpec {s3_url, S3RequestOperation::HEAD_OBJECT, {}, "", "", "", s3_handle.requested_version},
+		           [&](S3RequestData &request_data) {
+			           auto &params = request_data.http_params->Cast<HTTPFSParams>();
+			           return RunHeadRequest(
+			               request_data.http_url, request_data.headers, params, [&](BaseRequest &request) {
+				               return S3RequestExecutor::SendHandleRequest(s3_handle, request_data, request);
+			               });
+		           })
+		    .response;
+	};
+	auto response = run_head();
+	if (response && IsUnreadableRegionRedirect(*response)) {
+		// A HEAD response has no body, and a browser sees only the headers the bucket's CORS rules expose: a GET of
+		// the first byte reads the region from the 301's body and follows the redirect, after which the HEAD succeeds
+		try {
+			auto probe = GetRangeRequest(handle, s3_url, header_map, s3_handle.BuildReadConfig(), 0, nullptr, 1);
+			if (probe &&
+			    (probe->status == HTTPStatusCode::PartialContent_206 || probe->status == HTTPStatusCode::OK_200)) {
+				response = run_head();
+			}
+		} catch (std::exception &) {
+			// the GET fared no better; the HEAD's response says what happened
+		}
+	}
+	return response;
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
@@ -1068,6 +1187,19 @@ string S3RequestUtil::ParseError(const string &error) {
 HTTPException S3RequestUtil::GetError(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
                                       RequestType request_type, const string &operation, const string &display_url) {
 	string extra_text = S3RequestUtil::ParseError(response.body);
+#ifdef __EMSCRIPTEN__
+	// the browser reports a response it was not allowed to read as a 404 whose reason names CORS
+	if (response.status == HTTPStatusCode::NotFound_404 && StringUtil::Contains(response.reason, "CORS")) {
+		extra_text += " The browser did not let DuckDB read the response: either the bucket has no CORS rule for this "
+		              "origin, or the request went to another region's endpoint, whose redirect carries no CORS "
+		              "headers. Set the bucket's region, or let s3_use_global_endpoint find it.";
+	} else if ((response.status == HTTPStatusCode::MovedPermanently_301 ||
+	            response.status == HTTPStatusCode::BadRequest_400) &&
+	           !response.HasHeader("x-amz-bucket-region") && RegionFromErrorBody(response.body).empty()) {
+		extra_text += " S3 answered from another region, which the browser could not read: expose x-amz-bucket-region "
+		              "in the bucket's CORS rules, or set the bucket's region.";
+	}
+#endif
 	if (response.status == HTTPStatusCode::BadRequest_400) {
 		extra_text += s3_auth_params.GetProvider().GetBadRequestError(s3_auth_params);
 	}

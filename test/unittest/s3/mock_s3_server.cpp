@@ -630,9 +630,29 @@ public:
 	}
 
 	void SendRegionRedirect(const httplib::Request &request, httplib::Response &response) const {
-		response.status = 301;
-		response.set_header("x-amz-bucket-region", config.auth.required_region);
-		response.set_content("<Error><Code>PermanentRedirect</Code></Error>", "application/xml");
+		auto &region = config.auth.required_region;
+		switch (config.auth.region_redirect_form) {
+		case MockS3RegionRedirectForm::HEADER:
+			response.status = 301;
+			response.set_header("x-amz-bucket-region", region);
+			response.set_content("<Error><Code>PermanentRedirect</Code></Error>", "application/xml");
+			break;
+		case MockS3RegionRedirectForm::BODY_ENDPOINT:
+			response.status = 301;
+			response.set_content("<Error><Code>PermanentRedirect</Code><Message>The bucket you are attempting to "
+			                     "access must be addressed using the specified endpoint.</Message><Endpoint>" +
+			                         config.object.bucket + ".s3." + region + ".amazonaws.com</Endpoint><Bucket>" +
+			                         config.object.bucket + "</Bucket></Error>",
+			                     "application/xml");
+			break;
+		case MockS3RegionRedirectForm::BODY_REGION:
+			response.status = 400;
+			response.set_content("<Error><Code>AuthorizationHeaderMalformed</Code><Message>The authorization header "
+			                     "is malformed; the region is wrong; expecting '" +
+			                         region + "'</Message><Region>" + region + "</Region></Error>",
+			                     "application/xml");
+			break;
+		}
 		Record(request, response.status);
 	}
 
@@ -1174,6 +1194,10 @@ public:
 				return;
 			}
 			const auto &data = *object_data;
+			if (ShouldRedirectRegion(request)) {
+				SendRegionRedirect(request, response);
+				return;
+			}
 			if (ShouldRejectStaleCredentials(request)) {
 				SendAuthFailure(request, response);
 				return;

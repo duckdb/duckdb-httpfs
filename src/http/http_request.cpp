@@ -146,7 +146,8 @@ public:
 		    read_config.condition.type != HTTPReadConditionType::NONE) {
 			return false;
 		}
-		if (static_cast<int>(response.status) >= 400) {
+		// a 301 is S3 naming another region for the bucket; its body is read like an error's
+		if (IsBufferedErrorStatus(static_cast<int>(response.status))) {
 			throw get_error(response);
 		}
 		if (static_cast<int>(response.status) >= 300) {

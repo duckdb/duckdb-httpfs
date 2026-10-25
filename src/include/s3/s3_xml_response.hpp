@@ -13,12 +13,18 @@ struct S3XMLResponse {
 	string error_code;
 	string error_message;
 	string error_access_key_id;
+	string error_region;
+	string error_endpoint;
 };
 
 struct S3XMLError {
 	string code;
 	string message;
 	string access_key_id;
+	//! The bucket's region, as AuthorizationHeaderMalformed reports it
+	string region;
+	//! The bucket's endpoint, as PermanentRedirect reports it
+	string endpoint;
 };
 
 struct S3ListObjectsV2Object {

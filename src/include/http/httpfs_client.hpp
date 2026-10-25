@@ -8,6 +8,12 @@
 
 namespace duckdb {
 
+//! Statuses whose body is read whole and handed over with the response rather than streamed: errors, and S3's
+//! 301 PermanentRedirect, whose body names the bucket's region
+inline bool IsBufferedErrorStatus(int status) {
+	return status >= 400 || status == 301;
+}
+
 class HTTPFSInfoLogType : public LogType {
 public:
 	HTTPFSInfoLogType() : LogType(NAME, LogLevel::LOG_INFO) {

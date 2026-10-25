@@ -287,7 +287,8 @@ private:
 	class GetTransferState {
 	public:
 		GetTransferState(HTTPFSCurlClient &client_p, GetRequestInfo &request_p)
-		    : client(client_p), request(request_p), stream_content(bool(request.content_handler)) {
+		    : client(client_p), request(request_p), stream_content(bool(request.content_handler)),
+		      follow_location(request.params.Cast<HTTPFSParams>().follow_location) {
 			try {
 				client.curl->SetOption(CURLOPT_HEADERFUNCTION, HeaderCallback);
 				client.curl->SetOption(CURLOPT_HEADERDATA, this);
@@ -315,7 +316,7 @@ private:
 	public:
 		unique_ptr<HTTPResponse> Finish(CURLcode result) {
 			client.request_info->response_code = client.curl->GetResponseCode();
-			const bool include_body = !stream_content || client.request_info->response_code >= 400;
+			const bool include_body = !stream_content || BuffersBody(client.request_info->response_code);
 			unique_ptr<HTTPResponse> response;
 			try {
 				if (error) {
@@ -373,6 +374,17 @@ private:
 			}
 		}
 
+		//! Whether the body of the response being read is kept with it, like an error's; curl follows a 301 with a
+		//! Location itself, one without is S3 naming the bucket's region
+		bool BuffersBody(long response_code) const {
+			auto status = NumericCast<int>(response_code);
+			if (status != 301) {
+				return IsBufferedErrorStatus(status);
+			}
+			auto &headers = client.request_info->header_collection;
+			return !follow_location || headers.empty() || !headers.back().HasHeader("Location");
+		}
+
 		static bool IsEndOfHeaders(void *contents, idx_t size) {
 			auto header = const_char_ptr_cast(contents);
 			return (size == 2 && header[0] == '\r' && header[1] == '\n') || (size == 1 && header[0] == '\n');
@@ -382,7 +394,7 @@ private:
 			if (!response_started && !StartResponse()) {
 				return stopped ? 0 : size;
 			}
-			if (!stream_content || client.request_info->response_code >= 400) {
+			if (!stream_content || BuffersBody(client.request_info->response_code)) {
 				client.request_info->body.append(char_ptr_cast(contents), size);
 			} else if (!request.content_handler(const_data_ptr_cast(contents), size)) {
 				stopped = true;
@@ -395,11 +407,11 @@ private:
 		bool StartResponse() {
 			auto response_code = client.curl->GetResponseCode();
 			client.request_info->response_code = response_code;
-			if (response_code < 200 || (response_code >= 300 && response_code < 400)) {
+			if (response_code < 200 || (response_code >= 300 && response_code < 400 && !BuffersBody(response_code))) {
 				return false;
 			}
 			response_started = true;
-			if (!stream_content || response_code >= 400) {
+			if (!stream_content || BuffersBody(response_code)) {
 				return true;
 			}
 			response_handler_called = true;
@@ -431,6 +443,7 @@ private:
 		HTTPFSCurlClient &client;
 		GetRequestInfo &request;
 		const bool stream_content;
+		const bool follow_location;
 		std::exception_ptr error;
 		idx_t bytes_received = 0;
 		bool response_started = false;

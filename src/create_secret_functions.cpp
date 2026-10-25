@@ -69,7 +69,7 @@ private:
 			S3AuthURLParams::ParseStyle(url_style);
 			secret->secret_map[Identifier(name)] = std::move(url_style);
 		} else if (name == "use_ssl" || name == "verify_ssl" || name == "url_compatibility_mode" ||
-		           name == "requester_pays") {
+		           name == "requester_pays" || name == "use_global_endpoint") {
 			SetBooleanOption(name, value);
 		} else if (name == "refresh") {
 			SetRefresh(value);
@@ -214,6 +214,7 @@ void CreateS3SecretFunctions::SetBaseNamedParams(CreateSecretFunction &function,
 	function.named_parameters["endpoint"] = LogicalType::VARCHAR;
 	function.named_parameters["url_style"] = LogicalType::VARCHAR;
 	function.named_parameters["use_ssl"] = LogicalType::BOOLEAN;
+	function.named_parameters["use_global_endpoint"] = LogicalType::BOOLEAN;
 	function.named_parameters["verify_ssl"] = LogicalType::BOOLEAN;
 	function.named_parameters["kms_key_id"] = LogicalType::VARCHAR;
 	function.named_parameters["url_compatibility_mode"] = LogicalType::BOOLEAN;
