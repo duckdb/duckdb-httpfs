@@ -51,8 +51,7 @@
 
 namespace duckdb {
 
-//! As parquet_extension.hpp and core_functions_extension.hpp declare them; the Brazil build does not publish those
-//! headers
+//! As parquet_extension.hpp and core_functions_extension.hpp declare them; not every build publishes those headers
 class ParquetExtension : public Extension {
 public:
 	void Load(ExtensionLoader &loader) override;
@@ -68,8 +67,7 @@ public:
 
 namespace {
 
-//! The Brazil build links Parquet and the core functions as static extensions that a new database does not load by
-//! itself
+//! A build may link Parquet and the core functions as static extensions that a new database does not load by itself
 void LoadParquet(DuckDB &db) {
 	if (!db.ExtensionIsLoaded("core_functions")) {
 		db.LoadStaticExtension<CoreFunctionsExtension>();
