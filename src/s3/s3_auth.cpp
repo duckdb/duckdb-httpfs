@@ -111,9 +111,9 @@ S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpener
                                      const S3AuthResolveOptions &options) {
 	// Without a FileOpener we cannot access settings or secrets.
 	if (!opener) {
-		if (info.credentials) {
+		if (!info.file_secret.empty()) {
 			// rather than signing with whatever credentials the environment has
-			throw InvalidConfigurationException("The credentials of '%s' cannot be used without a file opener",
+			throw InvalidConfigurationException("The file secret for '%s' cannot be used without a file opener",
 			                                    info.file_path);
 		}
 		S3AuthConfig config;
@@ -316,7 +316,7 @@ S3KeyValueReader::S3KeyValueReader(const KeyValueSecretReader &_reader) : reader
 	Value use_env_vars_for_secret_info_setting;
 	reader.TryGetSecretKeyOrSetting("enable_global_s3_configuration", "enable_global_s3_configuration",
 	                                use_env_vars_for_secret_info_setting);
-	// unset for file credentials, which no setting fills
+	// unset for a file secret, which no setting fills
 	use_env_variables_for_secret_settings =
 	    !use_env_vars_for_secret_info_setting.IsNull() && use_env_vars_for_secret_info_setting.GetValue<bool>();
 }

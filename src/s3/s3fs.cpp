@@ -42,15 +42,15 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 		                              S3Provider::GetVersionParameterName(requested_version.GetType()));
 	}
 	auto captured = request_session->Capture();
-	// the file's credentials travel with the session, so that a refresh renews them rather than a secret by path
-	shared_ptr<FileCredentials> credentials;
+	// the file secret travels with the session, so that a refresh renews it rather than a secret by path
+	string file_secret;
 	if (file.extended_info) {
-		credentials = file.extended_info->credentials;
+		file_secret = file.extended_info->file_secret;
 	}
 	request_session->TryPublish(captured.snapshot,
 	                            make_shared_ptr<S3RequestSnapshot>(
 	                                captured.snapshot->Params(), auth_params_p, file.path, weak_ptr<ClientContext>(),
-	                                true, false, 0, std::move(multipart_upload_policy), std::move(credentials)));
+	                                true, false, 0, std::move(multipart_upload_policy), std::move(file_secret)));
 	auto_fallback_to_full_file_download = false;
 	if (flags.OpenForReading() && flags.OpenForWriting()) {
 		throw NotImplementedException("Cannot open an HTTP file for both reading and writing");
@@ -218,7 +218,7 @@ unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, 
                                                       optional_ptr<FileOpener> opener) {
 	FileOpenerInfo info = {file.path};
 	if (file.extended_info) {
-		info.credentials = file.extended_info->credentials;
+		info.file_secret = file.extended_info->file_secret;
 	}
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 

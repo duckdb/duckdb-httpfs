@@ -1,7 +1,5 @@
-// The host of a governed table: it vends the table's credentials into a FileCredentials object and puts that
-// object on the glob input and the files of that table's scans. The same file builds against a core without file
-// credentials, where the host has no way to attach them, its scans read with the secret matched to the path, and
-// the cases that need the host's credentials fail.
+// The host of a governed table: it registers the table's credentials as a file secret of the transaction and puts
+// its name on the glob input and the files of that table's scans.
 //
 // The host is played by this file: a table function per table, read_parquet with a multi-file reader that resolves the
 // table to its location and attaches the credentials at bind, as a catalog extension does. The mock S3 server
@@ -50,11 +48,6 @@
 #include <sstream>
 #include <thread>
 #include <unistd.h>
-
-#if __has_include("duckdb/main/secret/file_credentials.hpp")
-#define HAS_FILE_CREDENTIALS 1
-#include "duckdb/main/secret/file_credentials.hpp"
-#endif
 
 namespace duckdb {
 
@@ -198,11 +191,8 @@ struct GovernedTable {
 	}
 };
 
-#ifdef HAS_FILE_CREDENTIALS
-using Attachment = shared_ptr<FileCredentials>;
-#else
-struct Attachment {};
-#endif
+//! The name of the file secret that carries a table's credentials
+using Attachment = string;
 
 class GovernedHost {
 public:
@@ -302,22 +292,16 @@ public:
 	//! As Attach, with a secret whose scope is `scope` instead of the table's
 	Attachment AttachWithScope(ClientContext &context, const string &table, const string &scope);
 	void Apply(const Attachment &attachment, OpenFileInfo &file) {
-#ifdef HAS_FILE_CREDENTIALS
 		if (!file.extended_info) {
 			file.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
 		}
-		file.extended_info->credentials = attachment;
-#endif
+		file.extended_info->file_secret = attachment;
 	}
 	void Apply(const Attachment &attachment, FileGlobInput &input) {
-#ifdef HAS_FILE_CREDENTIALS
-		input.credentials = attachment;
-#endif
+		input.file_secret = attachment;
 	}
 	void Apply(const Attachment &attachment, FileOpenerInfo &info) {
-#ifdef HAS_FILE_CREDENTIALS
-		info.credentials = attachment;
-#endif
+		info.file_secret = attachment;
 	}
 	vector<Attachment> Attachments() {
 		lock_guard<mutex> guard(lock);
@@ -347,30 +331,26 @@ private:
 
 constexpr const char *HOST_NAME = "governed_test";
 
-#ifdef HAS_FILE_CREDENTIALS
 Attachment GovernedHost::Attach(ClientContext &context, const string &table) {
 	return AttachWithScope(context, table, Table(table).scope);
 }
 
 Attachment GovernedHost::AttachWithScope(ClientContext &context, const string &table, const string &scope) {
-	auto credentials = FileCredentials::Create(context, scope, [table, scope](ClientContext &) {
+	auto name = SecretManager::Get(context).RegisterFileSecret(context, scope, [table, scope](ClientContext &) {
 		auto &host = GovernedHost::Get();
 		shared_ptr<const KeyValueSecret> secret =
 		    host.MakeSecret({scope}, Identifier(HOST_NAME), Identifier(), host.Vend(table));
 		return secret;
 	});
 	lock_guard<mutex> guard(lock);
-	attachments.push_back(credentials);
-	return credentials;
+	attachments.push_back(name);
+	return name;
 }
-#else
-Attachment GovernedHost::Attach(ClientContext &context, const string &table) {
-	return Attachment();
+
+//! The file secret `name` of the transaction of `context`, for reading `path`
+shared_ptr<const KeyValueSecret> GetFileSecret(ClientContext &context, const string &name, const string &path) {
+	return SecretManager::Get(context).GetFileSecret(context, name, path);
 }
-Attachment GovernedHost::AttachWithScope(ClientContext &context, const string &table, const string &scope) {
-	return Attachment();
-}
-#endif
 
 //! read_parquet's multi-file reader, with the table name as its argument: the reader resolves the table to its
 //! location and attaches the host's credentials to the glob (governed_scan) or to each file of the table's file
@@ -1288,7 +1268,7 @@ TEST_CASE("No setting fills a key the table's credentials leave unset",
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
 	info.file_path = OrdersFile(0);
-	info.credentials = table_credentials;
+	info.file_secret = table_credentials;
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
 
@@ -1320,7 +1300,7 @@ TEST_CASE("Settings do not supply credentials the table's credentials leave unse
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
 	info.file_path = OrdersFile(0);
-	info.credentials = table_credentials;
+	info.file_secret = table_credentials;
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
 	auto &credentials = params.GetCredentials();
@@ -1362,7 +1342,7 @@ S3AuthParams ResolveWithHandle(Fixture &f, const string &table, const string &sc
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
 	info.file_path = path;
-	info.credentials = table_credentials;
+	info.file_secret = table_credentials;
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
 	return params;
@@ -1387,7 +1367,7 @@ TEST_CASE("A request with credentials and no file opener fails",
 	auto table_credentials = GovernedHost::Get().Attach(*f.con.context, "orders");
 	FileOpenerInfo info;
 	info.file_path = OrdersFile(0);
-	info.credentials = table_credentials;
+	info.file_secret = table_credentials;
 	string error;
 	try {
 		S3AuthResolver::Resolve(nullptr, info);
@@ -1454,8 +1434,6 @@ TEST_CASE("A file option in SQL does not carry the table's credentials",
 	}
 }
 
-#ifdef HAS_FILE_CREDENTIALS
-
 namespace {
 //! Every string the outputs below show for the transaction's secrets and the governed scan
 vector<string> VisibleStrings(Connection &con) {
@@ -1471,7 +1449,7 @@ vector<string> VisibleStrings(Connection &con) {
 }
 } // namespace
 
-TEST_CASE("Each scan's credentials are their own object, and no output shows them",
+TEST_CASE("Each scan's credentials are a file secret of their own, and no output shows them or its name",
           "[httpfs][s3][file_credentials][file_credentials_attack]") {
 	Fixture f;
 	f.CreateUserSecret(f.con);
@@ -1485,6 +1463,7 @@ TEST_CASE("Each scan's credentials are their own object, and no output shows the
 	                   ResultText(*f.con.Query("EXPLAIN ANALYZE SELECT * FROM governed_scan('orders')"))}) {
 		RequireNoCredential(text);
 		REQUIRE_FALSE(StringUtil::Contains(text, HOST_NAME));
+		REQUIRE_FALSE(StringUtil::Contains(text, attached[0]));
 	}
 }
 
@@ -1497,9 +1476,9 @@ TEST_CASE("No SQL that takes a secret name reaches the table's credentials",
 	auto table_credentials = GovernedHost::Get().Attachments()[0];
 	auto &manager = SecretManager::Get(*f.con.context);
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*f.con.context);
-	ClientContextFileOpener opener(*f.con.context);
-	// the host's name and every string the outputs show
+	// the file secret's own name, the host's name and every string the outputs show
 	auto names = VisibleStrings(f.con);
+	names.push_back(table_credentials);
 	names.push_back("governed");
 	names.push_back(HOST_NAME);
 	for (auto &name : names) {
@@ -1517,14 +1496,14 @@ TEST_CASE("No SQL that takes a secret name reaches the table's credentials",
 		                                   name, ORDERS_BUCKET));
 		INFO(ResultText(*create));
 		// the credentials still hold the host's secret, and the governed scan still reads with it
-		REQUIRE(table_credentials->GetSecret(&opener, OrdersFile(0))->TryGetValue("key_id").ToString() == ORDERS_KEY);
+		REQUIRE(GetFileSecret(*f.con.context, table_credentials, OrdersFile(0))->TryGetValue("key_id").ToString() ==
+		        ORDERS_KEY);
 		f.con.Query("DROP SECRET IF EXISTS \"" + name + "\"");
 	}
 	auto mark = f.Mark();
 	RunGovernedScan(f);
 	REQUIRE(OnlyKeys(f.Since(mark), ORDERS_BUCKET, {ORDERS_KEY}));
-	// no SQL statement can name the credentials: a string copied from any output is a secret name, and a secret
-	// named that is matched by its scope and by name only
+	// no SQL statement can name the credentials: a name taken from the file secret or any output names no secret
 	for (auto &name : names) {
 		if (name == "user_secret") {
 			continue;
@@ -1559,10 +1538,10 @@ TEST_CASE("The table's credentials serve only the transaction that loaded the ta
 	other.BeginTransaction();
 	{
 		ClientContextFileOpener opener(*other.context);
-		REQUIRE_THROWS(table_credentials->GetSecret(&opener, OrdersFile(0)));
+		REQUIRE_THROWS(GetFileSecret(*other.context, table_credentials, OrdersFile(0)));
 		FileOpenerInfo info;
 		info.file_path = OrdersFile(0);
-		info.credentials = table_credentials;
+		info.file_secret = table_credentials;
 		REQUIRE_THROWS(S3AuthResolver::Resolve(&opener, info));
 		OpenFileInfo file(OrdersFile(0));
 		GovernedHost::Get().Apply(table_credentials, file);
@@ -1574,8 +1553,7 @@ TEST_CASE("The table's credentials serve only the transaction that loaded the ta
 		f.con.Query("ROLLBACK");
 	}
 	f.con.BeginTransaction();
-	ClientContextFileOpener opener(*f.con.context);
-	REQUIRE_THROWS(table_credentials->GetSecret(&opener, OrdersFile(0)));
+	REQUIRE_THROWS(GetFileSecret(*f.con.context, table_credentials, OrdersFile(0)));
 	OpenFileInfo file(OrdersFile(0));
 	GovernedHost::Get().Apply(table_credentials, file);
 	REQUIRE_THROWS(FileSystem::GetFileSystem(*f.con.context).OpenFile(file, FileFlags::FILE_FLAGS_READ));
@@ -1588,9 +1566,8 @@ TEST_CASE("An autocommit governed scan's credentials end with it",
 	f.CreateUserSecret(f.con);
 	RunGovernedScan(f);
 	auto table_credentials = GovernedHost::Get().Attachments()[0];
-	ClientContextFileOpener opener(*f.con.context);
-	REQUIRE_THROWS_WITH(table_credentials->GetSecret(&opener, OrdersFile(0)),
-	                    Catch::Contains("ended with the transaction"));
+	REQUIRE_THROWS_WITH(GetFileSecret(*f.con.context, table_credentials, OrdersFile(0)),
+	                    Catch::Contains("is not available"));
 }
 
 TEST_CASE("No SQL creates the table's credentials", "[httpfs][s3][file_credentials][file_credentials_attack]") {
@@ -1634,7 +1611,5 @@ TEST_CASE("The table's credentials are used only for paths under its scope",
 	}
 	f.con.Query("ROLLBACK");
 }
-
-#endif
 
 } // namespace duckdb

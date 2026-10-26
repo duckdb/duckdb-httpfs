@@ -84,8 +84,8 @@ private:
 			return std::move(result);
 		}
 		ReadSettings();
-		if (info && info->credentials) {
-			ResetSettingsForFileCredentials();
+		if (info && !info->file_secret.empty()) {
+			ResetSettingsForFileSecret();
 		}
 		SetUserAgent();
 		auto settings_reader = CreateSettingsReader();
@@ -127,10 +127,10 @@ private:
 		}
 	}
 
-	//! A request signed with a file's credentials uses only the proxy their secret sets, and verifies the server
-	//! certificate with the default CA store: the query's caller can change these settings, and either would let
-	//! another host read the credentials. ReadSecrets reads the secret's own values after this.
-	void ResetSettingsForFileCredentials() {
+	//! A request signed with a file secret uses only the proxy the secret sets, and verifies the server certificate
+	//! with the default CA store: the query's caller can change these settings, and either would let another host
+	//! read the secret. ReadSecrets reads the secret's own values after this.
+	void ResetSettingsForFileSecret() {
 		result->http_proxy.clear();
 		result->http_proxy_port = 0;
 		result->http_proxy_username.clear();
@@ -259,7 +259,7 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
     : FileHandle(fs, file.path, flags), request_session(std::move(request_session_p)), flags(flags), length(0),
       last_modified(0), force_full_download(false), file_offset(0), object_version(std::move(object_version_p)) {
 	D_ASSERT(request_session);
-	can_use_shared_caches = !file.HasCredentials();
+	can_use_shared_caches = !file.HasFileSecret();
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {
