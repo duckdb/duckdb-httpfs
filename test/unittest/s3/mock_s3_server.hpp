@@ -166,6 +166,8 @@ struct MockS3RangeConfig {
 	idx_t truncated_bytes = 1;
 	//! Advertise byte-range support on HEAD responses
 	bool advertise = true;
+	//! Leave Content-Range out of range responses, as a browser does when CORS does not expose it
+	bool hide_content_range = false;
 	//! Hold the first range response body until a second range request arrives
 	bool block_first_body_until_second = false;
 	//! Hold this exact range response body until release_range has emitted its body

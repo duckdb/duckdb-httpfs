@@ -1121,6 +1121,10 @@ public:
 		const string proxy_bucket_path = "https?://[^/]+" + bucket_path;
 		const string proxy_bucket_path_with_slash = proxy_bucket_path + "/";
 		server.set_post_routing_handler([this](const httplib::Request &, httplib::Response &response) {
+			if (config.range.hide_content_range) {
+				auto content_range = response.headers.equal_range("Content-Range");
+				response.headers.erase(content_range.first, content_range.second);
+			}
 			if (!response.has_header("X-Mock-Successful-Short-Response")) {
 				return;
 			}

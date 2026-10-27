@@ -358,11 +358,13 @@ CREATE OR REPLACE SECRET s3_rejected_headers (
 }
 
 static void RunS3RegionRedirectScenario(const string &client_implementation, bool list_request,
-                                        MockS3RegionRedirectForm form = MockS3RegionRedirectForm::HEADER) {
+                                        MockS3RegionRedirectForm form = MockS3RegionRedirectForm::HEADER,
+                                        bool hide_content_range = false) {
 	MockS3ServerConfig config;
 	config.auth.stale_key_id = "NEVER_STALE";
 	config.auth.required_region = "us-east-1";
 	config.auth.region_redirect_form = form;
+	config.range.hide_content_range = hide_content_range;
 	MockS3Server server(std::move(config));
 	const int redirect_status = form == MockS3RegionRedirectForm::BODY_REGION ? 400 : 301;
 
@@ -408,9 +410,11 @@ CREATE SECRET s3_region_redirect (
 
 		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 		auto handle = fs.OpenFile(S3TestHelper::S3_PATH, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
-		char result;
-		handle->Read(QueryContext(*con.context), &result, 1, 0);
-		REQUIRE(result == server.ObjectData()[0]);
+		// the whole object, not just its start: a size taken from the region probe's range would truncate it
+		REQUIRE(handle->GetFileSize() == server.ObjectData().size());
+		string result(server.ObjectData().size(), '\0');
+		handle->Read(QueryContext(*con.context), &result[0], result.size(), 0);
+		REQUIRE(result == server.ObjectData());
 		S3TestHelper::RequireQueryOk(con, "COMMIT");
 	}
 
@@ -437,9 +441,11 @@ CREATE SECRET s3_region_redirect (
 	REQUIRE(saw_redirect);
 	REQUIRE(saw_success);
 	if (!list_request) {
-		// a HEAD that fails with a 400 is retried as a ranged GET, which answers in the bucket's region without a
-		// second HEAD; a 301 is repeated as a HEAD once the header named the region
-		REQUIRE(head_count == (form == MockS3RegionRedirectForm::BODY_REGION ? 1 : 2));
+		// a HEAD that fails with a 400 is retried as a ranged GET, which answers in the bucket's region; it is followed
+		// by a second HEAD only when its Content-Range, the object's size, is hidden. A 301 is repeated as a HEAD
+		// once the header named the region
+		idx_t expected_heads = form == MockS3RegionRedirectForm::BODY_REGION && !hide_content_range ? 1 : 2;
+		REQUIRE(head_count == expected_heads);
 		REQUIRE(saw_cached_region_get);
 	}
 
@@ -2787,6 +2793,13 @@ TEST_CASE("S3 region redirects are read from the error body when the header is n
 	}
 	SECTION("400 with the region in the body, list") {
 		RunS3RegionRedirectScenario("httplib", true, MockS3RegionRedirectForm::BODY_REGION);
+	}
+	// a browser also hides Content-Range unless CORS exposes it: the size then comes from a HEAD after the region fix
+	SECTION("400 with the region in the body, Content-Range hidden, httplib") {
+		RunS3RegionRedirectScenario("httplib", false, MockS3RegionRedirectForm::BODY_REGION, true);
+	}
+	SECTION("400 with the region in the body, Content-Range hidden, curl") {
+		RunS3RegionRedirectScenario("curl", false, MockS3RegionRedirectForm::BODY_REGION, true);
 	}
 }
 
