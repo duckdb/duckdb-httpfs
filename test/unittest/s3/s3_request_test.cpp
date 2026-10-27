@@ -438,7 +438,7 @@ CREATE SECRET s3_region_redirect (
 	REQUIRE(saw_success);
 	if (!list_request) {
 		// a HEAD that fails with a 400 is retried as a ranged GET, which answers in the bucket's region without a
-		// second HEAD; a 301 is repeated as a HEAD once the region is known
+		// second HEAD; a 301 is repeated as a HEAD once the header named the region
 		REQUIRE(head_count == (form == MockS3RegionRedirectForm::BODY_REGION ? 1 : 2));
 		REQUIRE(saw_cached_region_get);
 	}
@@ -1068,13 +1068,11 @@ TEST_CASE("S3 endpoint provenance controls AWS endpoint derivation", "[httpfs][s
 		REQUIRE(auth_params.GetURLParams().endpoint_mode == S3EndpointMode::AUTOMATIC);
 		REQUIRE(auth_params.GetCredentials().region == "us-east-1");
 		REQUIRE(auth_params.GetURLParams().endpoint.GetHost() == "s3.amazonaws.com");
-		// already there, nothing to fall back to
-		REQUIRE_FALSE(auth_params.CanUseGlobalEndpoint());
 		// a redirect still lands on the regional endpoint
 		auto redirected = auth_params.WithRegion("eu-west-1");
 		REQUIRE(redirected.GetURLParams().endpoint.GetHost() == "s3.eu-west-1.amazonaws.com");
 
-		// a configured region keeps the regional endpoint, with the global one as the fallback
+		// a configured region keeps the regional endpoint
 		auto regional_config = TestAuthConfig();
 		regional_config.endpoint = "s3.amazonaws.com";
 		regional_config.endpoint_mode = S3EndpointMode::EXPLICIT;
@@ -1083,11 +1081,18 @@ TEST_CASE("S3 endpoint provenance controls AWS endpoint derivation", "[httpfs][s
 		regional_config.use_global_endpoint = true;
 		auto regional = ResolveTestAuth(std::move(regional_config));
 		REQUIRE(regional.GetURLParams().endpoint.GetHost() == "s3.eu-west-1.amazonaws.com");
-		REQUIRE(regional.CanUseGlobalEndpoint());
-		REQUIRE(regional.WithGlobalEndpoint().GetURLParams().endpoint.GetHost() == "s3.amazonaws.com");
-		REQUIRE(regional.WithGlobalEndpoint().GetCredentials().region == "eu-west-1");
 
-		// off, the regional endpoint is used and never left
+		// path-style requests cannot be routed by the global endpoint, so they keep the regional one
+		auto path_config = TestAuthConfig();
+		path_config.endpoint = "s3.amazonaws.com";
+		path_config.endpoint_mode = S3EndpointMode::EXPLICIT;
+		path_config.credentials.access_key_id = "key";
+		path_config.url_style = "path";
+		path_config.use_global_endpoint = true;
+		auto path_style = ResolveTestAuth(std::move(path_config));
+		REQUIRE(path_style.GetURLParams().endpoint.GetHost() == "s3.us-east-1.amazonaws.com");
+
+		// off, the regional endpoint is used
 		auto off_config = TestAuthConfig();
 		off_config.endpoint = "s3.amazonaws.com";
 		off_config.endpoint_mode = S3EndpointMode::EXPLICIT;
@@ -1095,7 +1100,6 @@ TEST_CASE("S3 endpoint provenance controls AWS endpoint derivation", "[httpfs][s
 		off_config.use_global_endpoint = false;
 		auto off = ResolveTestAuth(std::move(off_config));
 		REQUIRE(off.GetURLParams().endpoint.GetHost() == "s3.us-east-1.amazonaws.com");
-		REQUIRE_FALSE(off.CanUseGlobalEndpoint());
 	}
 
 	SECTION("explicit endpoints keep their host") {
@@ -2773,15 +2777,8 @@ TEST_CASE("HTTP request sessions merge configured headers once", "[httpfs][s3][r
 
 TEST_CASE("S3 region redirects are read from the error body when the header is not there",
           "[httpfs][request-session][s3][region]") {
-	// a browser hands over only the headers the bucket's CORS rules expose, the body whenever the request was allowed.
-	// httplib drops the body of a 301 it means to follow, Location or not, so a streamed GET cannot read the endpoint
-	// from it until the vendored httplib treats a redirect without Location as a plain response
-	SECTION("301 with the endpoint in the body, curl") {
-		RunS3RegionRedirectScenario("curl", false, MockS3RegionRedirectForm::BODY_ENDPOINT);
-	}
-	SECTION("301 with the endpoint in the body, list") {
-		RunS3RegionRedirectScenario("httplib", true, MockS3RegionRedirectForm::BODY_ENDPOINT);
-	}
+	// a browser hands over only the headers the bucket's CORS rules expose, the body whenever the request was allowed:
+	// this is what a wrong signature region at the global endpoint looks like from there
 	SECTION("400 with the region in the body, httplib") {
 		RunS3RegionRedirectScenario("httplib", false, MockS3RegionRedirectForm::BODY_REGION);
 	}

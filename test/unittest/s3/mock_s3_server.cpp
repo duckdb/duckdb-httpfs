@@ -637,14 +637,6 @@ public:
 			response.set_header("x-amz-bucket-region", region);
 			response.set_content("<Error><Code>PermanentRedirect</Code></Error>", "application/xml");
 			break;
-		case MockS3RegionRedirectForm::BODY_ENDPOINT:
-			response.status = 301;
-			response.set_content("<Error><Code>PermanentRedirect</Code><Message>The bucket you are attempting to "
-			                     "access must be addressed using the specified endpoint.</Message><Endpoint>" +
-			                         config.object.bucket + ".s3." + region + ".amazonaws.com</Endpoint><Bucket>" +
-			                         config.object.bucket + "</Bucket></Error>",
-			                     "application/xml");
-			break;
 		case MockS3RegionRedirectForm::BODY_REGION:
 			response.status = 400;
 			response.set_content("<Error><Code>AuthorizationHeaderMalformed</Code><Message>The authorization header "

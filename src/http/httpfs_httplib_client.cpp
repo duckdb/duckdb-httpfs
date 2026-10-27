@@ -17,9 +17,8 @@ private:
 
 	public:
 		bool HandleResponse(const duckdb_httplib_openssl::Response &response) {
-			response_seen = true;
 			auto http_response = client.TransformResponse(response);
-			if (IsBufferedErrorStatus(static_cast<int>(http_response->status))) {
+			if (static_cast<int>(http_response->status) >= 400) {
 				deferred_response = std::move(http_response);
 				return true;
 			}
@@ -41,12 +40,6 @@ private:
 				deferred_response->body.append(data, data_length);
 				return true;
 			}
-			if (!response_seen) {
-				// httplib skips the response handler for a redirect it means to follow; S3's 301 has no Location to
-				// follow and names the bucket's region in its body, so keep it for the response httplib hands back
-				unhandled_body.append(data, data_length);
-				return true;
-			}
 			return !request.content_handler || request.content_handler(const_data_ptr_cast(data), chunk_size);
 		}
 
@@ -61,11 +54,7 @@ private:
 			if (stopped_response) {
 				return std::move(stopped_response);
 			}
-			auto response = client.TransformResult(result);
-			if (response && response->body.empty() && !unhandled_body.empty()) {
-				response->body = std::move(unhandled_body);
-			}
-			return response;
+			return client.TransformResult(result);
 		}
 
 	private:
@@ -85,8 +74,6 @@ private:
 		const TimePoint request_monotonic_start;
 		idx_t total_bytes = 0;
 		bool first_chunk = true;
-		bool response_seen = false;
-		string unhandled_body;
 		unique_ptr<HTTPResponse> deferred_response;
 		unique_ptr<HTTPResponse> stopped_response;
 	};

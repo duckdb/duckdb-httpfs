@@ -675,9 +675,6 @@ private:
 		if (GetChildText(root, root.namespace_uri, "Region", response.error_region) != ChildTextResult::FOUND) {
 			response.error_region.clear();
 		}
-		if (GetChildText(root, root.namespace_uri, "Endpoint", response.error_endpoint) != ChildTextResult::FOUND) {
-			response.error_endpoint.clear();
-		}
 	}
 
 	bool InterpretListObjectsV2(S3ListObjectsV2Result &result) const {
@@ -765,7 +762,6 @@ bool S3XMLResponseParser::TryParseError(const string &input, S3XMLError &error) 
 	error.message = std::move(response.error_message);
 	error.access_key_id = std::move(response.error_access_key_id);
 	error.region = std::move(response.error_region);
-	error.endpoint = std::move(response.error_endpoint);
 	return true;
 }
 

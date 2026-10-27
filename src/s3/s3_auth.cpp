@@ -147,7 +147,9 @@ S3AuthConfig S3AuthResolver::ReadConfig(S3KeyValueReader &secret_reader, const s
 	secret_reader.TryGetSecretKeyOrSetting("secret", "s3_secret_access_key", credentials.secret_access_key);
 	secret_reader.TryGetSecretKeyOrSetting("session_token", "s3_session_token", credentials.session_token);
 	secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", config.use_ssl);
-	secret_reader.TryGetSecretKeyOrSetting("use_global_endpoint", "s3_use_global_endpoint", config.use_global_endpoint);
+	// a setting only, like enable_global_s3_configuration: it chooses an endpoint, it is not part of a credential
+	secret_reader.TryGetSecretKeyOrSetting("s3_use_global_endpoint", "s3_use_global_endpoint",
+	                                       config.use_global_endpoint);
 	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", request_options.kms_key_id);
 	string sse_c_key;
 	if (secret_reader.TryGetSecretKey("sse_c_key", sse_c_key)) {
@@ -263,10 +265,10 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 			}
 		}
 		if (config.endpoint_mode == S3EndpointMode::AUTOMATIC && !credentials.region.empty()) {
-			// With no region configured, the global endpoint routes to the bucket's region, and answers a wrong
-			// signature region with a 400 that carries the bucket's region and its CORS headers, where the regional
-			// endpoint's 301 carries no CORS headers and a browser cannot read it
-			if (region_defaulted && config.use_global_endpoint) {
+			// With no region configured, the global endpoint routes a virtual-hosted request to the bucket's region,
+			// and answers a wrong signature region with a 400 that carries the bucket's region and its CORS headers,
+			// where the regional endpoint's 301 carries no CORS headers and a browser cannot read it
+			if (region_defaulted && config.use_global_endpoint && style == S3URLStyle::VIRTUAL_HOSTED) {
 				endpoint.SetHost("s3.amazonaws.com");
 			} else {
 				endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", credentials.region));
@@ -296,19 +298,6 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 			throw InvalidInputException("SSE_C_KEY requires both KEY_ID and SECRET for signed S3 requests");
 		}
 	}
-	return result;
-}
-
-bool S3AuthParams::CanUseGlobalEndpoint() const {
-	return url.use_global_endpoint && provider.GetType() == S3ProviderType::S3 &&
-	       url.endpoint_mode == S3EndpointMode::AUTOMATIC && url.style == S3URLStyle::VIRTUAL_HOSTED &&
-	       url.endpoint.GetHost() != "s3.amazonaws.com";
-}
-
-S3AuthParams S3AuthParams::WithGlobalEndpoint() const {
-	auto result = *this;
-	result.url.endpoint.SetHost("s3.amazonaws.com");
-	result.provider = S3Provider::Resolve(result.provider.GetRoute(), result.url.endpoint);
 	return result;
 }
 

@@ -52,8 +52,8 @@ struct S3AuthURLParams {
 	//! The URL's s3_endpoint parameter chose the host, instead of the configuration
 	bool endpoint_from_url = false;
 	bool enable_deprecated_url_parameters = false;
-	//! Address a bucket of unknown region through the global endpoint, and retry through it when a regional
-	//! endpoint's answer could not be read (s3_use_global_endpoint)
+	//! A signed request for a bucket of unknown region goes to the global endpoint, which routes to the bucket's
+	//! region, instead of us-east-1's (s3_use_global_endpoint)
 	bool use_global_endpoint = false;
 
 	bool ParseURLParameters() const {
@@ -176,10 +176,6 @@ public:
 		return refresh_identity;
 	}
 	S3AuthParams WithRegion(string region) const;
-	//! Whether the request can go through the global endpoint, s3.amazonaws.com, which routes to the bucket's
-	//! region: AWS S3 with an automatic endpoint and virtual-hosted URLs, and not there already
-	bool CanUseGlobalEndpoint() const;
-	S3AuthParams WithGlobalEndpoint() const;
 	bool operator==(const S3AuthParams &other) const;
 
 private:

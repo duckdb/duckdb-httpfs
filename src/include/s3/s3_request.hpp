@@ -184,8 +184,6 @@ struct S3RequestExecutor {
 	                                 const RequestCallback &request);
 
 	static bool SetSessionRegion(HTTPRequestSession &session, const string &correct_region, string &previous_region);
-	//! Move the session to the global endpoint; false when it is there already or the endpoint is not automatic
-	static bool TrySetSessionGlobalEndpoint(HTTPRequestSession &session);
 	static bool CredentialRefreshEnabled(optional_ptr<FileOpener> opener);
 	static S3RefreshableHTTPParams ReadRefreshableHTTPParams(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,
 	                                                         const string &path);

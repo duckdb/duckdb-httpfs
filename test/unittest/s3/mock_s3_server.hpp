@@ -55,9 +55,9 @@ struct MockS3ObjectConfig {
 	string generation;
 };
 
-//! How a region redirect names the bucket's region: the x-amz-bucket-region header on a 301, the Endpoint
-//! in the body of a 301 (PermanentRedirect), or the Region in the body of a 400 (AuthorizationHeaderMalformed)
-enum class MockS3RegionRedirectForm : uint8_t { HEADER, BODY_ENDPOINT, BODY_REGION };
+//! How a region redirect names the bucket's region: the x-amz-bucket-region header on a 301, or the Region in
+//! the body of a 400 (AuthorizationHeaderMalformed), which is all a browser can read
+enum class MockS3RegionRedirectForm : uint8_t { HEADER, BODY_REGION };
 
 struct MockS3AuthConfig {
 	string stale_key_id = "STALE_KEY";
