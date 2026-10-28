@@ -290,16 +290,13 @@ public:
 	//! As Attach, with a secret whose scope is `scope` instead of the table's
 	Attachment AttachWithScope(ClientContext &context, const string &table, const string &scope);
 	void Apply(const Attachment &attachment, OpenFileInfo &file) {
-		if (!file.extended_info) {
-			file.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
-		}
-		file.extended_info->file_secret = attachment;
+		file = file.WithFileSecret(attachment);
 	}
 	void Apply(const Attachment &attachment, FileGlobInput &input) {
 		input.file_secret = attachment;
 	}
 	void Apply(const Attachment &attachment, FileOpenerInfo &info) {
-		info.file_secret = attachment;
+		info = FileOpenerInfo(OpenFileInfo(info.file_path).WithFileSecret(attachment));
 	}
 	vector<Attachment> Attachments() {
 		lock_guard<mutex> guard(lock);
@@ -346,7 +343,7 @@ Attachment GovernedHost::AttachWithScope(ClientContext &context, const string &t
 }
 
 //! The file secret `name` of the transaction of `context`, for reading `path`
-shared_ptr<const KeyValueSecret> GetFileSecret(ClientContext &context, const string &name, const string &path) {
+shared_ptr<SecretEntry> GetFileSecret(ClientContext &context, const string &name, const string &path) {
 	return SecretManager::Get(context).GetFileSecret(context, name, path);
 }
 
@@ -1334,7 +1331,7 @@ TEST_CASE("No setting fills a key the table's credentials leave unset",
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
 	info.file_path = OrdersFile(0);
-	info.file_secret = table_credentials;
+	GovernedHost::Get().Apply(table_credentials, info);
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
 
@@ -1366,7 +1363,7 @@ TEST_CASE("Settings do not supply credentials the table's credentials leave unse
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
 	info.file_path = OrdersFile(0);
-	info.file_secret = table_credentials;
+	GovernedHost::Get().Apply(table_credentials, info);
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
 	auto &credentials = params.GetCredentials();
@@ -1408,7 +1405,7 @@ S3AuthParams ResolveWithHandle(Fixture &f, const string &table, const string &sc
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
 	info.file_path = path;
-	info.file_secret = table_credentials;
+	GovernedHost::Get().Apply(table_credentials, info);
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
 	return params;
@@ -1433,7 +1430,7 @@ TEST_CASE("A request with credentials and no file opener fails",
 	auto table_credentials = GovernedHost::Get().Attach(*f.con.context, "orders");
 	FileOpenerInfo info;
 	info.file_path = OrdersFile(0);
-	info.file_secret = table_credentials;
+	GovernedHost::Get().Apply(table_credentials, info);
 	string error;
 	try {
 		S3AuthResolver::Resolve(nullptr, info);
@@ -1561,8 +1558,8 @@ TEST_CASE("No SQL that takes a secret name reaches the table's credentials",
 		                                   name, ORDERS_BUCKET));
 		INFO(ResultText(*create));
 		// the credentials still hold the host's secret, and the governed scan still reads with it
-		REQUIRE(GetFileSecret(*f.con.context, table_credentials, OrdersFile(0))->TryGetValue("key_id").ToString() ==
-		        ORDERS_KEY);
+		auto entry = GetFileSecret(*f.con.context, table_credentials, OrdersFile(0));
+		REQUIRE(entry->secret->Cast<KeyValueSecret>().TryGetValue("key_id").ToString() == ORDERS_KEY);
 		f.con.Query("DROP SECRET IF EXISTS \"" + name + "\"");
 	}
 	auto mark = f.Mark();
@@ -1606,7 +1603,7 @@ TEST_CASE("The table's credentials serve only the transaction that loaded the ta
 		REQUIRE_THROWS(GetFileSecret(*other.context, table_credentials, OrdersFile(0)));
 		FileOpenerInfo info;
 		info.file_path = OrdersFile(0);
-		info.file_secret = table_credentials;
+		GovernedHost::Get().Apply(table_credentials, info);
 		REQUIRE_THROWS(S3AuthResolver::Resolve(&opener, info));
 		OpenFileInfo file(OrdersFile(0));
 		GovernedHost::Get().Apply(table_credentials, file);

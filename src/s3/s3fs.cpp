@@ -43,10 +43,7 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 	}
 	auto captured = request_session->Capture();
 	// the file secret travels with the session, so that a refresh renews it rather than a secret by path
-	string file_secret;
-	if (file.extended_info) {
-		file_secret = file.extended_info->file_secret;
-	}
+	auto file_secret = file.GetFileSecret();
 	request_session->TryPublish(captured.snapshot,
 	                            make_shared_ptr<S3RequestSnapshot>(
 	                                captured.snapshot->Params(), auth_params_p, file.path, weak_ptr<ClientContext>(),
@@ -216,10 +213,7 @@ BufferManager &S3FileSystem::GetBufferManager() {
 
 unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                       optional_ptr<FileOpener> opener) {
-	FileOpenerInfo info = {file.path};
-	if (file.extended_info) {
-		info.file_secret = file.extended_info->file_secret;
-	}
+	FileOpenerInfo info(file);
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 
 	auto request_session = HTTPRequestSession::Create(opener, info);

@@ -111,7 +111,8 @@ S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpener
                                      const S3AuthResolveOptions &options) {
 	// Without a FileOpener we cannot access settings or secrets.
 	if (!opener) {
-		if (!info.file_secret.empty()) {
+		string file_secret;
+		if (info.extended_info && info.extended_info->TryGetFileSecret(file_secret)) {
 			// rather than signing with whatever credentials the environment has
 			throw InvalidConfigurationException("The file secret for '%s' cannot be used without a file opener",
 			                                    info.file_path);

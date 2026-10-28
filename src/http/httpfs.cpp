@@ -84,7 +84,8 @@ private:
 			return std::move(result);
 		}
 		ReadSettings();
-		if (info && !info->file_secret.empty()) {
+		string file_secret;
+		if (info && info->extended_info && info->extended_info->TryGetFileSecret(file_secret)) {
 			ResetSettingsForFileSecret();
 		}
 		SetUserAgent();

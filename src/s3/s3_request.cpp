@@ -452,14 +452,14 @@ static bool IsAuthRefreshStatus(const HTTPResponse &response) {
 
 static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path,
                                      const S3AuthURLParams &previous_url, const string &file_secret) {
-	FileOpenerInfo info = {path, file_secret};
+	FileOpenerInfo info(OpenFileInfo(path).WithFileSecret(file_secret));
 	return S3AuthResolver::Resolve(opener, info, S3AuthResolveOptions::ForRefresh(previous_url));
 }
 
 S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(HTTPFSUtil &http_util,
                                                                      optional_ptr<FileOpener> opener,
                                                                      const string &path, const string &file_secret) {
-	FileOpenerInfo info = {path, file_secret};
+	FileOpenerInfo info(OpenFileInfo(path).WithFileSecret(file_secret));
 	auto params = HTTPFSUtil::InitializeRawParameters(http_util, opener, info);
 	return S3RefreshableHTTPParams(*params);
 }
@@ -1118,7 +1118,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 shared_ptr<HTTPRequestSession> S3RequestExecutor::CreateSession(optional_ptr<FileOpener> opener, const string &path,
                                                                 const S3AuthParams &auth_params,
                                                                 const string &file_secret) {
-	FileOpenerInfo info = {path, file_secret};
+	FileOpenerInfo info(OpenFileInfo(path).WithFileSecret(file_secret));
 	auto request_session = HTTPRequestSession::Create(opener, info);
 	weak_ptr<ClientContext> weak_context;
 	auto context = FileOpener::TryGetClientContext(opener);
