@@ -74,7 +74,8 @@ bool S3AuthCredentials::operator==(const S3AuthCredentials &other) const {
 bool S3AuthURLParams::operator==(const S3AuthURLParams &other) const {
 	return endpoint == other.endpoint && endpoint_mode == other.endpoint_mode && style == other.style &&
 	       compatibility_mode == other.compatibility_mode && endpoint_from_url == other.endpoint_from_url &&
-	       enable_deprecated_url_parameters == other.enable_deprecated_url_parameters;
+	       enable_deprecated_url_parameters == other.enable_deprecated_url_parameters &&
+	       use_global_endpoint == other.use_global_endpoint;
 }
 
 bool S3AuthRequestOptions::operator==(const S3AuthRequestOptions &other) const {
@@ -146,6 +147,9 @@ S3AuthConfig S3AuthResolver::ReadConfig(S3KeyValueReader &secret_reader, const s
 	secret_reader.TryGetSecretKeyOrSetting("secret", "s3_secret_access_key", credentials.secret_access_key);
 	secret_reader.TryGetSecretKeyOrSetting("session_token", "s3_session_token", credentials.session_token);
 	secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", config.use_ssl);
+	// a setting only, like enable_global_s3_configuration: it chooses an endpoint, it is not part of a credential
+	secret_reader.TryGetSecretKeyOrSetting("s3_use_global_endpoint", "s3_use_global_endpoint",
+	                                       config.use_global_endpoint);
 	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", request_options.kms_key_id);
 	string sse_c_key;
 	if (secret_reader.TryGetSecretKey("sse_c_key", sse_c_key)) {
@@ -249,6 +253,7 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	}
 	if (config.route.type == S3ProviderType::S3 &&
 	    (config.endpoint_mode == S3EndpointMode::AUTOMATIC || EndpointIsAWS(endpoint))) {
+		bool region_defaulted = false;
 		if (credentials.region.empty()) {
 			if (credentials.access_key_id.empty()) {
 				if (config.endpoint_mode == S3EndpointMode::AUTOMATIC) {
@@ -256,10 +261,18 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 				}
 			} else {
 				credentials.region = "us-east-1";
+				region_defaulted = true;
 			}
 		}
 		if (config.endpoint_mode == S3EndpointMode::AUTOMATIC && !credentials.region.empty()) {
-			endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", credentials.region));
+			// With no region configured, the global endpoint routes a virtual-hosted request to the bucket's region,
+			// and answers a wrong signature region with a 400 that carries the bucket's region and its CORS headers,
+			// where the regional endpoint's 301 carries no CORS headers and a browser cannot read it
+			if (region_defaulted && config.use_global_endpoint && style == S3URLStyle::VIRTUAL_HOSTED) {
+				endpoint.SetHost("s3.amazonaws.com");
+			} else {
+				endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", credentials.region));
+			}
 		}
 	}
 
@@ -267,7 +280,8 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	result.provider = S3Provider::Resolve(std::move(config.route), endpoint);
 	result.credentials = std::move(credentials);
 	result.url = {std::move(endpoint),       config.endpoint_mode,     style,
-	              config.compatibility_mode, config.endpoint_from_url, config.enable_deprecated_url_parameters};
+	              config.compatibility_mode, config.endpoint_from_url, config.enable_deprecated_url_parameters,
+	              config.use_global_endpoint};
 	result.request_options = std::move(request_options);
 	result.refresh_identity = {config.use_ssl};
 	if (result.request_options.sse_customer_key) {

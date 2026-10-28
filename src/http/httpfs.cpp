@@ -1023,6 +1023,22 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &
 	request_time = Timestamp::GetCurrentTimestamp();
 	auto response = hfs.GetRangeRequest(*this, path, {}, config, 0, nullptr, 2);
 	response_time = Timestamp::GetCurrentTimestamp();
+	if (response->status == HTTPStatusCode::PartialContent_206 &&
+	    !HTTPFileInfoParser::TryParseContentRange(response->headers).IsValid()) {
+		// The object's size is only in Content-Range, which a browser hides unless CORS exposes it; the probe's own
+		// Content-Length is the length of the range. The probe may have corrected the request (an S3 region found
+		// in its error body), after which a HEAD succeeds where the first did not, so it is asked once more.
+		request_time = Timestamp::GetCurrentTimestamp();
+		auto head_response = hfs.HeadRequest(*this, path, {});
+		response_time = Timestamp::GetCurrentTimestamp();
+		if (head_response->status == HTTPStatusCode::OK_200) {
+			return head_response;
+		}
+		throw IOException("Unable to determine the size of \"%s\": the HEAD request failed with %d, and the ranged GET "
+		                  "used instead did not expose Content-Range (a browser hides it unless the server's CORS "
+		                  "rules expose it)",
+		                  path, static_cast<int>(head_response->status));
+	}
 	if (response->status == HTTPStatusCode::PartialContent_206 || response->status == HTTPStatusCode::Accepted_202 ||
 	    response->status == HTTPStatusCode::OK_200) {
 		return response;

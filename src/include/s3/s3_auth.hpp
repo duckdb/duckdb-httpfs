@@ -52,6 +52,9 @@ struct S3AuthURLParams {
 	//! The URL's s3_endpoint parameter chose the host, instead of the configuration
 	bool endpoint_from_url = false;
 	bool enable_deprecated_url_parameters = false;
+	//! A signed request for a bucket of unknown region goes to the global endpoint, which routes to the bucket's
+	//! region, instead of us-east-1's (s3_use_global_endpoint)
+	bool use_global_endpoint = false;
 
 	bool ParseURLParameters() const {
 		return enable_deprecated_url_parameters && !compatibility_mode;
@@ -92,6 +95,14 @@ struct S3AuthConfig {
 	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
 	string url_style;
 	bool use_ssl = true;
+	//! A browser reads a regional endpoint's redirect to another region as a blocked response; the global
+	//! endpoint's answer it can read, so the wasm build uses it by default
+#ifdef __EMSCRIPTEN__
+	static constexpr bool USE_GLOBAL_ENDPOINT_DEFAULT = true;
+#else
+	static constexpr bool USE_GLOBAL_ENDPOINT_DEFAULT = false;
+#endif
+	bool use_global_endpoint = USE_GLOBAL_ENDPOINT_DEFAULT;
 	bool compatibility_mode = false;
 	bool endpoint_from_url = false;
 	bool enable_deprecated_url_parameters = false;

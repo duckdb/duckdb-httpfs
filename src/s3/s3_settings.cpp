@@ -260,6 +260,11 @@ void S3Settings::Register(DBConfig &config) {
 	                          SetScope::SESSION, false, true);
 	config.AddExtensionOption("s3_use_ssl", "S3 use SSL", LogicalType::BOOLEAN, Value(true), nullptr, SetScope::SESSION,
 	                          false, true);
+	config.AddExtensionOption("s3_use_global_endpoint",
+	                          "Address S3 buckets of unknown region through s3.amazonaws.com, which routes to their "
+	                          "region and reports a wrong region in a way a browser can read",
+	                          LogicalType::BOOLEAN, Value(S3AuthConfig::USE_GLOBAL_ENDPOINT_DEFAULT), nullptr,
+	                          SetScope::SESSION, false, false);
 	config.AddExtensionOption("s3_kms_key_id", "S3 KMS Key ID", LogicalType::VARCHAR, Value(), nullptr,
 	                          SetScope::SESSION, false, true);
 	config.AddExtensionOption("s3_url_compatibility_mode", "Disable Globs and Query Parameters on S3 URLs",

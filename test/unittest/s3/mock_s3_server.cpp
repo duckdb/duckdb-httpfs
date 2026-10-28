@@ -630,9 +630,21 @@ public:
 	}
 
 	void SendRegionRedirect(const httplib::Request &request, httplib::Response &response) const {
-		response.status = 301;
-		response.set_header("x-amz-bucket-region", config.auth.required_region);
-		response.set_content("<Error><Code>PermanentRedirect</Code></Error>", "application/xml");
+		auto &region = config.auth.required_region;
+		switch (config.auth.region_redirect_form) {
+		case MockS3RegionRedirectForm::HEADER:
+			response.status = 301;
+			response.set_header("x-amz-bucket-region", region);
+			response.set_content("<Error><Code>PermanentRedirect</Code></Error>", "application/xml");
+			break;
+		case MockS3RegionRedirectForm::BODY_REGION:
+			response.status = 400;
+			response.set_content("<Error><Code>AuthorizationHeaderMalformed</Code><Message>The authorization header "
+			                     "is malformed; the region is wrong; expecting '" +
+			                         region + "'</Message><Region>" + region + "</Region></Error>",
+			                     "application/xml");
+			break;
+		}
 		Record(request, response.status);
 	}
 
@@ -1109,6 +1121,10 @@ public:
 		const string proxy_bucket_path = "https?://[^/]+" + bucket_path;
 		const string proxy_bucket_path_with_slash = proxy_bucket_path + "/";
 		server.set_post_routing_handler([this](const httplib::Request &, httplib::Response &response) {
+			if (config.range.hide_content_range) {
+				auto content_range = response.headers.equal_range("Content-Range");
+				response.headers.erase(content_range.first, content_range.second);
+			}
 			if (!response.has_header("X-Mock-Successful-Short-Response")) {
 				return;
 			}
@@ -1174,6 +1190,10 @@ public:
 				return;
 			}
 			const auto &data = *object_data;
+			if (ShouldRedirectRegion(request)) {
+				SendRegionRedirect(request, response);
+				return;
+			}
 			if (ShouldRejectStaleCredentials(request)) {
 				SendAuthFailure(request, response);
 				return;

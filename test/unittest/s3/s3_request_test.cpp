@@ -357,11 +357,16 @@ CREATE OR REPLACE SECRET s3_rejected_headers (
 	REQUIRE(server.Observations().empty());
 }
 
-static void RunS3RegionRedirectScenario(const string &client_implementation, bool list_request) {
+static void RunS3RegionRedirectScenario(const string &client_implementation, bool list_request,
+                                        MockS3RegionRedirectForm form = MockS3RegionRedirectForm::HEADER,
+                                        bool hide_content_range = false) {
 	MockS3ServerConfig config;
 	config.auth.stale_key_id = "NEVER_STALE";
 	config.auth.required_region = "us-east-1";
+	config.auth.region_redirect_form = form;
+	config.range.hide_content_range = hide_content_range;
 	MockS3Server server(std::move(config));
+	const int redirect_status = form == MockS3RegionRedirectForm::BODY_REGION ? 400 : 301;
 
 	DuckDB db(nullptr);
 	Connection con(db);
@@ -405,9 +410,11 @@ CREATE SECRET s3_region_redirect (
 
 		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 		auto handle = fs.OpenFile(S3TestHelper::S3_PATH, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
-		char result;
-		handle->Read(QueryContext(*con.context), &result, 1, 0);
-		REQUIRE(result == server.ObjectData()[0]);
+		// the whole object, not just its start: a size taken from the region probe's range would truncate it
+		REQUIRE(handle->GetFileSize() == server.ObjectData().size());
+		string result(server.ObjectData().size(), '\0');
+		handle->Read(QueryContext(*con.context), &result[0], result.size(), 0);
+		REQUIRE(result == server.ObjectData());
 		S3TestHelper::RequireQueryOk(con, "COMMIT");
 	}
 
@@ -421,10 +428,10 @@ CREATE SECRET s3_region_redirect (
 		REQUIRE(MockS3HeaderValues(observation, "X-AmZ-Meta-Region") == vector<string> {"region-value"});
 		REQUIRE(StringUtil::Contains(observation.authorization, "x-amz-meta-region"));
 		head_count += observation.method == "HEAD";
-		if (observation.status == 301 && observation.region == "eu-west-1") {
+		if (observation.status == redirect_status && observation.region == "eu-west-1") {
 			saw_redirect = true;
 		}
-		if (observation.status == 200 && observation.region == "us-east-1") {
+		if ((observation.status == 200 || observation.status == 206) && observation.region == "us-east-1") {
 			saw_success = true;
 		}
 		if (observation.method == "GET" && observation.region == "us-east-1") {
@@ -434,7 +441,11 @@ CREATE SECRET s3_region_redirect (
 	REQUIRE(saw_redirect);
 	REQUIRE(saw_success);
 	if (!list_request) {
-		REQUIRE(head_count == 2);
+		// a HEAD that fails with a 400 is retried as a ranged GET, which answers in the bucket's region; it is followed
+		// by a second HEAD only when its Content-Range, the object's size, is hidden. A 301 is repeated as a HEAD
+		// once the header named the region
+		idx_t expected_heads = form == MockS3RegionRedirectForm::BODY_REGION && !hide_content_range ? 1 : 2;
+		REQUIRE(head_count == expected_heads);
 		REQUIRE(saw_cached_region_get);
 	}
 
@@ -1051,6 +1062,50 @@ TEST_CASE("S3 endpoint provenance controls AWS endpoint derivation", "[httpfs][s
 		REQUIRE(credentialed.GetURLParams().endpoint_mode == S3EndpointMode::AUTOMATIC);
 		REQUIRE(credentialed.GetCredentials().region == "us-east-1");
 		REQUIRE(credentialed.GetURLParams().endpoint.GetHost() == "s3.us-east-1.amazonaws.com");
+	}
+
+	SECTION("the global endpoint stands in for an unknown region when asked") {
+		auto config = TestAuthConfig();
+		config.endpoint = "s3.amazonaws.com";
+		config.endpoint_mode = S3EndpointMode::EXPLICIT;
+		config.credentials.access_key_id = "key";
+		config.use_global_endpoint = true;
+		auto auth_params = ResolveTestAuth(std::move(config));
+		REQUIRE(auth_params.GetURLParams().endpoint_mode == S3EndpointMode::AUTOMATIC);
+		REQUIRE(auth_params.GetCredentials().region == "us-east-1");
+		REQUIRE(auth_params.GetURLParams().endpoint.GetHost() == "s3.amazonaws.com");
+		// a redirect still lands on the regional endpoint
+		auto redirected = auth_params.WithRegion("eu-west-1");
+		REQUIRE(redirected.GetURLParams().endpoint.GetHost() == "s3.eu-west-1.amazonaws.com");
+
+		// a configured region keeps the regional endpoint
+		auto regional_config = TestAuthConfig();
+		regional_config.endpoint = "s3.amazonaws.com";
+		regional_config.endpoint_mode = S3EndpointMode::EXPLICIT;
+		regional_config.credentials.access_key_id = "key";
+		regional_config.credentials.region = "eu-west-1";
+		regional_config.use_global_endpoint = true;
+		auto regional = ResolveTestAuth(std::move(regional_config));
+		REQUIRE(regional.GetURLParams().endpoint.GetHost() == "s3.eu-west-1.amazonaws.com");
+
+		// path-style requests cannot be routed by the global endpoint, so they keep the regional one
+		auto path_config = TestAuthConfig();
+		path_config.endpoint = "s3.amazonaws.com";
+		path_config.endpoint_mode = S3EndpointMode::EXPLICIT;
+		path_config.credentials.access_key_id = "key";
+		path_config.url_style = "path";
+		path_config.use_global_endpoint = true;
+		auto path_style = ResolveTestAuth(std::move(path_config));
+		REQUIRE(path_style.GetURLParams().endpoint.GetHost() == "s3.us-east-1.amazonaws.com");
+
+		// off, the regional endpoint is used
+		auto off_config = TestAuthConfig();
+		off_config.endpoint = "s3.amazonaws.com";
+		off_config.endpoint_mode = S3EndpointMode::EXPLICIT;
+		off_config.credentials.access_key_id = "key";
+		off_config.use_global_endpoint = false;
+		auto off = ResolveTestAuth(std::move(off_config));
+		REQUIRE(off.GetURLParams().endpoint.GetHost() == "s3.us-east-1.amazonaws.com");
 	}
 
 	SECTION("explicit endpoints keep their host") {
@@ -2723,6 +2778,28 @@ TEST_CASE("HTTP request sessions merge configured headers once", "[httpfs][s3][r
 	}
 	SECTION("curl") {
 		RunS3HeaderScenario("curl");
+	}
+}
+
+TEST_CASE("S3 region redirects are read from the error body when the header is not there",
+          "[httpfs][request-session][s3][region]") {
+	// a browser hands over only the headers the bucket's CORS rules expose, the body whenever the request was allowed:
+	// this is what a wrong signature region at the global endpoint looks like from there
+	SECTION("400 with the region in the body, httplib") {
+		RunS3RegionRedirectScenario("httplib", false, MockS3RegionRedirectForm::BODY_REGION);
+	}
+	SECTION("400 with the region in the body, curl") {
+		RunS3RegionRedirectScenario("curl", false, MockS3RegionRedirectForm::BODY_REGION);
+	}
+	SECTION("400 with the region in the body, list") {
+		RunS3RegionRedirectScenario("httplib", true, MockS3RegionRedirectForm::BODY_REGION);
+	}
+	// a browser also hides Content-Range unless CORS exposes it: the size then comes from a HEAD after the region fix
+	SECTION("400 with the region in the body, Content-Range hidden, httplib") {
+		RunS3RegionRedirectScenario("httplib", false, MockS3RegionRedirectForm::BODY_REGION, true);
+	}
+	SECTION("400 with the region in the body, Content-Range hidden, curl") {
+		RunS3RegionRedirectScenario("curl", false, MockS3RegionRedirectForm::BODY_REGION, true);
 	}
 }
 
