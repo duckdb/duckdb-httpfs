@@ -956,6 +956,74 @@ TEST_CASE("A governed scan is not served what a path read cached",
 	REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY}));
 }
 
+TEST_CASE("A governed scan and a path read of the same files both succeed, each with its own credentials",
+          "[httpfs][s3][file_credentials][file_credentials_r4]") {
+	auto config = MakeConfig();
+	// in this test the user's own credential may also read the table's bucket
+	config.auth.bucket_key_ids[ORDERS_BUCKET].push_back(USER_KEY);
+	Fixture f(config);
+	f.CreateUserSecret(f.con);
+	// every cache on, and one thread, so that a scan always sends the same requests
+	Fixture::Ok(f.con, "SET threads=1");
+	Fixture::Ok(f.con, "SET enable_external_file_cache=true");
+	Fixture::Ok(f.con, "SET parquet_metadata_cache=true");
+	Fixture::Ok(f.con, "SET enable_http_metadata_cache=true");
+	Fixture::Ok(f.con, "SET validate_external_file_cache='NO_VALIDATION'");
+	const string scan = "SELECT sum(i) FROM governed_scan('orders')";
+	const string path_read = "SELECT sum(i) FROM read_parquet('s3://" + string(ORDERS_BUCKET) + "/orders/*.parquet')";
+	// a governed scan caches nothing, so the caches are still empty after it
+	auto mark = f.Mark();
+	auto first = f.con.Query(scan);
+	INFO(ResultText(*first));
+	REQUIRE_FALSE(first->HasError());
+	REQUIRE(first->Collection().GetValue(0, 0).ToString() == EXPECTED_SUM);
+	auto alone = Count(f.Since(mark), ORDERS_BUCKET, ORDERS_KEY, "", true);
+	REQUIRE(alone > 0);
+	vector<string> statements;
+	bool cached_by_path = false;
+	SECTION("one query, the scan first") {
+		statements = {"SELECT (" + scan + "), (" + path_read + ")"};
+	}
+	SECTION("one query, the path read first") {
+		statements = {"SELECT (" + path_read + "), (" + scan + ")"};
+	}
+	SECTION("one transaction, the scan first") {
+		statements = {"BEGIN TRANSACTION", scan, path_read, "COMMIT"};
+	}
+	SECTION("one transaction, the path read first") {
+		statements = {"BEGIN TRANSACTION", path_read, scan, "COMMIT"};
+	}
+	SECTION("one query, with the files cached by an earlier path read") {
+		Fixture::Ok(f.con, path_read);
+		statements = {"SELECT (" + scan + "), (" + path_read + ")"};
+		cached_by_path = true;
+	}
+	mark = f.Mark();
+	for (auto &statement : statements) {
+		auto r = f.con.Query(statement);
+		INFO(statement);
+		INFO(ResultText(*r));
+		REQUIRE_FALSE(r->HasError());
+		if (StringUtil::StartsWith(statement, "SELECT")) {
+			for (idx_t column = 0; column < r->ColumnCount(); column++) {
+				REQUIRE(r->Collection().GetValue(column, 0).ToString() == EXPECTED_SUM);
+			}
+		}
+	}
+	auto os = f.Since(mark);
+	INFO(MockS3DescribeObservations(os));
+	REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY, USER_KEY}));
+	auto files = GovernedHost::Get().Table("orders").files;
+	// the scan fetched every file itself, as often as alone: nothing the path read cached served it
+	REQUIRE(EveryFileFetchedWith(os, files, ORDERS_KEY));
+	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_KEY, "", true) == alone);
+	if (!cached_by_path) {
+		// with nothing cached before, the path read fetched every file with the user's credential: the scan
+		// cached nothing for it
+		REQUIRE(EveryFileFetchedWith(os, files, USER_KEY));
+	}
+}
+
 namespace {
 //! A server whose single object (MockS3Server::S3Path) reports one ETag on HEAD and another on GET, so that a read
 //! of it finds the object changed after it was opened
