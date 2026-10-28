@@ -3,7 +3,11 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/function/table_function.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 
 namespace duckdb {
 
@@ -79,6 +83,31 @@ shared_ptr<const string> HTTPFSUtil::GetCertificateBundle(const string &ca_cert_
 	lock_guard<mutex> guard(certificate_lock);
 	certificate_bundles[ca_cert_file] = bundle;
 	return bundle;
+}
+
+static unique_ptr<FunctionData> BindPreloadCACertificates(ClientContext &context, TableFunctionBindInput &input,
+                                                          vector<LogicalType> &return_types,
+                                                          vector<Identifier> &names) {
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("Success");
+	return nullptr;
+}
+
+static void PreloadCACertificates(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &http_util = DBConfig::GetConfig(context).GetHTTPUtil();
+	const auto name = http_util.GetName();
+	if (name != "HTTPFS" && name != "HTTPFS-Curl" && name != "HTTPFS-Wasm") {
+		throw InvalidInputException("CA certificate preloading requires an HTTPFS HTTP client");
+	}
+	Value ca_cert_file;
+	context.TryGetCurrentSetting("ca_cert_file", ca_cert_file);
+	// Read at execution time, using the same filesystem checks and cache as HTTP requests.
+	http_util.Cast<HTTPFSUtil>().GetCertificateBundle(StringValue::Get(ca_cert_file));
+}
+
+void HTTPFSUtil::RegisterCertificateFunctions(ExtensionLoader &loader) {
+	loader.RegisterFunction(
+	    TableFunction("httpfs_preload_ca_certificates", {}, PreloadCACertificates, BindPreloadCACertificates));
 }
 
 } // namespace duckdb

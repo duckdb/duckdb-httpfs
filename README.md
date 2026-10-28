@@ -30,6 +30,25 @@ The resulting binary, that will also statically link and load the `httfps`, it's
 FROM read_blob('https://duckdb.org/');
 ```
 
+### Preloading CA certificates
+
+HTTPFS normally loads its CA certificate bundle on the first HTTP(S) request.
+To initialize the cache without a network request before restricting local file access, run:
+
+```sql
+LOAD httpfs;
+-- Optionally set ca_cert_file to a custom PEM bundle first.
+CALL httpfs_preload_ca_certificates();
+SET disabled_filesystems = 'LocalFileSystem';
+SET lock_configuration = true;
+```
+
+The command uses the current `ca_cert_file` setting, or the default bundle lookup when it is empty.
+It preserves filesystem permission checks and TLS verification. Connections with the same
+`ca_cert_file` setting and HTTP client provider reuse the cached bundle; changing `httpfs_client_implementation` or
+`httpfs_connection_caching` replaces that provider, so preload after configuring those settings.
+Platforms without a bundle file retain the existing native trust-store fallback.
+
 ## Testing
 Some tests querying remote resources can be run already without further setup:
 ```
