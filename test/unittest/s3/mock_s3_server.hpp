@@ -94,12 +94,20 @@ struct MockS3MetadataConfig {
 	vector<pair<string, string>> redirect_response_headers;
 };
 
+struct MockS3CompletionFault {
+	int status = 200;
+	string code = "InternalError";
+	string message = "Injected multipart completion failure";
+};
+
 struct MockS3CompletionFaultConfig {
 	//! Number of leading multipart-completion responses to replace
 	idx_t count = 0;
 	int status = 200;
 	string code = "InternalError";
 	string message = "Injected multipart completion failure";
+	//! Faults served after the leading ones, one response each in order
+	vector<MockS3CompletionFault> then;
 };
 
 struct MockS3FailureConfig {
@@ -139,6 +147,8 @@ struct MockS3FailureConfig {
 	bool failure_is_request_timeout = true;
 	//! Whether injected 400 bodies are truncated mid-XML (an open <Code> with no closing tag)
 	bool truncated_failure_body = false;
+	//! Whether injected 400 error documents use a namespace prefix and a CDATA code, as some S3-compatible stores do
+	bool namespaced_failure_body = false;
 };
 
 struct MockS3ListConfig {
@@ -153,9 +163,16 @@ struct MockS3ListConfig {
 	idx_t tree_page_size = 1000;
 };
 
+struct MockS3BulkDeleteResponse {
+	int status;
+	string body;
+};
+
 struct MockS3BulkDeleteConfig {
 	//! Reject DeleteObjects requests containing more than this many keys
 	optional_idx maximum_key_count;
+	//! Responses served to the leading DeleteObjects requests, one each in order, before the default empty DeleteResult
+	vector<MockS3BulkDeleteResponse> scripted;
 };
 
 struct MockS3RangeConfig {
@@ -176,6 +193,9 @@ struct MockS3RangeConfig {
 };
 
 struct MockS3FullGetConfig {
+	//! Answer this many leading full (range-less) object GETs with these statuses: a 5xx carries an S3 InternalError
+	//! document, a 2xx the object's bytes and headers (a 202 or 206 where the client expects a 200)
+	vector<int> scripted_statuses;
 	//! Send successful responses with chunked transfer encoding and no Content-Length
 	bool chunked = false;
 	//! Hold the response body until ReleaseFullGet is called
