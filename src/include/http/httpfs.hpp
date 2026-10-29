@@ -156,8 +156,8 @@ private:
 	mutable annotated_mutex read_config_lock;
 	HTTPReadConfig read_config DUCKDB_GUARDED_BY(read_config_lock);
 	bool read_config_initialized DUCKDB_GUARDED_BY(read_config_lock) = false;
-	HTTPReadETagVersionState read_version_state DUCKDB_GUARDED_BY(read_config_lock) =
-	    HTTPReadETagVersionState::UNDECIDED;
+	HTTPReadETagVersionState
+	    read_version_state DUCKDB_GUARDED_BY(read_config_lock) = HTTPReadETagVersionState::UNDECIDED;
 
 	//! Network throughput estimate
 	mutable annotated_mutex network_estimator_lock;
