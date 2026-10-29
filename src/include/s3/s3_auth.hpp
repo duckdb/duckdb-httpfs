@@ -49,6 +49,16 @@ struct S3AuthURLParams {
 	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
 	S3URLStyle style = S3URLStyle::VIRTUAL_HOSTED;
 	bool compatibility_mode = false;
+	//! The URL's s3_endpoint parameter chose the host, instead of the configuration
+	bool endpoint_from_url = false;
+	bool enable_deprecated_url_parameters = false;
+	//! A signed request for a bucket of unknown region goes to the global endpoint, which routes to the bucket's
+	//! region, instead of us-east-1's (s3_use_global_endpoint)
+	bool use_global_endpoint = false;
+
+	bool ParseURLParameters() const {
+		return enable_deprecated_url_parameters && !compatibility_mode;
+	}
 
 	bool operator==(const S3AuthURLParams &other) const;
 };
@@ -85,7 +95,17 @@ struct S3AuthConfig {
 	S3EndpointMode endpoint_mode = S3EndpointMode::AUTOMATIC;
 	string url_style;
 	bool use_ssl = true;
+	//! A browser reads a regional endpoint's redirect to another region as a blocked response; the global
+	//! endpoint's answer it can read, so the wasm build uses it by default
+#ifdef __EMSCRIPTEN__
+	static constexpr bool USE_GLOBAL_ENDPOINT_DEFAULT = true;
+#else
+	static constexpr bool USE_GLOBAL_ENDPOINT_DEFAULT = false;
+#endif
+	bool use_global_endpoint = USE_GLOBAL_ENDPOINT_DEFAULT;
 	bool compatibility_mode = false;
+	bool endpoint_from_url = false;
+	bool enable_deprecated_url_parameters = false;
 
 	//! Request headers
 	S3AuthRequestOptions request_options;
@@ -169,9 +189,23 @@ private:
 	S3AuthRefreshIdentity refresh_identity;
 };
 
+struct S3AuthResolveOptions {
+	//! The database policy captured at operation start. Standalone readers default to disabled.
+	bool enable_deprecated_url_parameters = false;
+	//! Absent: resolve compatibility mode from the per-path configuration.
+	optional<bool> compatibility_mode;
+
+	static S3AuthResolveOptions ForOperation(optional_ptr<FileOpener> opener);
+	static S3AuthResolveOptions ForRefresh(const S3AuthURLParams &previous_url);
+	void ApplyTo(S3AuthConfig &config) const;
+};
+
 struct S3AuthResolver {
 	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
-	static S3AuthParams Resolve(S3KeyValueReader &secret_reader, const string &file_path);
+	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info,
+	                            const S3AuthResolveOptions &options);
+	static S3AuthParams Resolve(S3KeyValueReader &secret_reader, const string &file_path,
+	                            const S3AuthResolveOptions &options = {});
 	static S3AuthParams Resolve(S3AuthConfig config, const string &file_path);
 
 private:

@@ -377,6 +377,7 @@ static void RunUserSpecifiedVersionRead(const string &client_implementation, boo
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureS3ReadTest(db, con, server, client_implementation);
+	RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	RequireQueryOk(con, string("SET s3_version_id_pinning=") + (pinning_enabled ? "true" : "false"));
 	RequireQueryOk(con, string("SET force_download=") + (full_download ? "true" : "false"));
 	RequireQueryOk(con, "BEGIN TRANSACTION");
@@ -585,6 +586,7 @@ TEST_CASE("explicit S3 versions reject writes deletes and wildcard globs before 
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureS3ReadTest(db, con, server, "httplib");
+	RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	const auto path = server.S3Path() + "?s3_version_id=user-version";
 	RequireQueryOk(con, "BEGIN TRANSACTION");
@@ -613,6 +615,7 @@ TEST_CASE("Explicit S3 versions survive region redirects and cached metadata", "
 			DuckDB db(nullptr);
 			Connection con(db);
 			ConfigureS3ReadTest(db, con, server, client);
+			RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 			RequireQueryOk(con, "SET enable_http_metadata_cache=true");
 			RequireQueryOk(con, "SET s3_version_id_pinning=false");
 			auto &fs = FileSystem::GetFileSystem(*con.context);

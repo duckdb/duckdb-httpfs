@@ -1,6 +1,7 @@
 #include "s3/s3_auth.hpp"
 
 #include "s3/s3_url.hpp"
+#include "s3/s3_settings.hpp"
 
 #include "duckdb/common/crypto/md5.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -72,7 +73,9 @@ bool S3AuthCredentials::operator==(const S3AuthCredentials &other) const {
 
 bool S3AuthURLParams::operator==(const S3AuthURLParams &other) const {
 	return endpoint == other.endpoint && endpoint_mode == other.endpoint_mode && style == other.style &&
-	       compatibility_mode == other.compatibility_mode;
+	       compatibility_mode == other.compatibility_mode && endpoint_from_url == other.endpoint_from_url &&
+	       enable_deprecated_url_parameters == other.enable_deprecated_url_parameters &&
+	       use_global_endpoint == other.use_global_endpoint;
 }
 
 bool S3AuthRequestOptions::operator==(const S3AuthRequestOptions &other) const {
@@ -80,21 +83,51 @@ bool S3AuthRequestOptions::operator==(const S3AuthRequestOptions &other) const {
 	       requester_pays == other.requester_pays && user_project == other.user_project;
 }
 
+S3AuthResolveOptions S3AuthResolveOptions::ForOperation(optional_ptr<FileOpener> opener) {
+	S3AuthResolveOptions options;
+	options.enable_deprecated_url_parameters = S3Settings::URLParametersEnabled(opener);
+	return options;
+}
+
+S3AuthResolveOptions S3AuthResolveOptions::ForRefresh(const S3AuthURLParams &previous_url) {
+	S3AuthResolveOptions options;
+	options.enable_deprecated_url_parameters = previous_url.enable_deprecated_url_parameters;
+	options.compatibility_mode = previous_url.compatibility_mode;
+	return options;
+}
+
+void S3AuthResolveOptions::ApplyTo(S3AuthConfig &config) const {
+	config.enable_deprecated_url_parameters = enable_deprecated_url_parameters;
+	if (compatibility_mode.has_value()) {
+		config.compatibility_mode = *compatibility_mode;
+	}
+}
+
 S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info) {
+	// Capture the database policy before looking up per-path configuration.
+	return Resolve(opener, info, S3AuthResolveOptions::ForOperation(opener));
+}
+
+S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info,
+                                     const S3AuthResolveOptions &options) {
 	// Without a FileOpener we cannot access settings or secrets.
 	if (!opener) {
 		S3AuthConfig config;
 		config.route = S3UrlScheme::MatchRoutedUrl(info.file_path);
+		options.ApplyTo(config);
 		return Resolve(std::move(config), info.file_path);
 	}
 
 	auto secret_types = S3SecretConfig::SecretTypes();
 	S3KeyValueReader secret_reader(*opener, info, secret_types.data(), secret_types.size());
-	return Resolve(secret_reader, info.file_path);
+	return Resolve(secret_reader, info.file_path, options);
 }
 
-S3AuthParams S3AuthResolver::Resolve(S3KeyValueReader &secret_reader, const string &file_path) {
-	return Resolve(ReadConfig(secret_reader, file_path), file_path);
+S3AuthParams S3AuthResolver::Resolve(S3KeyValueReader &secret_reader, const string &file_path,
+                                     const S3AuthResolveOptions &options) {
+	auto config = ReadConfig(secret_reader, file_path);
+	options.ApplyTo(config);
+	return Resolve(std::move(config), file_path);
 }
 
 static void SetEndpoint(S3AuthConfig &config, string endpoint) {
@@ -114,6 +147,9 @@ S3AuthConfig S3AuthResolver::ReadConfig(S3KeyValueReader &secret_reader, const s
 	secret_reader.TryGetSecretKeyOrSetting("secret", "s3_secret_access_key", credentials.secret_access_key);
 	secret_reader.TryGetSecretKeyOrSetting("session_token", "s3_session_token", credentials.session_token);
 	secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", config.use_ssl);
+	// a setting only, like enable_global_s3_configuration: it chooses an endpoint, it is not part of a credential
+	secret_reader.TryGetSecretKeyOrSetting("s3_use_global_endpoint", "s3_use_global_endpoint",
+	                                       config.use_global_endpoint);
 	secret_reader.TryGetSecretKeyOrSetting("kms_key_id", "s3_kms_key_id", request_options.kms_key_id);
 	string sse_c_key;
 	if (secret_reader.TryGetSecretKey("sse_c_key", sse_c_key)) {
@@ -166,6 +202,13 @@ S3URLStyle S3AuthURLParams::ParseStyle(const string &url_style) {
 	                            url_style);
 }
 
+static string GetLegacyURLParameterHint(const S3AuthConfig &config, const string &file_path) {
+	if (!config.enable_deprecated_url_parameters && !config.compatibility_mode && file_path.find('?') != string::npos) {
+		return S3Settings::LegacyURLBehaviorHint();
+	}
+	return string();
+}
+
 S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_path) {
 	S3Url::ApplyAuthQueryParameters(file_path, config);
 	auto &credentials = config.credentials;
@@ -190,14 +233,17 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	    request_options.user_project.empty()) {
 		throw InvalidInputException(
 		    "GCS Requester Pays requires a billing project; set USER_PROJECT in the GCS secret, "
-		    "set gcs_user_project, or pass gcs_user_project in the URL.");
+		    "or set gcs_user_project.%s",
+		    GetLegacyURLParameterHint(config, file_path));
 	}
 	if ((config.route.IsAlias() || config.route.type == S3ProviderType::R2) && EndpointIsUnresolved(config.endpoint)) {
 		if (config.route.type == S3ProviderType::R2) {
-			throw IOException("R2 requires an endpoint; provide account_id in the secret or s3_endpoint in the URL");
+			throw IOException("R2 requires an endpoint; set ACCOUNT_ID or ENDPOINT in the R2 secret%s",
+			                  GetLegacyURLParameterHint(config, file_path));
 		}
 		throw IOException("An aliased URL scheme requires an endpoint; provide ENDPOINT in the secret, set "
-		                  "s3_endpoint, or pass s3_endpoint in the URL");
+		                  "s3_endpoint%s",
+		                  GetLegacyURLParameterHint(config, file_path));
 	}
 
 	auto endpoint = NormalizedS3Endpoint::Parse(config.endpoint, config.use_ssl);
@@ -207,6 +253,7 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	}
 	if (config.route.type == S3ProviderType::S3 &&
 	    (config.endpoint_mode == S3EndpointMode::AUTOMATIC || EndpointIsAWS(endpoint))) {
+		bool region_defaulted = false;
 		if (credentials.region.empty()) {
 			if (credentials.access_key_id.empty()) {
 				if (config.endpoint_mode == S3EndpointMode::AUTOMATIC) {
@@ -214,17 +261,27 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 				}
 			} else {
 				credentials.region = "us-east-1";
+				region_defaulted = true;
 			}
 		}
 		if (config.endpoint_mode == S3EndpointMode::AUTOMATIC && !credentials.region.empty()) {
-			endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", credentials.region));
+			// With no region configured, the global endpoint routes a virtual-hosted request to the bucket's region,
+			// and answers a wrong signature region with a 400 that carries the bucket's region and its CORS headers,
+			// where the regional endpoint's 301 carries no CORS headers and a browser cannot read it
+			if (region_defaulted && config.use_global_endpoint && style == S3URLStyle::VIRTUAL_HOSTED) {
+				endpoint.SetHost("s3.amazonaws.com");
+			} else {
+				endpoint.SetHost(StringUtil::Format("s3.%s.amazonaws.com", credentials.region));
+			}
 		}
 	}
 
 	S3AuthParams result;
 	result.provider = S3Provider::Resolve(std::move(config.route), endpoint);
 	result.credentials = std::move(credentials);
-	result.url = {std::move(endpoint), config.endpoint_mode, style, config.compatibility_mode};
+	result.url = {std::move(endpoint),       config.endpoint_mode,     style,
+	              config.compatibility_mode, config.endpoint_from_url, config.enable_deprecated_url_parameters,
+	              config.use_global_endpoint};
 	result.request_options = std::move(request_options);
 	result.refresh_identity = {config.use_ssl};
 	if (result.request_options.sse_customer_key) {

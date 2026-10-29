@@ -2,6 +2,7 @@
 
 #include "duckdb/main/http/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "http/httpfs_transport.hpp"
 
@@ -62,7 +63,7 @@ public:
 	static constexpr bool DEFAULT_FORCE_DOWNLOAD = false;
 	static constexpr bool AUTO_FALLBACK_TO_FULL_DOWNLOAD = true;
 
-	//! Runtime parameters; append new fields and propagate them to duckdb-wasm
+	//! Runtime parameters owned by HTTPFS; browser clients consume only the HTTPParams base.
 	bool force_download = DEFAULT_FORCE_DOWNLOAD;
 	bool auto_fallback_to_full_download = AUTO_FALLBACK_TO_FULL_DOWNLOAD;
 	bool enable_server_cert_verification = DEFAULT_ENABLE_SERVER_CERT_VERIFICATION;
@@ -92,6 +93,9 @@ private:
 
 class HTTPFSUtil : public HTTPUtil {
 public:
+	explicit HTTPFSUtil(optional_ptr<DatabaseInstance> db = nullptr);
+
+public:
 	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
 	                                            optional_ptr<FileOpenerInfo> info) override;
 	//! Read HTTPFS settings without publishing a transport reuse domain.
@@ -99,6 +103,8 @@ public:
 	                                                        optional_ptr<FileOpenerInfo> info);
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
+	//! S3's 400 RequestTimeout is retryable; core only knows the generic statuses.
+	bool ShouldRetry(const BaseRequest &request, const HTTPResponse &response) override;
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
@@ -108,6 +114,18 @@ public:
 	                                        const string &details = "");
 
 	string GetName() const override;
+
+	//! The PEM bundle used to verify server certificates: the ca_cert_file setting, or else the first bundle found
+	//! at a well-known location. It is read through the database's file system, so allowed_paths applies to it.
+	//! Returns nullptr when no bundle is available, in which case the client relies on the platform's own store.
+	shared_ptr<const string> GetCertificateBundle(const string &ca_cert_file);
+	static bool IsSecureConnection(const string &proto_host_port);
+	//! A client's transport error, naming file descriptor exhaustion when that is what made it fail: the clients
+	//! report it as whatever step could not open its socket or file (a host lookup, a connection, memory).
+	static string DescribeRequestError(const string &client_error, int os_errno = 0);
+
+protected:
+	optional_ptr<DatabaseInstance> db;
 
 private:
 	friend struct HTTPFSParams;
@@ -122,15 +140,19 @@ private:
 	annotated_mutex transport_reuse_lock;
 	//! Exact reusable configurations retained by this provider.
 	vector<HTTPFSConnectionConfig> transport_reuse_domains DUCKDB_GUARDED_BY(transport_reuse_lock);
+	//! Protects the certificate bundle cache.
+	mutex certificate_lock;
+	//! Bundles read so far, by ca_cert_file setting (the empty string for the default locations).
+	unordered_map<string, shared_ptr<const string>> certificate_bundles;
 	//! Next non-recycled transport domain identity.
 	idx_t next_transport_reuse_domain DUCKDB_GUARDED_BY(transport_reuse_lock) = 1;
 };
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
-	explicit HTTPFSCurlUtil(bool connection_caching_enabled_p = true);
+	explicit HTTPFSCurlUtil(bool connection_caching_enabled_p = true, optional_ptr<DatabaseInstance> db = nullptr);
 
 public:
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;

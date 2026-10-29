@@ -5,12 +5,43 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/logging/logger.hpp"
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 #include "http/httpfs_curl_client.hpp"
 #endif
 
 namespace duckdb {
+
+namespace {
+
+class HTTPFSWasmUtil : public HTTPFSUtil {
+public:
+	HTTPFSWasmUtil(HTTPUtil &browser_util_p, DatabaseInstance &db) : HTTPFSUtil(db), browser_util(browser_util_p) {
+	}
+
+	unique_ptr<HTTPClient> InitializeClient(HTTPParams &params, const string &proto_host_port) override {
+		return browser_util.InitializeClient(params, proto_host_port);
+	}
+
+	HTTPTransportReusePolicy GetTransportReusePolicy() const override {
+		return HTTPTransportReusePolicy::EPHEMERAL;
+	}
+
+	string GetName() const override {
+		return "HTTPFS-Wasm";
+	}
+
+private:
+	bool GetDefaultVerifySSL(const HTTPFSParams &) const override {
+		return true;
+	}
+
+	//! The database transport manager retains previous providers until database destruction.
+	HTTPUtil &browser_util;
+};
+
+} // namespace
 
 static void RequireGlobalScope(SetScope scope, const char *setting) {
 	if (scope == SetScope::SESSION) {
@@ -43,9 +74,7 @@ static void SetCACertFile(ClientContext &context, SetScope, Value &parameter) {
 		parameter = Value("");
 		return;
 	}
-	LocalFileSystem fs;
-	ClientContextFileOpener opener(context);
-	parameter = Value(fs.CanonicalizePath(value, opener));
+	parameter = Value(FileSystem::GetFileSystem(context).CanonicalizePath(value));
 }
 
 static void SetExtraHTTPHeaders(ClientContext &, SetScope, Value &parameter) {
@@ -66,20 +95,22 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 	auto &config = DBConfig::GetConfig(context);
 	auto value = StringValue::Get(parameter);
 	auto &http_util = config.GetHTTPUtil();
-	if (http_util.GetName() == "WasmHTTPUtils") {
+	if (http_util.GetName() == "WasmHTTPUtils" || http_util.GetName() == "HTTPFS-Wasm") {
 		if (value == "wasm" || value == "default") {
 			return;
 		}
 		throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
 		                            "`default` are currently supported for duckdb-wasm");
 	}
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 	if (value == "curl" || value == "default") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(context)));
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(context), context.db.get()));
 		return;
 	}
 	if (value == "httplib") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
+		DUCKDB_LOG_WARNING(context, "The 'httplib' client implementation is deprecated and will be removed in a future "
+		                            "release; use 'curl' (the default) instead.");
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>(context.db.get()));
 		return;
 	}
 #endif
@@ -89,11 +120,11 @@ static void SetHTTPClientImplementation(ClientContext &context, SetScope scope, 
 
 static void SetHTTPConnectionCaching(ClientContext &context, SetScope scope, Value &parameter) {
 	RequireGlobalScope(scope, "httpfs_connection_caching");
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 	auto &config = DBConfig::GetConfig(context);
 	auto &http_util = config.GetHTTPUtil();
 	if (http_util.GetName() == "HTTPFS-Curl") {
-		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(BooleanValue::Get(parameter)));
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(BooleanValue::Get(parameter), context.db.get()));
 	}
 #endif
 }
@@ -126,30 +157,35 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("enable_curl_server_cert_verification",
 	                          "Enable server side certificate verification for CURL backend.", LogicalType::BOOLEAN,
-	                          Value(true));
+	                          Value(true), nullptr, SetScope::SESSION, false, true);
 	config.AddExtensionOption("enable_server_cert_verification", "Enable server side certificate verification.",
 	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("ca_cert_file", "Path to a custom certificate file for self-signed certificates.",
 	                          LogicalType::VARCHAR, Value(""), SetCACertFile);
 	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency", LogicalType::BOOLEAN,
-	                          Value(false));
+	                          Value(false), nullptr, SetScope::SESSION, true);
 	config.AddExtensionOption("hf_max_per_page", "Debug option to limit number of items returned in list requests",
-	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+	                          LogicalType::UBIGINT, Value::UBIGINT(0), nullptr, SetScope::SESSION, true);
 	config.AddExtensionOption("httpfs_client_implementation", "Select which HTTP client implementation is used",
 	                          LogicalType::VARCHAR, "default", SetHTTPClientImplementation, SetScope::GLOBAL);
 	config.AddExtensionOption("httpfs_connection_caching", "Enable connection caching for HTTP requests",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), SetHTTPConnectionCaching, SetScope::GLOBAL);
 }
 
-void HTTPSettings::Initialize(DBConfig &config) {
+void HTTPSettings::Initialize(DatabaseInstance &db) {
+	auto &config = DBConfig::GetConfig(db);
 	auto &http_util = config.GetHTTPUtil();
-	if (http_util.GetName() == "WasmHTTPUtils") {
+	if (http_util.GetName() == "HTTPFS-Wasm") {
 		return;
 	}
-#ifndef EMSCRIPTEN
-	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(config)));
+	if (http_util.GetName() == "WasmHTTPUtils") {
+		config.SetHTTPUtil(make_shared_ptr<HTTPFSWasmUtil>(http_util, db));
+		return;
+	}
+#ifndef __EMSCRIPTEN__
+	config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>(ConnectionCachingEnabled(config), db));
 #else
-	config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
+	config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>(db));
 #endif
 }
 

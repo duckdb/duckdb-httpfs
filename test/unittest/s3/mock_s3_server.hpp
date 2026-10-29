@@ -64,12 +64,17 @@ struct MockS3ObjectConfig {
 	string version;
 };
 
+//! How a region redirect names the bucket's region: the x-amz-bucket-region header on a 301, or the Region in
+//! the body of a 400 (AuthorizationHeaderMalformed), which is all a browser can read
+enum class MockS3RegionRedirectForm : uint8_t { HEADER, BODY_REGION };
+
 struct MockS3AuthConfig {
 	string stale_key_id = "STALE_KEY";
 	string stale_authorization;
 	int stale_status = 403;
 	string stale_error_code = "AccessDenied";
 	string required_region;
+	MockS3RegionRedirectForm region_redirect_form = MockS3RegionRedirectForm::HEADER;
 	MockS3RefreshTarget refresh_target = MockS3RefreshTarget::HEAD;
 };
 
@@ -94,6 +99,7 @@ struct MockS3MetadataConfig {
 	bool exact_empty_response_headers = false;
 	//! Emit one HTTP redirect before the successful HEAD response
 	bool redirect_head = false;
+	string redirect_location;
 	vector<pair<string, string>> redirect_response_headers;
 };
 
@@ -145,6 +151,7 @@ struct MockS3FailureConfig {
 };
 
 struct MockS3ListConfig {
+	vector<string> keys;
 	//! Return a truncated first page before the final object page
 	bool paginate = false;
 	//! Serve a generated tree of "<tree_prefix>d<NN>/f<NNN>.bin" keys instead of the single configured object
@@ -168,6 +175,8 @@ struct MockS3RangeConfig {
 	idx_t truncated_bytes = 1;
 	//! Advertise byte-range support on HEAD responses
 	bool advertise = true;
+	//! Leave Content-Range out of range responses, as a browser does when CORS does not expose it
+	bool hide_content_range = false;
 	//! Hold the first range response body until a second range request arrives
 	bool block_first_body_until_second = false;
 	//! Hold this exact range response body until release_range has emitted its body
@@ -306,6 +315,7 @@ private:
 	unique_ptr<Impl> impl;
 };
 
+string MockS3DigestBody(const string &body);
 string MockS3RefreshTargetName(MockS3RefreshTarget target);
 
 bool MockS3HasObservation(const vector<MockS3RequestObservation> &observations, const string &method,

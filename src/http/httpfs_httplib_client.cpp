@@ -3,6 +3,8 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
+#include <cerrno>
+
 namespace duckdb {
 
 class HTTPFSClient : public HTTPClient {
@@ -94,7 +96,16 @@ public:
 		}
 		client->set_follow_location(http_params.follow_location);
 		client->set_keep_alive(http_params.keep_alive);
-		client->set_ca_cert_path(http_params.ca_cert_file.c_str());
+		// the bundle is read through the database's file system and handed over in memory
+		shared_ptr<const string> bundle;
+		if (http_params.VerifyServerCertificate() && HTTPFSUtil::IsSecureConnection(GetBaseUrl())) {
+			bundle = http_params.http_util.Cast<HTTPFSUtil>().GetCertificateBundle(http_params.ca_cert_file);
+		}
+		if (bundle) {
+			client->set_ca_cert_store(duckdb_httplib_openssl::tls::create_ca_store(bundle->data(), bundle->size()));
+		} else {
+			client->set_ca_cert_path("");
+		}
 		client->enable_server_certificate_verification(http_params.VerifyServerCertificate());
 		client->set_write_timeout(NumericCast<time_t>(http_params.timeout),
 		                          NumericCast<time_t>(http_params.timeout_usec));
@@ -248,6 +259,8 @@ private:
 		for (auto &entry : params.extra_headers) {
 			headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
 		}
+		// every request is sent right after its headers: a failed one then reads only its own errno
+		errno = 0;
 		return headers;
 	}
 
@@ -263,12 +276,13 @@ private:
 	}
 
 	static unique_ptr<HTTPResponse> TransformResult(const duckdb_httplib_openssl::Result &res) {
+		const auto os_errno = errno;
 		if (res.error() == duckdb_httplib_openssl::Error::Success) {
 			auto &response = res.value();
 			return TransformResponse(response);
 		} else {
 			auto result = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			result->request_error = to_string(res.error());
+			result->request_error = HTTPFSUtil::DescribeRequestError(to_string(res.error()), os_errno);
 			return result;
 		}
 	}

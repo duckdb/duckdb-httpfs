@@ -26,6 +26,10 @@ static void AddDeleteHash(hash_t &result, idx_t value) {
 	CombineDeleteHash(result, std::hash<idx_t> {}(value));
 }
 
+static void AddDeleteHash(hash_t &result, int64_t value) {
+	CombineDeleteHash(result, std::hash<int64_t> {}(value));
+}
+
 template <class ENUM_TYPE>
 static void AddDeleteEnumHash(hash_t &result, ENUM_TYPE value) {
 	AddDeleteHash(result, static_cast<idx_t>(value));
@@ -51,6 +55,7 @@ static void AddDeleteAuthHash(hash_t &result, const S3AuthParams &auth_params) {
 	AddDeleteEnumHash(result, url.endpoint_mode);
 	AddDeleteEnumHash(result, url.style);
 	AddDeleteHash(result, static_cast<idx_t>(url.compatibility_mode));
+	AddDeleteHash(result, static_cast<idx_t>(url.enable_deprecated_url_parameters));
 
 	auto &request_options = auth_params.GetRequestOptions();
 	AddDeleteHash(result, request_options.kms_key_id);
@@ -111,7 +116,7 @@ struct S3DeleteSecretIdentity {
 	string storage_mode;
 	idx_t persist_type = 0;
 	vector<string> scope;
-	optional_idx score;
+	optional<int64_t> score;
 
 	bool operator==(const S3DeleteSecretIdentity &other) const {
 		return lookup_type == other.lookup_type && secret_type == other.secret_type && provider == other.provider &&
@@ -129,9 +134,9 @@ struct S3DeleteSecretIdentity {
 		for (const auto &entry : scope) {
 			AddDeleteHash(result, entry);
 		}
-		AddDeleteHash(result, static_cast<idx_t>(score.IsValid()));
-		if (score.IsValid()) {
-			AddDeleteHash(result, score.GetIndex());
+		AddDeleteHash(result, static_cast<idx_t>(score.has_value()));
+		if (score) {
+			AddDeleteHash(result, *score);
 		}
 	}
 };
@@ -186,7 +191,7 @@ struct S3DeleteBatchEntry {
 };
 
 static S3DeleteSecretIdentity GetDeleteSecretIdentity(const string &lookup_type, const SecretEntry &secret_entry,
-                                                      idx_t score) {
+                                                      int64_t score) {
 	auto &secret = *secret_entry.secret;
 	return {lookup_type,
 	        static_cast<const string &>(secret.GetType()),
@@ -212,7 +217,7 @@ static vector<S3DeleteSecretIdentity> GetSelectedSecretIdentities(optional_ptr<F
 			result.push_back({type, {}});
 			continue;
 		}
-		result.push_back(GetDeleteSecretIdentity(type, *match.secret_entry, NumericCast<idx_t>(match.score)));
+		result.push_back(GetDeleteSecretIdentity(type, *match.secret_entry, match.score));
 	}
 	return result;
 }
@@ -292,6 +297,11 @@ S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session
 }
 
 void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener) {
+	RemoveFiles(paths, opener, S3AuthResolveOptions::ForOperation(opener));
+}
+
+void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener,
+                               const S3AuthResolveOptions &options) {
 	if (paths.empty()) {
 		return;
 	}
@@ -300,7 +310,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 
 	for (auto &path : paths) {
 		FileOpenerInfo info = {path};
-		auto auth_params = S3AuthResolver::Resolve(opener, info);
+		auto auth_params = S3AuthResolver::Resolve(opener, info, options);
 		auto parsed_url = S3Url::Parse(path, auth_params);
 		if (parsed_url.GetObjectVersion().IsSet()) {
 			throw NotImplementedException("%s is only supported for reading",
@@ -369,11 +379,12 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 }
 
 void S3FileSystem::RemoveDirectory(const string &path, optional_ptr<FileOpener> opener) {
+	const auto options = S3AuthResolveOptions::ForOperation(opener);
 	vector<string> files_to_remove;
-	ListFiles(
-	    path, [&](const string &file, bool is_dir) { files_to_remove.push_back(file); }, opener.get());
+	ListFilesExtended(
+	    path, [&](OpenFileInfo &file) { files_to_remove.push_back(JoinPath(path, file.path)); }, opener, options);
 
-	RemoveFiles(files_to_remove, opener);
+	RemoveFiles(files_to_remove, opener, options);
 }
 
 } // namespace duckdb

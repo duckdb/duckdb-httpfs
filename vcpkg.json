@@ -1,6 +1,17 @@
 {
   "dependencies": [
     "openssl",
-    "curl"
-  ]
+    {
+      "name": "curl",
+      "default-features": false,
+      "features": [
+        "ssl"
+      ]
+    }
+  ],
+  "vcpkg-configuration": {
+    "overlay-triplets": [
+      "vcpkg_triplets"
+    ]
+  }
 }

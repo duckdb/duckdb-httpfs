@@ -2,6 +2,7 @@
 
 #include "s3/s3_auth.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/storage/storage_info.hpp"
 
@@ -9,7 +10,49 @@ namespace duckdb {
 
 namespace {
 
+class S3URLParametersOption : public ExtensionOptionInfo {
+private:
+	enum class State : uint8_t { DEFAULT, ENABLED, DISABLED };
+
+public:
+	static constexpr const char *NAME = "s3_enable_deprecated_url_parameters";
+
+	void Set(const Value &value) const {
+		// NULL and true are reversible; only explicit false locks the setting.
+		const auto next = value.IsNull() ? State::DEFAULT : value.GetValue<bool>() ? State::ENABLED : State::DISABLED;
+		lock_guard<mutex> guard(state_lock);
+		if (state == State::DISABLED && next != State::DISABLED) {
+			throw InvalidInputException("%s cannot be changed after being explicitly disabled", NAME);
+		}
+		state = next;
+	}
+
+	void OnSet(ClientContext &, SetScope, Value &parameter, bool) const override {
+		Set(parameter);
+	}
+
+	bool Enabled() const {
+		lock_guard<mutex> guard(state_lock);
+		return state == State::ENABLED;
+	}
+
+private:
+	// Core stores the SQL value after OnSet. This state remains authoritative even
+	// if concurrent setters publish their SQL values in a different order.
+	mutable mutex state_lock;
+	mutable State state = State::DEFAULT;
+};
+
 struct S3UploadSizing {
+	// DuckDB versions return either idx_t or optional_idx from ParseMemoryLimit.
+	static idx_t ResolveMemoryLimit(idx_t limit) {
+		return limit;
+	}
+
+	static idx_t ResolveMemoryLimit(optional_idx limit) {
+		return limit.IsValid() ? limit.GetIndex() : NumericLimits<idx_t>::Maximum();
+	}
+
 	static bool ScheduleCovers(uint64_t initial_part_size, uint64_t max_file_size, idx_t max_parts,
 	                           idx_t growth_interval, idx_t maximum_part_size) {
 		uint64_t capacity = 0;
@@ -147,7 +190,8 @@ S3UploadConfig S3UploadConfig::ReadFrom(optional_ptr<FileOpener> opener, const S
 	Value value;
 
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_uploader_max_filesize", value)) {
-		uploader_max_filesize = DBConfig::ParseMemoryLimitOrMaximum(value.GetValue<string>());
+		uploader_max_filesize =
+		    S3UploadSizing::ResolveMemoryLimit(DBConfig::ParseMemoryLimit(value.GetValue<string>()));
 	} else {
 		uploader_max_filesize = S3UploadConfig::DEFAULT_MAX_FILESIZE;
 	}
@@ -183,18 +227,52 @@ bool S3UploadConfig::HasPartCapacity(idx_t reserved_parts) const {
 }
 
 void S3Settings::Register(DBConfig &config) {
-	config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_access_key_id", "S3 Access Key ID", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_secret_access_key", "S3 Access Key", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_session_token", "S3 Session Token", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_endpoint", "S3 Endpoint", LogicalType::VARCHAR);
-	config.AddExtensionOption("s3_url_style", "S3 URL style", LogicalType::VARCHAR, Value("vhost"), SetS3URLStyle);
-	config.AddExtensionOption("s3_use_ssl", "S3 use SSL", LogicalType::BOOLEAN, Value(true));
-	config.AddExtensionOption("s3_kms_key_id", "S3 KMS Key ID", LogicalType::VARCHAR);
+	if (!config.HasExtensionOption(S3URLParametersOption::NAME)) {
+		auto state = make_shared_ptr<S3URLParametersOption>();
+		Value initial(LogicalType::BOOLEAN);
+		auto entry = config.options.unrecognized_options.find(S3URLParametersOption::NAME);
+		if (entry != config.options.unrecognized_options.end()) {
+			initial = entry->second.DefaultCastAs(LogicalType::BOOLEAN);
+		}
+		state->Set(initial);
+		ExtensionOption option("Enable deprecated S3 URL parameters. NULL disables them by default; "
+		                       "false permanently disables them for this database instance.",
+		                       LogicalType::BOOLEAN, nullptr, Value(LogicalType::BOOLEAN), SetScope::GLOBAL, false,
+		                       false);
+		option.supports_session = false;
+		option.info = std::move(state);
+		config.AddExtensionOption(S3URLParametersOption::NAME, std::move(option));
+		// NULL defaults are not stored by AddExtensionOption, but must be readable through current_setting().
+		config.SetOption(S3URLParametersOption::NAME, std::move(initial));
+	}
+	// Superseded by the matching secret keys
+	config.AddExtensionOption("s3_region", "S3 Region", LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION,
+	                          false, true);
+	config.AddExtensionOption("s3_access_key_id", "S3 Access Key ID", LogicalType::VARCHAR, Value(), nullptr,
+	                          SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_secret_access_key", "S3 Access Key", LogicalType::VARCHAR, Value(), nullptr,
+	                          SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_session_token", "S3 Session Token", LogicalType::VARCHAR, Value(), nullptr,
+	                          SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_endpoint", "S3 Endpoint", LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION,
+	                          false, true);
+	config.AddExtensionOption("s3_url_style", "S3 URL style", LogicalType::VARCHAR, Value("vhost"), SetS3URLStyle,
+	                          SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_use_ssl", "S3 use SSL", LogicalType::BOOLEAN, Value(true), nullptr, SetScope::SESSION,
+	                          false, true);
+	config.AddExtensionOption("s3_use_global_endpoint",
+	                          "Address S3 buckets of unknown region through s3.amazonaws.com, which routes to their "
+	                          "region and reports a wrong region in a way a browser can read",
+	                          LogicalType::BOOLEAN, Value(S3AuthConfig::USE_GLOBAL_ENDPOINT_DEFAULT), nullptr,
+	                          SetScope::SESSION, false, false);
+	config.AddExtensionOption("s3_kms_key_id", "S3 KMS Key ID", LogicalType::VARCHAR, Value(), nullptr,
+	                          SetScope::SESSION, false, true);
 	config.AddExtensionOption("s3_url_compatibility_mode", "Disable Globs and Query Parameters on S3 URLs",
-	                          LogicalType::BOOLEAN, Value(false));
-	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false));
-	config.AddExtensionOption("gcs_user_project", "GCS billing project for Requester Pays", LogicalType::VARCHAR);
+	                          LogicalType::BOOLEAN, Value(false), nullptr, SetScope::SESSION, false, true);
+	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false),
+	                          nullptr, SetScope::SESSION, false, true);
+	config.AddExtensionOption("gcs_user_project", "GCS billing project for Requester Pays", LogicalType::VARCHAR,
+	                          Value(), nullptr, SetScope::SESSION, false, true);
 	config.AddExtensionOption(
 	    "s3_url_scheme_aliases",
 	    "Additional URL schemes routed to the S3-compatible filesystem (e.g. ['oss', 'cos']). "
@@ -239,6 +317,27 @@ void S3Settings::Register(DBConfig &config) {
 void S3Settings::Initialize(DBConfig &config) {
 	auto provider = make_uniq<AWSEnvironmentCredentialsProvider>(config);
 	provider->SetAll();
+}
+
+bool S3Settings::URLParametersEnabled(optional_ptr<FileOpener> opener) {
+	auto db = FileOpener::TryGetDatabase(opener);
+	if (!db) {
+		return false;
+	}
+	ExtensionOption option;
+	if (!DBConfig::GetConfig(*db).TryGetExtensionOption(S3URLParametersOption::NAME, option)) {
+		return false;
+	}
+	return option.info->Cast<S3URLParametersOption>().Enabled();
+}
+
+string S3Settings::LegacyURLBehaviorHint() {
+	return StringUtil::Format(
+	    "\nS3 URL parameters are disabled by default: '?' and the following text are part of the object key. "
+	    "If this workflow requires legacy behavior, opt in with SET %s = true. "
+	    "URL compatibility mode must also be disabled to interpret URL parameters. "
+	    "The setting cannot be re-enabled in this database instance after it has been explicitly set to false.",
+	    S3URLParametersOption::NAME);
 }
 
 } // namespace duckdb

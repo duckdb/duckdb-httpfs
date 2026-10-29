@@ -440,6 +440,7 @@ static void RunSSECustomerUrlParameter(const string &client_implementation) {
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 	ConfigureClient(con, client_implementation);
 	auto endpoint = "https://" + server.Endpoint();
 	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(

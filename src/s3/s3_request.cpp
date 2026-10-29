@@ -2,6 +2,7 @@
 #include "duckdb/main/http/http_retry_budget.hpp"
 
 #include "s3/s3fs.hpp"
+#include "s3/s3_settings.hpp"
 #include "s3/s3_xml_response.hpp"
 #include "create_secret_functions.hpp"
 #include "http/http_state.hpp"
@@ -382,11 +383,16 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	auto &credentials = auth_params.GetCredentials();
 	auto &request_options = auth_params.GetRequestOptions();
 	auto headers = CreateConfiguredS3Headers(configured_headers, provider.GetType());
-	provider.ApplyReadCondition(read_condition, headers);
+	auto auth_type = provider.GetAuthType(auth_params);
+	// GCS rejects x-goog-if-generation-match on AWS4-HMAC-SHA256 (HMAC key) requests with 400 ExcessHeaderValues.
+	// The response generation is still validated after the read.
+	if (provider.GetType() != S3ProviderType::GCS || auth_type != S3AuthType::SIGV4) {
+		provider.ApplyReadCondition(read_condition, headers);
+	}
 	if (provider.GetType() == S3ProviderType::GCS && !request_options.user_project.empty()) {
 		headers["x-goog-user-project"] = request_options.user_project;
 	}
-	switch (provider.GetAuthType(auth_params)) {
+	switch (auth_type) {
 	case S3AuthType::ANONYMOUS: {
 		headers["Host"] = host;
 		return headers;
@@ -444,9 +450,10 @@ static bool IsAuthRefreshStatus(const HTTPResponse &response) {
 	return response.status == HTTPStatusCode::BadRequest_400 && IsAuthRefreshErrorBody(response.body);
 }
 
-static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path) {
+static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path,
+                                     const S3AuthURLParams &previous_url) {
 	FileOpenerInfo info = {path};
-	return S3AuthResolver::Resolve(opener, info);
+	return S3AuthResolver::Resolve(opener, info, S3AuthResolveOptions::ForRefresh(previous_url));
 }
 
 S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(HTTPFSUtil &http_util,
@@ -484,7 +491,7 @@ static bool ReloadS3AuthMaterial(optional_ptr<FileOpener> opener, const string &
 	}
 
 	auto previous_region = auth_params.GetCredentials().region;
-	auto reloaded_auth_params = ReadS3AuthParams(opener, path);
+	auto reloaded_auth_params = ReadS3AuthParams(opener, path, auth_params.GetURLParams());
 	if (preserve_region && !previous_region.empty() &&
 	    reloaded_auth_params.GetCredentials().region != previous_region) {
 		reloaded_auth_params = reloaded_auth_params.WithRegion(std::move(previous_region));
@@ -535,6 +542,10 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	result.captured = captured;
 	auto session_request = snapshot.CreateRequest();
 	result.http_params = std::move(session_request.params);
+	// the file access settings apply to the S3 path, unless the url itself chose the host it is sent to
+	if (!result.auth_params.GetURLParams().endpoint_from_url) {
+		result.http_params->access_path = spec.url;
+	}
 	auto parsed_s3_url = S3Url::Parse(spec.url, result.auth_params);
 	auto &version = spec.object_version.IsSet() ? spec.object_version : parsed_s3_url.GetObjectVersion();
 	if (version.IsSet() && spec.operation != S3RequestOperation::HEAD_OBJECT &&
@@ -558,20 +569,37 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	return result;
 }
 
-static optional_idx GetRegionRedirect(const HTTPResponse &response, const S3AuthParams &auth_params,
-                                      string &region_out) {
-	if (response.status != HTTPStatusCode::MovedPermanently_301 && response.status != HTTPStatusCode::BadRequest_400) {
-		return {};
+// The bucket's region as the body of a 400 AuthorizationHeaderMalformed names it; empty when the body names none
+static string RegionFromErrorBody(const string &body) {
+	S3XMLError error;
+	if (body.empty() || !S3XMLResponseParser::TryParseError(body, error)) {
+		return string();
 	}
-	if (!response.HasHeader("x-amz-bucket-region")) {
-		return {};
-	}
-	auto response_region = response.GetHeaderValue("x-amz-bucket-region");
+	return error.region;
+}
+
+// A browser only hands over the response headers the bucket's CORS rules expose, which rarely include
+// x-amz-bucket-region, while the body of the error is readable whenever the request was allowed at all
+static optional_idx RegionRedirectFrom(const string &header_region, const string &body, const S3AuthParams &auth_params,
+                                       string &region_out) {
+	auto response_region = header_region.empty() ? RegionFromErrorBody(body) : header_region;
 	if (response_region.empty() || response_region == auth_params.GetCredentials().region) {
 		return {};
 	}
 	region_out = std::move(response_region);
 	return {0};
+}
+
+static optional_idx GetRegionRedirect(const HTTPResponse &response, const S3AuthParams &auth_params,
+                                      string &region_out) {
+	if (response.status != HTTPStatusCode::MovedPermanently_301 && response.status != HTTPStatusCode::BadRequest_400) {
+		return {};
+	}
+	string header_region;
+	if (response.HasHeader("x-amz-bucket-region")) {
+		header_region = response.GetHeaderValue("x-amz-bucket-region");
+	}
+	return RegionRedirectFrom(header_region, response.body, auth_params, region_out);
 }
 
 static optional_idx GetRegionRedirect(const ErrorData &error, const S3AuthParams &auth_params, string &region_out) {
@@ -580,13 +608,17 @@ static optional_idx GetRegionRedirect(const ErrorData &error, const S3AuthParams
 	if (entry == extra_info.end() || (entry->second != "301" && entry->second != "400")) {
 		return {};
 	}
+	string header_region;
 	auto new_region = extra_info.find("header_x-amz-bucket-region");
-	if (new_region == extra_info.end() || new_region->second.empty() ||
-	    new_region->second == auth_params.GetCredentials().region) {
-		return {};
+	if (new_region != extra_info.end()) {
+		header_region = new_region->second;
 	}
-	region_out = new_region->second;
-	return {0};
+	string body;
+	auto body_entry = extra_info.find("response_body");
+	if (body_entry != extra_info.end()) {
+		body = body_entry->second;
+	}
+	return RegionRedirectFrom(header_region, body, auth_params, region_out);
 }
 
 // Core's status-based retry can't catch this: the discriminator is only in the S3 error body.
@@ -1096,11 +1128,31 @@ string S3RequestUtil::ParseError(const string &error) {
 HTTPException S3RequestUtil::GetError(const S3AuthParams &s3_auth_params, const HTTPResponse &response,
                                       RequestType request_type, const string &operation, const string &display_url) {
 	string extra_text = S3RequestUtil::ParseError(response.body);
+#ifdef __EMSCRIPTEN__
+	// the browser reports a response it was not allowed to read as a 404 whose reason names CORS; it cannot tell a
+	// bucket without a CORS rule for this origin from a regional endpoint's redirect, which carries no CORS headers
+	if (response.status == HTTPStatusCode::NotFound_404 && StringUtil::Contains(response.reason, "CORS")) {
+		extra_text += " The browser did not let DuckDB read the response: either the bucket has no CORS rule for this "
+		              "origin, or the request went to another region's endpoint, whose redirect carries no CORS "
+		              "headers. Set the bucket's region, or leave it unset so the request goes through the global "
+		              "endpoint, which names the region in a way the browser can read.";
+	} else if ((response.status == HTTPStatusCode::MovedPermanently_301 ||
+	            response.status == HTTPStatusCode::BadRequest_400) &&
+	           !response.HasHeader("x-amz-bucket-region") && RegionFromErrorBody(response.body).empty()) {
+		extra_text += " S3 answered from another region, which the browser could not read: expose x-amz-bucket-region "
+		              "in the bucket's CORS rules, or set the bucket's region.";
+	}
+#endif
 	if (response.status == HTTPStatusCode::BadRequest_400) {
 		extra_text += s3_auth_params.GetProvider().GetBadRequestError(s3_auth_params);
 	}
 	if (response.status == HTTPStatusCode::Unauthorized_401 || response.status == HTTPStatusCode::Forbidden_403) {
 		extra_text += s3_auth_params.GetProvider().GetAuthError(s3_auth_params);
+	}
+	auto &url_params = s3_auth_params.GetURLParams();
+	if (!url_params.enable_deprecated_url_parameters && !url_params.compatibility_mode &&
+	    display_url.find('?') != string::npos) {
+		extra_text += S3Settings::LegacyURLBehaviorHint();
 	}
 	return HTTPFSUtil::GetHTTPStatusError(response, request_type, operation, display_url, extra_text);
 }
@@ -1109,7 +1161,7 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
                                          const string &url) {
 	auto &s3_handle = handle.Cast<S3FileHandle>();
 	auto captured = s3_handle.request_session->Capture();
-	auto auth_params = captured.snapshot->Cast<S3RequestSnapshot>().auth_params;
+	auto &auth_params = captured.snapshot->Cast<S3RequestSnapshot>().auth_params;
 	const char *description = "sending a request to";
 	if (request_type == RequestType::HEAD_REQUEST) {
 		description = "checking";
