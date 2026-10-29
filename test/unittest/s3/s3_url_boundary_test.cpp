@@ -315,7 +315,8 @@ TEST_CASE("S3 COPY preserves ordinary legacy and direct literal writes", "[httpf
 				}
 			}
 			REQUIRE(puts == 1);
-			REQUIRE(not_found == (missing ? 1 : 0));
+			// Remote COPY no longer probes whether its output already exists.
+			REQUIRE(not_found == 0);
 		}
 	}
 }
