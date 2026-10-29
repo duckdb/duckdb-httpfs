@@ -289,14 +289,58 @@ HTTPReadConfig HTTPFileHandle::BuildReadConfig() const {
 }
 
 void HTTPFileHandle::FinalizeReadConfig() {
+	HTTPReadConfig config = BuildReadConfig();
+	annotated_lock_guard<annotated_mutex> guard(read_config_lock);
 	D_ASSERT(!read_config_initialized);
-	read_config = BuildReadConfig();
+	read_config = std::move(config);
 	read_config_initialized = true;
 }
 
-const HTTPReadConfig &HTTPFileHandle::GetReadConfig() const {
+void HTTPFileHandle::ClearReadConfigETag() {
+	annotated_lock_guard<annotated_mutex> guard(read_config_lock);
+	read_config.etag.clear();
+	if (read_config.condition.type == HTTPReadConditionType::ETAG) {
+		read_config.condition = HTTPReadCondition();
+	}
+}
+
+HTTPReadConfig HTTPFileHandle::GetReadConfig() const {
+	annotated_lock_guard<annotated_mutex> guard(read_config_lock);
 	D_ASSERT(read_config_initialized);
 	return read_config;
+}
+
+bool HTTPFileHandle::TryCommitReadVersion() {
+	annotated_lock_guard<annotated_mutex> guard(read_config_lock);
+	if (read_version_state == HTTPReadETagVersionState::UNDECIDED) {
+		read_version_state = HTTPReadETagVersionState::COMMITTED;
+	}
+	return read_version_state == HTTPReadETagVersionState::COMMITTED;
+}
+
+bool HTTPFileHandle::TryReplaceReadVersion() {
+	annotated_lock_guard<annotated_mutex> guard(read_config_lock);
+	if (read_version_state == HTTPReadETagVersionState::UNDECIDED) {
+		read_version_state = HTTPReadETagVersionState::REPLACED;
+	}
+	return read_version_state == HTTPReadETagVersionState::REPLACED;
+}
+
+bool HTTPFileHandle::ReadVersionReplaced() const {
+	annotated_lock_guard<annotated_mutex> guard(read_config_lock);
+	return read_version_state == HTTPReadETagVersionState::REPLACED;
+}
+
+void HTTPFileHandle::AdoptReadVersion(const string &new_etag) {
+	annotated_lock_guard<annotated_mutex> guard(read_config_lock);
+	D_ASSERT(read_version_state == HTTPReadETagVersionState::REPLACED);
+	read_config.etag = new_etag;
+	read_config.condition = HTTPReadCondition();
+	if (read_config.validate_etag && IsStrongETag(new_etag)) {
+		read_config.condition.type = HTTPReadConditionType::ETAG;
+		read_config.condition.value = new_etag;
+		StringUtil::Trim(read_config.condition.value);
+	}
 }
 
 const HTTPObjectVersion &HTTPFileHandle::GetObjectVersion() const {
@@ -404,6 +448,10 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, const string &url, cons
 	auto res = GetRangeRequest(handle, url, header_map, read_config, file_offset, buffer_out, buffer_out_len);
 
 	if (res) {
+		// The handle switched to a full download of a changed version (maybe reported as a 412): discard the response
+		if (hfh.ReadVersionReplaced()) {
+			return false;
+		}
 		ThrowIfReadConditionFailed(hfh, read_config, *res);
 		// Request failed and we have a request error
 		if (res->HasRequestError()) {
@@ -418,7 +466,8 @@ bool HTTPFileSystem::TryRangeRequest(FileHandle &handle, const string &url, cons
 		// Request succeeded TODO: fix upstream that 206 is not considered success
 		if (res->Success() || res->status == HTTPStatusCode::PartialContent_206 ||
 		    res->status == HTTPStatusCode::Accepted_202) {
-			return true;
+			// A concurrent first read may have switched the handle to another version: read that one instead
+			return hfh.TryCommitReadVersion();
 		}
 
 		throw GetHTTPError(handle, *res, RequestType::GET_REQUEST, url);
@@ -465,18 +514,36 @@ void HTTPFileSystem::ReadAtWithFallback(FileHandle &handle, data_ptr_t buffer, i
 	// ReadAt returned false. This means the regular path of querying the file with range requests failed. We will
 	// attempt to download the full file and retry.
 
-	if (handle.logger) {
-		DUCKDB_LOG_WARNING(handle.logger,
-		                   "Falling back to full file download for file '%s': the server does not support HTTP range "
-		                   "requests. Performance and memory usage are potentially degraded.",
-		                   handle.path);
+	HTTPFileHandle &hfh = handle.Cast<HTTPFileHandle>();
+	// Before any data was read, a changed ETag selects the version the full download returns: CDNs can serve
+	// different ETags for the same file from different caches
+	bool replaced = hfh.ReadVersionReplaced();
+	HTTPReadConfig download_config = read_config;
+	if (replaced) {
+		download_config.etag.clear();
+		if (download_config.condition.type == HTTPReadConditionType::ETAG) {
+			download_config.condition = HTTPReadCondition();
+		}
 	}
 
-	auto &hfh = handle.Cast<HTTPFileHandle>();
+	if (handle.logger) {
+		if (replaced) {
+			DUCKDB_LOG_WARNING(handle.logger,
+			                   "Falling back to full file download for file '%s': its ETag changed from %s before any "
+			                   "data was read. Performance and memory usage are potentially degraded.",
+			                   handle.path, read_config.etag);
+		} else {
+			DUCKDB_LOG_WARNING(handle.logger,
+			                   "Falling back to full file download for file '%s': the server does not support HTTP "
+			                   "range requests. Performance and memory usage are potentially degraded.",
+			                   handle.path);
+		}
+	}
+
 	const auto head_reported_length = hfh.length;
 
 	bool should_write_cache = false;
-	auto cached_file = FullDownload(hfh, read_config, should_write_cache);
+	unique_ptr<CachedFileHandle> cached_file = FullDownload(hfh, download_config, should_write_cache);
 
 	const auto downloaded_length = cached_file->GetSize();
 	if (downloaded_length != head_reported_length) {
@@ -488,7 +555,12 @@ void HTTPFileSystem::ReadAtWithFallback(FileHandle &handle, data_ptr_t buffer, i
 		    hfh.path, static_cast<uint64_t>(head_reported_length), static_cast<uint64_t>(downloaded_length)));
 	}
 
-	if (!ReadAt(handle, buffer, read_size, location, read_config)) {
+	if (replaced) {
+		download_config.etag = cached_file->GetMetadata().etag;
+		hfh.AdoptReadVersion(download_config.etag);
+	}
+
+	if (!ReadAt(handle, buffer, read_size, location, download_config)) {
 		throw HTTPException("Failed to read from HTTP file after automatically retrying a full file download.");
 	}
 }
@@ -1223,10 +1295,7 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 		if (should_full_download) {
 			// Nothing was read under the ETag of the HEAD, the download is the version this handle reads: servers may
 			// answer HEAD and GET with different ETags (content negotiation, compression suffixes, CDNs)
-			read_config.etag.clear();
-			if (read_config.condition.type == HTTPReadConditionType::ETAG) {
-				read_config.condition = HTTPReadCondition();
-			}
+			ClearReadConfigETag();
 			length = hfs.FullDownload(*this, GetReadConfig(), should_write_cache)->GetSize();
 		}
 		if (should_write_cache && (cache->OverridesResponseCachePolicy() || CanReuseCachedData())) {
