@@ -51,7 +51,7 @@ public:
 	}
 
 public:
-	unique_ptr<HTTPParams> Clone() const;
+	unique_ptr<HTTPParams> Clone() const override;
 	void RefreshTransportReuseDomain();
 	void PrepareTransportReuseDomain();
 	bool CanReuseTransport() const;
