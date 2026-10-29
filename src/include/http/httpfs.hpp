@@ -47,6 +47,16 @@ public:
 	    "resolve this by enabling `SET force_download=true`";
 };
 
+//! Whether the data a handle returns is pinned to the ETag captured when it was opened
+enum class HTTPReadETagVersionState : uint8_t {
+	//! No range read has returned data yet
+	UNDECIDED,
+	//! Range reads returned data under the ETag captured at open
+	COMMITTED,
+	//! The first range read saw another ETag; the handle reads a full download of that version instead
+	REPLACED
+};
+
 class HTTPFileSystem;
 class S3FileSystem;
 
@@ -62,8 +72,16 @@ public:
 public:
 	//! Two-phase construction allows subclasses to customize setup
 	virtual void Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener);
-	const HTTPReadConfig &GetReadConfig() const;
+	HTTPReadConfig GetReadConfig() const DUCKDB_EXCLUDES(read_config_lock);
 	const HTTPObjectVersion &GetObjectVersion() const;
+
+	//! Pin the handle to the ETag captured at open; false if the handle already switched to another version
+	bool TryCommitReadVersion() DUCKDB_EXCLUDES(read_config_lock);
+	//! Switch the handle to the version a full download returns; false if data was already read under the old ETag
+	bool TryReplaceReadVersion() DUCKDB_EXCLUDES(read_config_lock);
+	bool ReadVersionReplaced() const DUCKDB_EXCLUDES(read_config_lock);
+	//! Validate further reads against the ETag of the full download that replaced the version captured at open
+	void AdoptReadVersion(const string &new_etag) DUCKDB_EXCLUDES(read_config_lock);
 
 	//! Record a completed range request in the network throughput estimate
 	void RecordNetworkSample(double total_seconds, idx_t bytes, bool sample_has_ttfb, double ttfb_seconds)
@@ -88,7 +106,8 @@ protected:
 	virtual HTTPMetadataCacheEntry GetCacheEntry() const;
 
 private:
-	void FinalizeReadConfig();
+	void FinalizeReadConfig() DUCKDB_EXCLUDES(read_config_lock);
+	void ClearReadConfigETag() DUCKDB_EXCLUDES(read_config_lock);
 	bool TryLoadFileInfoWithoutRequest();
 	unique_ptr<HTTPResponse> RequestFileInfo(HTTPFileSystem &file_system, timestamp_t &request_time,
 	                                         timestamp_t &response_time);
@@ -134,8 +153,11 @@ private:
 
 	//! Captured metadata and finalized read state
 	HTTPObjectVersion object_version;
-	HTTPReadConfig read_config;
-	bool read_config_initialized = false;
+	mutable annotated_mutex read_config_lock;
+	HTTPReadConfig read_config DUCKDB_GUARDED_BY(read_config_lock);
+	bool read_config_initialized DUCKDB_GUARDED_BY(read_config_lock) = false;
+	HTTPReadETagVersionState read_version_state DUCKDB_GUARDED_BY(read_config_lock) =
+	    HTTPReadETagVersionState::UNDECIDED;
 
 	//! Network throughput estimate
 	mutable annotated_mutex network_estimator_lock;
@@ -148,6 +170,8 @@ private:
 class HTTPFileSystem : public FileSystem {
 public:
 	static bool TryParseLastModifiedTime(const string &timestamp, timestamp_t &result);
+	//! Whether a response carries an ETag other than the one the read was opened with
+	static bool ResponseETagChanged(const HTTPReadConfig &read_config, const HTTPResponse &response);
 	//! Compute the freshness deadline (exclusive) from HTTP caching headers (RFC 9111): Cache-Control max-age,
 	//! falling back to Expires relative to Date (or receipt time when Date is absent), adjusted by the response's age.
 	//! Unset if no freshness lifetime is provided.
