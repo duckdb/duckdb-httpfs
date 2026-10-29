@@ -69,6 +69,7 @@ TEST_CASE("Curl cancels stalled transfers without retaining the caller", "[httpf
 	CHECK(response->Success());
 	CHECK(response->body == server.ObjectData());
 	CHECK(client.get() == original_client);
+	CHECK(server.WaitForObservations(2));
 	CHECK(server.Observations().size() == 2);
 }
 

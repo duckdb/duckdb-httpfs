@@ -316,18 +316,18 @@ private:
 			}
 		}
 
-		void Check() const {
+		void RethrowInterrupt() const {
 			if (error) {
 				std::rethrow_exception(error);
 			}
-			request.InterruptCheck();
 		}
 
 	private:
 		static int ProgressCallback(void *userp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
 			auto &state = *static_cast<RequestInterruptState *>(userp);
 			try {
-				state.Check();
+				state.RethrowInterrupt();
+				state.request.InterruptCheck();
 				return 0;
 			} catch (...) {
 				// Do not unwind through curl's C stack. Raise the original error after the transfer returns.
@@ -556,7 +556,7 @@ public:
 			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 			GetTransferState transfer(*this, info);
 			res = curl->Execute();
-			interrupt.Check();
+			interrupt.RethrowInterrupt();
 			return transfer.Finish(res);
 		}
 	}
@@ -600,7 +600,7 @@ public:
 			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
 		}
 
-		interrupt.Check();
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 
 		return TransformBufferedResponseCurl(res);
@@ -639,7 +639,7 @@ public:
 			curl->SetOption(CURLOPT_HTTPGET, 1L);
 		}
 
-		interrupt.Check();
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
@@ -675,7 +675,7 @@ public:
 		}
 
 		// Get HTTP response status code
-		interrupt.Check();
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
@@ -705,7 +705,7 @@ public:
 			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
 		}
 
-		interrupt.Check();
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
@@ -754,7 +754,7 @@ public:
 			curl->SetOption(CURLOPT_POST, 0L);
 		}
 
-		interrupt.Check();
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 		info.buffer_out = request_info->body;
 
