@@ -178,8 +178,10 @@ void AESStateSSL::InitializeEncryption(EncryptionNonce &nonce, const_data_ptr_t 
 
 	int len;
 	if (aad_len > 0) {
-		if (!EVP_DecryptUpdate(context, nullptr, &len, aad, NumericCast<int>(aad_len))) {
-			throw InternalException("Setting Additional Authenticated Data  failed");
+		// The context was initialized for encryption: the AAD has to go through the encrypt-side update.
+		// OpenSSL 3 rejects EVP_DecryptUpdate on an encrypting context (EVP_R_INVALID_OPERATION).
+		if (!EVP_EncryptUpdate(context, nullptr, &len, aad, NumericCast<int>(aad_len))) {
+			throw InternalException("Setting Additional Authenticated Data failed");
 		}
 	}
 }
