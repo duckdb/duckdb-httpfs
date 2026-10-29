@@ -355,9 +355,17 @@ CREATE OR REPLACE SECRET invalid_sse (
 	REQUIRE(StringUtil::Contains(RequireOpenError(con, S3TestHelper::S3_PATH), "SSE_C_KEY requires an HTTPS endpoint"));
 	REQUIRE(server.Observations().empty());
 
-	CreateSSESecret(con, "invalid_sse", "s3://refresh-bucket/", "account.r2.cloudflarestorage.com");
-	REQUIRE(StringUtil::Contains(RequireOpenError(con, S3TestHelper::S3_PATH),
-	                             "SSE_C_KEY is only supported for S3-compatible endpoints"));
+	// GCS secrets have no SSE_C_KEY option, so the only way to reach its profile with a key is the URL parameter
+	S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE OR REPLACE SECRET invalid_gcs (
+	TYPE GCS, SCOPE 'gcs://refresh-bucket/', KEY_ID 'key', SECRET 'secret', ENDPOINT '%s', USE_SSL true,
+	VERIFY_SSL false
+))",
+	                                                     https_endpoint));
+	REQUIRE(StringUtil::Contains(
+	    RequireOpenError(con, "gcs://refresh-bucket/object.bin?s3_sse_c_key=" + string(URL_SSE_C_KEY_ENCODED)),
+	    "SSE_C_KEY is only supported for S3-compatible endpoints"));
 	REQUIRE(server.Observations().empty());
 	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
 }
@@ -525,11 +533,11 @@ TEST_CASE("S3 SSE-C key validation derives the required digest", "[httpfs][s3][s
 	                         "SSE_C_KEY must be a valid base64-encoded 256-bit key");
 }
 
-TEST_CASE("S3 SSE-C is limited to S3 secrets and plain S3 profiles", "[httpfs][s3][sse-c][secret]") {
+TEST_CASE("S3 SSE-C is limited to S3 and R2 secrets and profiles", "[httpfs][s3][sse-c][secret]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 	S3TestHelper::LoadExtension(db);
-	for (const auto secret_type : {"AWS", "R2", "GCS"}) {
+	for (const auto secret_type : {"AWS", "GCS"}) {
 		auto error = RequireQueryError(con, StringUtil::Format("CREATE SECRET invalid_%s (TYPE %s, SSE_C_KEY '%s')",
 		                                                       StringUtil::Lower(secret_type), secret_type, SSE_C_KEY));
 		REQUIRE(StringUtil::Contains(StringUtil::Lower(error), "sse_c_key"));
@@ -539,9 +547,16 @@ TEST_CASE("S3 SSE-C is limited to S3 secrets and plain S3 profiles", "[httpfs][s
 	auto gcs = SSEAuthConfig(S3ProviderType::GCS, "https://storage.googleapis.com");
 	RequireExceptionContains([&]() { S3AuthResolver::Resolve(std::move(gcs), "gcs://bucket/key"); },
 	                         "SSE_C_KEY is only supported for S3-compatible endpoints");
+	// R2 supports SSE-C, through an R2 secret (r2:// URLs) or an S3 secret pointed at an R2 endpoint.
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format("CREATE SECRET r2_sse (TYPE R2, ACCOUNT_ID 'account', "
+	                                                     "KEY_ID 'key', SECRET 'secret', SSE_C_KEY '%s')",
+	                                                     SSE_C_KEY));
 	auto r2 = SSEAuthConfig(S3ProviderType::R2, "https://account.r2.cloudflarestorage.com");
-	RequireExceptionContains([&]() { S3AuthResolver::Resolve(std::move(r2), "r2://bucket/key"); },
-	                         "SSE_C_KEY is only supported for S3-compatible endpoints");
+	auto r2_params = S3AuthResolver::Resolve(std::move(r2), "r2://bucket/key");
+	REQUIRE(r2_params.GetRequestOptions().sse_customer_key.has_value());
+	auto r2_endpoint = SSEAuthConfig(S3ProviderType::S3, "https://account.r2.cloudflarestorage.com");
+	auto r2_endpoint_params = S3AuthResolver::Resolve(std::move(r2_endpoint), "s3://bucket/key");
+	REQUIRE(r2_endpoint_params.GetRequestOptions().sse_customer_key.has_value());
 }
 
 TEST_CASE("S3 SSE-C secret display redacts direct and refresh material", "[httpfs][s3][sse-c][secret]") {
