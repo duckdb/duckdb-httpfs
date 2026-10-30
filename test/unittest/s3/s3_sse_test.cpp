@@ -33,6 +33,8 @@ static constexpr const char *URL_SSE_C_KEY_ENCODED = "NGC%2BMSAeaf7aoO7ouZl%2FXH
 static constexpr const char *SSE_C_ALGORITHM_HEADER = "x-amz-server-side-encryption-customer-algorithm";
 static constexpr const char *SSE_C_KEY_HEADER = "x-amz-server-side-encryption-customer-key";
 static constexpr const char *SSE_C_KEY_MD5_HEADER = "x-amz-server-side-encryption-customer-key-md5";
+static constexpr const char *R2_ACCOUNT_ID = "account";
+static constexpr const char *R2_ENDPOINT = "https://account.r2.cloudflarestorage.com";
 
 static string RequireQueryError(Connection &con, const string &query) {
 	auto result = con.Query(query);
@@ -548,13 +550,13 @@ TEST_CASE("S3 SSE-C is limited to S3 and R2 secrets and profiles", "[httpfs][s3]
 	RequireExceptionContains([&]() { S3AuthResolver::Resolve(std::move(gcs), "gcs://bucket/key"); },
 	                         "SSE_C_KEY is only supported for S3-compatible endpoints");
 	// R2 supports SSE-C, through an R2 secret (r2:// URLs) or an S3 secret pointed at an R2 endpoint.
-	S3TestHelper::RequireQueryOk(con, StringUtil::Format("CREATE SECRET r2_sse (TYPE R2, ACCOUNT_ID 'account', "
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format("CREATE SECRET r2_sse (TYPE R2, ACCOUNT_ID '%s', "
 	                                                     "KEY_ID 'key', SECRET 'secret', SSE_C_KEY '%s')",
-	                                                     SSE_C_KEY));
-	auto r2 = SSEAuthConfig(S3ProviderType::R2, "https://account.r2.cloudflarestorage.com");
+	                                                     R2_ACCOUNT_ID, SSE_C_KEY));
+	auto r2 = SSEAuthConfig(S3ProviderType::R2, R2_ENDPOINT);
 	auto r2_params = S3AuthResolver::Resolve(std::move(r2), "r2://bucket/key");
 	REQUIRE(r2_params.GetRequestOptions().sse_customer_key.has_value());
-	auto r2_endpoint = SSEAuthConfig(S3ProviderType::S3, "https://account.r2.cloudflarestorage.com");
+	auto r2_endpoint = SSEAuthConfig(S3ProviderType::S3, R2_ENDPOINT);
 	auto r2_endpoint_params = S3AuthResolver::Resolve(std::move(r2_endpoint), "s3://bucket/key");
 	REQUIRE(r2_endpoint_params.GetRequestOptions().sse_customer_key.has_value());
 }
