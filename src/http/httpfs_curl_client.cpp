@@ -284,6 +284,66 @@ private:
 		}
 	};
 
+	class RequestInterruptState {
+	public:
+		RequestInterruptState(HTTPFSCurlClient &client_p, BaseRequest &request_p)
+		    : client(client_p), request(request_p),
+		      enabled(bool(request_p.interrupt_context) || request_p.deadline.IsValid()) {
+			request.InterruptCheck();
+			if (!enabled) {
+				return;
+			}
+			try {
+				client.curl->SetOption(CURLOPT_XFERINFOFUNCTION, ProgressCallback);
+				client.curl->SetOption(CURLOPT_XFERINFODATA, this);
+				client.curl->SetOption(CURLOPT_NOPROGRESS, 0L);
+			} catch (...) {
+				client.curl.reset();
+				throw;
+			}
+		}
+
+		~RequestInterruptState() {
+			if (!enabled || !client.curl) {
+				return;
+			}
+			try {
+				client.curl->SetOption(CURLOPT_NOPROGRESS, 1L);
+				client.curl->SetOption(CURLOPT_XFERINFOFUNCTION, nullptr);
+				client.curl->SetOption(CURLOPT_XFERINFODATA, nullptr);
+			} catch (...) {
+				// A reusable handle must not retain a callback to this request.
+				client.curl.reset();
+			}
+		}
+
+		void RethrowInterrupt() const {
+			if (error) {
+				std::rethrow_exception(error);
+			}
+		}
+
+	private:
+		static int ProgressCallback(void *userp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+			auto &state = *static_cast<RequestInterruptState *>(userp);
+			try {
+				state.RethrowInterrupt();
+				state.request.InterruptCheck();
+				return 0;
+			} catch (...) {
+				// Do not unwind through curl's C stack. Raise the original error after the transfer returns.
+				state.error = std::current_exception();
+				return 1;
+			}
+		}
+
+	private:
+		HTTPFSCurlClient &client;
+		BaseRequest &request;
+		const bool enabled;
+		std::exception_ptr error;
+	};
+
 	class GetTransferState {
 	public:
 		GetTransferState(HTTPFSCurlClient &client_p, GetRequestInfo &request_p)
@@ -477,6 +537,7 @@ public:
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
+		RequestInterruptState interrupt(*this, info);
 		if (state) {
 			state->RecordRequest(RequestType::GET_REQUEST);
 		}
@@ -496,6 +557,7 @@ public:
 			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 			GetTransferState transfer(*this, info);
 			res = curl->Execute();
+			interrupt.RethrowInterrupt();
 			return transfer.Finish(res);
 		}
 	}
@@ -503,6 +565,7 @@ public:
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
+		RequestInterruptState interrupt(*this, info);
 		if (state) {
 			state->RecordRequest(RequestType::PUT_REQUEST);
 			state->RecordBytesSent(info.buffer_in_len);
@@ -538,6 +601,7 @@ public:
 			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
 		}
 
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 
 		return TransformBufferedResponseCurl(res);
@@ -546,6 +610,7 @@ public:
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
+		RequestInterruptState interrupt(*this, info);
 		if (state) {
 			state->RecordRequest(RequestType::HEAD_REQUEST);
 		}
@@ -575,6 +640,7 @@ public:
 			curl->SetOption(CURLOPT_HTTPGET, 1L);
 		}
 
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
@@ -582,6 +648,7 @@ public:
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
+		RequestInterruptState interrupt(*this, info);
 		if (state) {
 			state->RecordRequest(RequestType::DELETE_REQUEST);
 		}
@@ -609,12 +676,14 @@ public:
 		}
 
 		// Get HTTP response status code
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
 
 	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
 		ResetRequestInfo();
+		RequestInterruptState interrupt(*this, info);
 		if (state) {
 			state->RecordRequest(RequestType::OPTIONS_REQUEST);
 		}
@@ -637,6 +706,7 @@ public:
 			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
 		}
 
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 		return TransformBufferedResponseCurl(res);
 	}
@@ -644,6 +714,7 @@ public:
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		ResetRequestInfo();
+		RequestInterruptState interrupt(*this, info);
 		if (state) {
 			state->RecordRequest(RequestType::POST_REQUEST);
 			state->RecordBytesSent(info.buffer_in_len);
@@ -684,6 +755,7 @@ public:
 			curl->SetOption(CURLOPT_POST, 0L);
 		}
 
+		interrupt.RethrowInterrupt();
 		request_info->response_code = curl->GetResponseCode();
 		info.buffer_out = request_info->body;
 
