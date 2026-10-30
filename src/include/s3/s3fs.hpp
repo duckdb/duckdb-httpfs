@@ -84,6 +84,8 @@ private:
 private:
 	//! Immutable object selection; response metadata cannot replace an explicit version
 	const HTTPObjectVersion requested_version;
+	//! Opened from listing metadata (ETag, size, last-modified) without a HEAD
+	const bool opened_from_listing;
 
 	//! Upload lifetime and concurrent callers
 	annotated_mutex upload_lock;
@@ -156,6 +158,11 @@ private:
 	                       optional_ptr<FileOpener> opener, const S3AuthResolveOptions &options);
 	S3RequestResult RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
 	                                       const string &body, idx_t key_count, string &result);
+
+	using RunRead = std::function<unique_ptr<HTTPResponse>(const HTTPReadConfig &read_config)>;
+	//! With s3_version_id_pinning, pins a file opened from a listing (ETag but no version ID) to the listed version
+	unique_ptr<HTTPResponse> ReadListedVersion(S3FileHandle &handle, const HTTPReadConfig &read_config,
+	                                           const RunRead &run);
 
 	//! Database-owned buffer manager.
 	BufferManager &buffer_manager;

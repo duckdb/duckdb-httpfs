@@ -13,4 +13,5 @@ target_sources(
           s3_upload_config_test.cpp
           s3_upload_lifecycle_test.cpp
           s3_upload_test.cpp
+          s3_version_pinning_test.cpp
           s3_xml_response_test.cpp)
