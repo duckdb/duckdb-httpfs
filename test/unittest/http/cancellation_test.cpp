@@ -12,6 +12,7 @@ namespace duckdb {
 TEST_CASE("Curl cancels stalled transfers without retaining the caller", "[httpfs][cancellation]") {
 	bool before_headers = true;
 	bool deadline = false;
+	bool independent = false;
 	SECTION("interruption before response headers") {
 	}
 	SECTION("interruption during response body") {
@@ -19,6 +20,10 @@ TEST_CASE("Curl cancels stalled transfers without retaining the caller", "[httpf
 	}
 	SECTION("deadline before response headers") {
 		deadline = true;
+	}
+	SECTION("request deadline without a caller") {
+		deadline = true;
+		independent = true;
 	}
 	MockS3ServerConfig config;
 	config.upload.block_initialization = before_headers;
@@ -42,7 +47,10 @@ TEST_CASE("Curl cancels stalled transfers without retaining the caller", "[httpf
 		}
 		if (before_headers) {
 			PostRequestInfo request(server.HTTPPath() + "?uploads", HTTPHeaders(), params, nullptr, 0);
-			request.interrupt_context = con.context.get();
+			request.interrupt_context = independent ? nullptr : con.context.get();
+			if (independent) {
+				request.deadline = con.context->query_deadline;
+			}
 			return http.Request(request, client);
 		}
 		GetRequestInfo request(server.HTTPPath(), HTTPHeaders(), params, nullptr, nullptr);

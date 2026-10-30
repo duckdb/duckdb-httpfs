@@ -287,7 +287,8 @@ private:
 	class RequestInterruptState {
 	public:
 		RequestInterruptState(HTTPFSCurlClient &client_p, BaseRequest &request_p)
-		    : client(client_p), request(request_p), enabled(bool(request_p.interrupt_context)) {
+		    : client(client_p), request(request_p),
+		      enabled(bool(request_p.interrupt_context) || request_p.deadline.IsValid()) {
 			request.InterruptCheck();
 			if (!enabled) {
 				return;
