@@ -61,7 +61,7 @@ enum GlobType { HIERARCHICAL, LISTING, UNKNOWN };
 struct S3GlobResult : public LazyMultiFileList {
 public:
 	S3GlobResult(S3FileSystem &fs_p, const string &path, optional_ptr<FileOpener> opener,
-	             const S3AuthResolveOptions &options);
+	             const S3AuthResolveOptions &options, string file_secret = string());
 
 protected:
 	bool ExpandNextPath() const override;
@@ -102,6 +102,10 @@ private:
 	S3FileSystem &fs;
 	string glob_pattern;
 	optional_ptr<FileOpener> opener;
+	//! The file secret of the listing and of every key it returns
+	string file_secret;
+	//! Its name as the one value every key's "secret" option shares
+	Value file_secret_value;
 	mutable bool finished = false;
 	shared_ptr<HTTPRequestSession> request_session;
 	string shared_path;
@@ -137,9 +141,9 @@ private:
 };
 
 S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, optional_ptr<FileOpener> opener,
-                           const S3AuthResolveOptions &options)
+                           const S3AuthResolveOptions &options, string file_secret_p)
     : LazyMultiFileList(FileOpener::TryGetClientContext(opener)), fs(fs_p), glob_pattern(glob_pattern_p),
-      opener(opener) {
+      opener(opener), file_secret(std::move(file_secret_p)), file_secret_value(file_secret) {
 	if (!opener) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
 	}
@@ -147,7 +151,7 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_list_concurrency", list_concurrency)) {
 		max_list_concurrency = MaxValue<idx_t>(list_concurrency.GetValue<idx_t>(), 1);
 	}
-	FileOpenerInfo info = {glob_pattern};
+	FileOpenerInfo info(OpenFileInfo(glob_pattern).WithFileSecret(file_secret));
 
 	// Trim any query parameters from the string
 	auto s3_auth_params = S3AuthResolver::Resolve(opener, info, options);
@@ -176,7 +180,7 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 
 	shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
 
-	request_session = S3RequestExecutor::CreateSession(opener, glob_pattern, s3_auth_params);
+	request_session = S3RequestExecutor::CreateSession(opener, glob_pattern, s3_auth_params, file_secret);
 }
 
 bool S3GlobResult::ExpandNextPath() const {
@@ -402,6 +406,10 @@ void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
 				D_ASSERT(!snapshot.auth_params.GetCredentials().region.empty());
 				s3_key.extended_info->options["s3_region"] = snapshot.auth_params.GetCredentials().region;
 			}
+			// the keys a listing found are opened with the file secret it was made with
+			if (!file_secret.empty()) {
+				s3_key.extended_info->options[ExtendedOpenFileInfo::FILE_SECRET_OPTION] = file_secret_value;
+			}
 			expanded_files.push_back(std::move(s3_key));
 		}
 	}
@@ -409,7 +417,7 @@ void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
 
 unique_ptr<MultiFileList> S3FileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
                                                           optional_ptr<FileOpener> opener) {
-	return make_uniq<S3GlobResult>(*this, path, opener, S3AuthResolveOptions::ForOperation(opener));
+	return make_uniq<S3GlobResult>(*this, path, opener, S3AuthResolveOptions::ForOperation(opener), input.file_secret);
 }
 
 bool S3FileSystem::ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,

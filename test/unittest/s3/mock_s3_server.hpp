@@ -67,6 +67,9 @@ struct MockS3AuthConfig {
 	string required_region;
 	MockS3RegionRedirectForm region_redirect_form = MockS3RegionRedirectForm::HEADER;
 	MockS3RefreshTarget refresh_target = MockS3RefreshTarget::HEAD;
+	//! Buckets that answer only requests signed with one of the listed key ids; any other key gets
+	//! the auth failure above, on every request to that bucket
+	unordered_map<string, vector<string>> bucket_key_ids;
 };
 
 struct MockS3MetadataConfig {
@@ -228,6 +231,11 @@ struct MockS3ServerConfig {
 	string endpoint_base_path;
 	bool use_ssl = false;
 	MockS3ObjectConfig object;
+	//! Objects served beside `object`, so that a test can express a second location and a bucket
+	//! holding more than one key. They answer HEAD, GET and ListObjectsV2 with the same credential
+	//! and region checks as `object`, and with none of the injected failures. Their bucket must
+	//! differ from `object.bucket`, because the routes of the two would otherwise collide.
+	vector<MockS3ObjectConfig> extra_objects;
 	MockS3AuthConfig auth;
 	MockS3MetadataConfig metadata;
 	MockS3FailureConfig failures;

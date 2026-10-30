@@ -127,6 +127,10 @@ public:
 	shared_ptr<HTTPFileState> file_state;
 	optional_ptr<Allocator> buffer_allocator;
 
+	//! False for a file with a file secret: the handle neither reads nor fills the shared metadata cache or
+	//! the shared per-path state of its path
+	bool can_use_shared_caches;
+
 private:
 	//! Sequential read/write position
 	mutable annotated_mutex cursor_mutex;

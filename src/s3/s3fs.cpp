@@ -42,10 +42,12 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 		                              S3Provider::GetVersionParameterName(requested_version.GetType()));
 	}
 	auto captured = request_session->Capture();
+	// the file secret travels with the session, so that a refresh renews it rather than a secret by path
+	auto file_secret = file.GetFileSecret();
 	request_session->TryPublish(captured.snapshot,
-	                            make_shared_ptr<S3RequestSnapshot>(captured.snapshot->Params(), auth_params_p,
-	                                                               file.path, weak_ptr<ClientContext>(), true, false, 0,
-	                                                               std::move(multipart_upload_policy)));
+	                            make_shared_ptr<S3RequestSnapshot>(
+	                                captured.snapshot->Params(), auth_params_p, file.path, weak_ptr<ClientContext>(),
+	                                true, false, 0, std::move(multipart_upload_policy), std::move(file_secret)));
 	auto_fallback_to_full_file_download = false;
 	if (flags.OpenForReading() && flags.OpenForWriting()) {
 		throw NotImplementedException("Cannot open an HTTP file for both reading and writing");
@@ -105,10 +107,7 @@ string S3FileSystem::GetVersionTag(FileHandle &handle) {
 shared_ptr<const HTTPRequestSnapshot> S3FileHandle::CreateRequestSnapshot(const HTTPFSParams &params) const {
 	auto captured = request_session->Capture();
 	auto &s3_snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
-	return make_shared_ptr<S3RequestSnapshot>(params, s3_snapshot.auth_params, s3_snapshot.refresh_path,
-	                                          s3_snapshot.client_context, s3_snapshot.credential_refresh_enabled,
-	                                          s3_snapshot.region_redirected, s3_snapshot.credential_generation,
-	                                          s3_snapshot.multipart_upload_policy);
+	return s3_snapshot.Copy(params);
 }
 
 S3FileHandle::~S3FileHandle() = default;
@@ -214,7 +213,7 @@ BufferManager &S3FileSystem::GetBufferManager() {
 
 unique_ptr<HTTPFileHandle> S3FileSystem::CreateHandle(const OpenFileInfo &file, FileOpenFlags flags,
                                                       optional_ptr<FileOpener> opener) {
-	FileOpenerInfo info = {file.path};
+	FileOpenerInfo info(file);
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 
 	auto request_session = HTTPRequestSession::Create(opener, info);
@@ -258,11 +257,10 @@ void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener>
 		if (context && refresh_enabled) {
 			weak_context = context->shared_from_this();
 		}
-		request_session->TryPublish(
-		    captured.snapshot,
-		    make_shared_ptr<S3RequestSnapshot>(snapshot.Params(), snapshot.auth_params, snapshot.refresh_path,
-		                                       std::move(weak_context), refresh_enabled, snapshot.region_redirected,
-		                                       snapshot.credential_generation, snapshot.multipart_upload_policy));
+		auto replacement = snapshot.Copy();
+		replacement->client_context = std::move(weak_context);
+		replacement->credential_refresh_enabled = refresh_enabled;
+		request_session->TryPublish(captured.snapshot, std::move(replacement));
 	}
 	HTTPFileHandle::Initialize(file, opener);
 }
