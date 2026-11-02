@@ -464,7 +464,7 @@ static void RunSharedReadBudgetScenario(const string &client, bool range, bool c
 		handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 7);
 		REQUIRE(buffer == data.substr(7, buffer.size()));
 	};
-	if (failures > retries || auth_status) {
+	if (failures > retries) {
 		auto error = RequireError(read);
 		REQUIRE(StringUtil::Contains(error, "RequestTimeout"));
 	} else {
@@ -480,10 +480,12 @@ static void RunSharedReadBudgetScenario(const string &client, bool range, bool c
 		}
 	}
 	if (auth_status) {
+		// The corrected re-send after the refresh does not spend a retry.
 		S3TestHelper::AssertSingleRefresh(test_id);
-		REQUIRE(gets.size() == retries + 2);
-		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::STALE_KEY_ID, auth_status) == retries + 1);
-		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::FRESH_KEY_ID, 400) == 1);
+		REQUIRE(gets.size() == MinValue(failures, retries) + 2);
+		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::STALE_KEY_ID, auth_status) == 1);
+		REQUIRE(S3TestHelper::CountObservations(gets, "GET", S3TestHelper::FRESH_KEY_ID, 400) ==
+		        MinValue(failures, retries + 1));
 	} else {
 		REQUIRE(gets.size() == MinValue(failures, retries) + 1);
 	}
@@ -852,7 +854,7 @@ static void RunMalformedListRecoveryTest(const string &client_implementation, bo
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE_FALSE(result->HasError());
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).ToString() == "s3://refresh-bucket/object.bin");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "s3://refresh-bucket/object.bin");
 	RequireIdenticalFreshListAttempts(observations, 3);
 }
 
@@ -873,7 +875,7 @@ static void RunNamespaceMismatchListRecoveryTest(const string &client_implementa
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE_FALSE(result->HasError());
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).ToString() == "s3://refresh-bucket/object.bin");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "s3://refresh-bucket/object.bin");
 	RequireIdenticalFreshListAttempts(observations, 2);
 }
 
@@ -894,8 +896,8 @@ static void RunMalformedPaginatedListRecoveryTest() {
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE_FALSE(result->HasError());
 	REQUIRE(result->RowCount() == 2);
-	REQUIRE(result->GetValue(0, 0).ToString() == "s3://refresh-bucket/first-page.bin");
-	REQUIRE(result->GetValue(0, 1).ToString() == "s3://refresh-bucket/object.bin");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "s3://refresh-bucket/first-page.bin");
+	REQUIRE(result->Collection().GetValue(0, 1).ToString() == "s3://refresh-bucket/object.bin");
 
 	auto lists = GetListObservations(observations);
 	REQUIRE(lists.size() == 4);
@@ -989,7 +991,7 @@ static void RunRecoveringListRetryTest(const string &client_implementation, int 
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE_FALSE(result->HasError());
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).ToString() == "s3://refresh-bucket/object.bin");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "s3://refresh-bucket/object.bin");
 
 	REQUIRE(CountListObservations(observations, status) == 1);
 	REQUIRE(CountListObservations(observations, 200) >= 1);
@@ -1279,12 +1281,13 @@ TEST_CASE("S3 reads share core's retry budget", "[httpfs][s3][retry][shared_retr
 	}
 }
 
-TEST_CASE("S3 credential correction retains spent GET retries", "[httpfs][s3][retry][shared_retry]") {
+TEST_CASE("S3 credential correction does not spend GET retries", "[httpfs][s3][retry][shared_retry]") {
 	for (const auto &client : {"httplib", "curl"}) {
 		for (bool range : {false, true}) {
 			for (int status : {401, 403}) {
 				CAPTURE(client, range, status);
 				RunSharedReadBudgetScenario(client, range, true, 2, 1, status);
+				RunSharedReadBudgetScenario(client, range, true, 2, 3, status);
 			}
 		}
 	}
@@ -1379,8 +1382,9 @@ static vector<string> GetShrinkWarnings(Connection &con) {
 	REQUIRE(result);
 	REQUIRE_FALSE(result->HasError());
 	vector<string> messages;
+	auto rows = result->Collection().GetRows();
 	for (idx_t i = 0; i < result->RowCount(); i++) {
-		messages.push_back(result->GetValue(0, i).ToString());
+		messages.push_back(rows.GetValue(0, i).ToString());
 	}
 	return messages;
 }
@@ -1405,7 +1409,7 @@ static void RunParallelGlobConcurrencyTest(const string &client_implementation, 
 	INFO((result->HasError() ? result->GetError() : string()));
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE_FALSE(result->HasError());
-	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
 
 	auto lists = GetListObservations(observations);
 	// One flat page, one hierarchical top-level page, then one page per directory.
@@ -1438,7 +1442,7 @@ static void RunParallelGlobAdaptsToThrottlingTest(const string &client_implement
 	INFO((result->HasError() ? result->GetError() : string()));
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE_FALSE(result->HasError());
-	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
 
 	REQUIRE(CountListObservations(observations, 503) > 0);
 	REQUIRE(CountListObservations(observations, 200) == 2 + TREE_DIRECTORIES);
@@ -1466,7 +1470,7 @@ static void RunParallelGlobReissuesThrottledPrefixTest(const string &client_impl
 	INFO((result->HasError() ? result->GetError() : string()));
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE_FALSE(result->HasError());
-	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<idx_t>() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
 
 	REQUIRE(CountListObservations(observations, 503) == 8);
 	REQUIRE(CountListObservations(observations, 200) == 2 + TREE_DIRECTORIES);
@@ -1495,9 +1499,11 @@ static void RunParallelGlobExhaustedThrottlingTest(const string &client_implemen
 	REQUIRE(result->HasError());
 	REQUIRE(StringUtil::Contains(result->GetError(), "503"));
 
-	// A full first wave of sixteen exhausted requests, then a single sequential re-issue before failing.
+	// Sixteen parallel requests and one sequential re-issue, cut short by the host's retry quota.
 	REQUIRE(CountListObservations(observations, 200) == 2);
-	REQUIRE(CountListObservations(observations, 503) == 16 * 8 + 8);
+	auto quota_retries = HTTPRetryQuota::INITIAL_CAPACITY / HTTPRetryQuota::RETRY_COST;
+	REQUIRE(CountListObservations(observations, 503) == idx_t(16 + 1 + quota_retries));
+	REQUIRE(StringUtil::Contains(result->GetError(), "retry quota"));
 	REQUIRE(CountShrinkWarnings(con) >= 1);
 }
 
@@ -1526,7 +1532,7 @@ TEST_CASE("S3 glob validates and resets s3_list_concurrency", "[httpfs][s3][retr
 	auto result = con.Query("SELECT value::UBIGINT FROM duckdb_settings() WHERE name = 's3_list_concurrency'");
 	INFO((result->HasError() ? result->GetError() : string()));
 	REQUIRE_FALSE(result->HasError());
-	REQUIRE(result->GetValue(0, 0).GetValue<idx_t>() == 256);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<idx_t>() == 256);
 }
 
 TEST_CASE("S3 parallel glob respects s3_list_concurrency", "[httpfs][s3][retry]") {

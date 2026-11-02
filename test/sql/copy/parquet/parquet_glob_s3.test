@@ -124,7 +124,21 @@ select count(*) from parquet_scan('s3://test-bucket/parquet_glob_s3/g*/t1.parque
 ----
 2
 
-# Question mark is not supported for S3 due to our use of query parameters
+# Question marks are literal characters, not single-character glob wildcards
+statement error
+select count(*) from parquet_scan('s3://test-bucket/parquet_glob_s3/glob/t?.parquet')
+----
+HTTP 404 Not Found
+
+statement error
+select count(*) from parquet_scan('s3://test-bucket/parquet_glob_s3/?lob/t?.parquet')
+----
+HTTP 404 Not Found
+
+# Legacy URL parameter parsing still rejects these suffixes
+statement ok
+SET s3_enable_deprecated_url_parameters=true;
+
 statement error
 select count(*) from parquet_scan('s3://test-bucket/parquet_glob_s3/glob/t?.parquet')
 ----
@@ -150,6 +164,9 @@ select count(*) from parquet_scan('s3://test-bucket/the_horror/?.*[1-0]parquetta
 
 statement ok
 SET s3_url_compatibility_mode=false;
+
+statement ok
+RESET s3_enable_deprecated_url_parameters;
 
 endloop
 

@@ -1,0 +1,28 @@
+# name: test/sql/httpfs/redirect_to_https_ca_bundle.test
+# description: An http:// URL that redirects to https:// verifies the https hop with the CA bundle
+# group: [httpfs]
+
+require httpfs
+
+# override the default behaviour of skipping HTTP errors and connection failures: this test fails on connection issues
+set ignore_error_messages
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+statement ok
+SET enable_server_cert_verification = true;
+
+query I
+SELECT length(content) > 0 FROM read_text('http://github.com/duckdb/duckdb');
+----
+true
+
+# the bundle used for the https hop is the configured one
+statement ok
+SET ca_cert_file = 'README.md';
+
+statement error
+SELECT length(content) FROM read_text('http://github.com/duckdb/duckdb');
+----
+<REGEX>:.*IO Error.*SSL.*

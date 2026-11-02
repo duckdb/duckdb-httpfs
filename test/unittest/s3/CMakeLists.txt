@@ -4,6 +4,8 @@ target_sources(
           gcs_generation_test.cpp
           s3_refresh_test.cpp
           s3_request_test.cpp
+          s3_url_boundary_test.cpp
+          s3_url_parameters_test.cpp
           s3_retry_test.cpp
           s3_sse_test.cpp
           s3_test_helper.cpp

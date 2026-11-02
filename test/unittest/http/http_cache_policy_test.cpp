@@ -60,7 +60,7 @@ TEST_CASE("Explicit cache settings preserve legacy reuse", "[httpfs][cache]") {
 	for (idx_t i = 0; i < 2; i++) {
 		auto result = con.Query("SELECT content FROM read_blob('" + server.HTTPPath() + "')");
 		REQUIRE_FALSE(result->HasError());
-		REQUIRE(result->GetValue(0, 0).GetValue<string>() == server.ObjectData());
+		REQUIRE(result->Collection().GetValue(0, 0).GetValue<string>() == server.ObjectData());
 	}
 	auto observations = server.Observations();
 	REQUIRE(HTTPTestHelper::CountRequests(observations, "HEAD", 200) == 1);

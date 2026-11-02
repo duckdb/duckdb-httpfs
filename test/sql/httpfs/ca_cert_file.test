@@ -60,3 +60,18 @@ statement error
 FROM read_blob('https://duckdb.org/')
 ----
 <REGEX>:.*IO Error.*SSL.*
+
+# the bundle is read through the database's file system, so it is subject to allowed_paths
+statement ok
+SET ca_cert_file = '/etc/hosts';
+
+statement ok
+SET allowed_paths = ['https://duckdb.org/'];
+
+statement ok
+SET enable_external_access = false;
+
+statement error
+FROM read_blob('https://duckdb.org/')
+----
+<REGEX>:.*Permission Error.*/etc/hosts.*

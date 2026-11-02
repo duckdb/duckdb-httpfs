@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cerrno>
 #include <curl/curl.h>
 #include <utility>
 
@@ -11,6 +12,10 @@ class FileOpener;
 struct FileOpenerInfo;
 class HTTPState;
 class HTTPFSCurlClient;
+
+//! Returns the CURLOPT_SSLVERSION value that pins the minimum TLS version to 1.2,
+//! leaving the maximum at curl's default. Exposed for unit testing.
+long GetCurlMinTLSVersion(); // NOLINT(google-runtime-int): curl option values are long
 
 class CURLURLHandle {
 private:
@@ -45,7 +50,14 @@ public:
 		return curl;
 	}
 	CURLcode Execute() {
-		return curl_easy_perform(curl);
+		errno = 0;
+		auto result = curl_easy_perform(curl);
+		execute_errno = errno;
+		return result;
+	}
+	//! errno as the last transfer left it, telling apart failures curl reports by the step that failed.
+	int GetExecuteErrno() const {
+		return execute_errno;
 	}
 	template <class T>
 	void SetOption(CURLoption option, T value) {
@@ -58,6 +70,7 @@ public:
 
 private:
 	CURL *curl = nullptr;
+	int execute_errno = 0;
 };
 
 class CURLRequestHeaders {

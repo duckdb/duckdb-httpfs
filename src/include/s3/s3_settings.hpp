@@ -38,6 +38,9 @@ struct S3Settings {
 
 	static void Register(DBConfig &config);
 	static void Initialize(DBConfig &config);
+	static bool URLParametersEnabled(optional_ptr<FileOpener> opener);
+	//! Migration advice for errors where the disabled legacy URL behavior is relevant.
+	static string LegacyURLBehaviorHint();
 };
 
 } // namespace duckdb

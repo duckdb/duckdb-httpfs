@@ -258,7 +258,7 @@ static void RunListGlobRefreshScenario(const string &client_implementation, bool
 		                       INFO((result->HasError() ? result->GetError() : string()));
 		                       REQUIRE_FALSE(result->HasError());
 		                       REQUIRE(result->RowCount() == 1);
-		                       REQUIRE(result->GetValue(0, 0).ToString() == S3TestHelper::S3_PATH);
+		                       REQUIRE(result->Collection().GetValue(0, 0).ToString() == S3TestHelper::S3_PATH);
 	                       });
 	REQUIRE(MockS3HasObservation(observations, "GET", S3TestHelper::STALE_KEY_ID, 403, string(), "list-type=2"));
 	REQUIRE(MockS3HasObservation(observations, "GET", S3TestHelper::FRESH_KEY_ID, 200, string(), "list-type=2"));
@@ -679,6 +679,7 @@ TEST_CASE("Explicit S3 versions survive credential refresh", "[httpfs][s3][refre
 				auto observations =
 				    RunRefreshScenario(target, client, false, [&](Connection &con, const string &object_data) {
 					    const bool full_download = target == MockS3RefreshTarget::FULL_GET;
+					    S3TestHelper::RequireQueryOk(con, "SET s3_enable_deprecated_url_parameters=true");
 					    S3TestHelper::RequireQueryOk(con, "SET s3_version_id_pinning=false");
 					    S3TestHelper::RequireQueryOk(con, "SET enable_external_file_cache=false");
 					    if (full_download) {

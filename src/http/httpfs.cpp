@@ -1,5 +1,6 @@
 #include "http/httpfs.hpp"
 #include "s3/s3_provider.hpp"
+#include "s3/s3_request.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/logging/log_manager.hpp"
 
@@ -53,6 +54,12 @@ void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> res
 	auto sanitized_request = request;
 	sanitized_request.headers["x-amz-server-side-encryption-customer-key"] = "redacted";
 	HTTPUtil::LogRequest(sanitized_request, response);
+}
+
+bool HTTPFSUtil::ShouldRetry(const BaseRequest &request, const HTTPResponse &response) {
+	// S3 reports a timed-out request as 400 RequestTimeout: the status is final, the error code is not. Core judges
+	// statuses only, received or thrown by a handler; the error document is read here, by the S3 XML parser.
+	return HTTPUtil::ShouldRetry(request, response) || S3RequestUtil::IsRequestTimeout(response);
 }
 
 struct HTTPParametersInitializer {
@@ -1016,6 +1023,22 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &
 	request_time = Timestamp::GetCurrentTimestamp();
 	auto response = hfs.GetRangeRequest(*this, path, {}, config, 0, nullptr, 2);
 	response_time = Timestamp::GetCurrentTimestamp();
+	if (response->status == HTTPStatusCode::PartialContent_206 &&
+	    !HTTPFileInfoParser::TryParseContentRange(response->headers).IsValid()) {
+		// The object's size is only in Content-Range, which a browser hides unless CORS exposes it; the probe's own
+		// Content-Length is the length of the range. The probe may have corrected the request (an S3 region found
+		// in its error body), after which a HEAD succeeds where the first did not, so it is asked once more.
+		request_time = Timestamp::GetCurrentTimestamp();
+		auto head_response = hfs.HeadRequest(*this, path, {});
+		response_time = Timestamp::GetCurrentTimestamp();
+		if (head_response->status == HTTPStatusCode::OK_200) {
+			return head_response;
+		}
+		throw IOException("Unable to determine the size of \"%s\": the HEAD request failed with %d, and the ranged GET "
+		                  "used instead did not expose Content-Range (a browser hides it unless the server's CORS "
+		                  "rules expose it)",
+		                  path, static_cast<int>(head_response->status));
+	}
 	if (response->status == HTTPStatusCode::PartialContent_206 || response->status == HTTPStatusCode::Accepted_202 ||
 	    response->status == HTTPStatusCode::OK_200) {
 		return response;

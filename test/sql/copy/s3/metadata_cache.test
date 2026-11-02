@@ -26,6 +26,13 @@ set ignore_error_messages
 # this test was written before we implemented the external file cache
 # when it is enabled, the request counts are different
 # we disable it so this test still makes sense
+# Exercise the deprecated URL parameter interface explicitly.
+statement ok
+LOAD httpfs;
+
+statement ok
+SET s3_enable_deprecated_url_parameters=true;
+
 statement ok
 set enable_external_file_cache=false;
 
