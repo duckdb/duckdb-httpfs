@@ -212,7 +212,9 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
                                                         optional_ptr<FileOpenerInfo> info) {
 	auto result = InitializeRawParameters(*this, opener, info);
 	result->RefreshTransportReuseDomain();
-	return result;
+	// Explicit move: returning the derived type as the base type relies on the implicit move rules of C++20 (P1825),
+	// which GCC 12 does not apply in C++17 mode
+	return std::move(result);
 }
 
 unique_ptr<HTTPFSParams> HTTPFSUtil::InitializeRawParameters(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,
