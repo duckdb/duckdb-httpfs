@@ -67,11 +67,17 @@ jobs:
         shell: bash
         run: make
 
+      - name: Build HTTPFS C++ unit tests
+        shell: bash
+        run: cmake --build build/release --target unittest_httpfs
+
+      - name: Run HTTP cancellation tests
+        shell: bash
+        run: ./build/release/test/unittest_httpfs "[httpfs][cancellation]"
+
       - name: Run HTTPFS C++ unit tests
         shell: bash
-        run: |
-          cmake --build build/release --target unittest_httpfs
-          ./build/release/test/unittest_httpfs "[httpfs][s3]"
+        run: ./build/release/test/unittest_httpfs "[httpfs][s3]"
 
       - name: Install test server
         shell: bash

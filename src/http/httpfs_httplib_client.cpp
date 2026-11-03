@@ -153,7 +153,29 @@ public:
 		}
 	}
 
+	void ConfigureRequestDeadline(BaseRequest &info) {
+		info.InterruptCheck();
+		auto remaining = time_t(0);
+		if (info.deadline.IsValid()) {
+			const auto now = NumericCast<idx_t>(TimePoint::GetTickMs());
+			remaining = NumericCast<time_t>(info.deadline.GetIndex() > now ? info.deadline.GetIndex() - now : 1);
+		}
+		client->set_max_timeout(remaining);
+		const auto seconds = remaining ? remaining / 1000 : NumericCast<time_t>(info.params.timeout);
+		const auto useconds = remaining ? (remaining % 1000) * 1000 : NumericCast<time_t>(info.params.timeout_usec);
+		client->set_connection_timeout(seconds, useconds);
+		client->set_read_timeout(seconds, useconds);
+		client->set_write_timeout(seconds, useconds);
+		// Updating httplib's fields does not update a reused TLS socket's blocking I/O timeouts.
+		const auto socket = client->socket();
+		if (socket != INVALID_SOCKET) {
+			duckdb_httplib_openssl::detail::set_socket_opt_time(socket, SOL_SOCKET, SO_RCVTIMEO, seconds, useconds);
+			duckdb_httplib_openssl::detail::set_socket_opt_time(socket, SOL_SOCKET, SO_SNDTIMEO, seconds, useconds);
+		}
+	}
+
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::GET_REQUEST);
@@ -170,6 +192,7 @@ public:
 		return transfer.Finish(std::move(result));
 	}
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::PUT_REQUEST);
@@ -192,6 +215,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::HEAD_REQUEST);
@@ -201,6 +225,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::DELETE_REQUEST);
@@ -210,6 +235,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		if (state) {
 			state->RecordRequest(RequestType::OPTIONS_REQUEST);
 		}
@@ -218,6 +244,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::POST_REQUEST);
@@ -225,6 +252,9 @@ public:
 		}
 		// We use a custom Request method here, because there is no Post call with a contentreceiver in httplib
 		duckdb_httplib_openssl::Request req;
+		if (info.deadline.IsValid()) {
+			req.start_time_ = std::chrono::steady_clock::now();
+		}
 		if (info.send_post_as_get_request) {
 			req.method = "GET";
 		} else {

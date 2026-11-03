@@ -291,6 +291,7 @@ public:
 	string UploadedObject() const;
 	string CompletionBody() const;
 	vector<MockS3RequestObservation> Observations() const;
+	bool WaitForObservations(idx_t count) const;
 	idx_t MaximumConcurrentPartUploads() const;
 	bool WaitForPartUpload(idx_t part_number);
 	void ReleasePartUpload(idx_t part_number);

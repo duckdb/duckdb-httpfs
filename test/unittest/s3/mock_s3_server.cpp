@@ -396,6 +396,13 @@ public:
 		return observations;
 	}
 
+	bool WaitForObservations(idx_t count) const DUCKDB_EXCLUDES(observation_lock) {
+		annotated_unique_lock<annotated_mutex> lock(observation_lock);
+		return observation_recorded.wait_for(lock, std::chrono::seconds(5), [&]() DUCKDB_REQUIRES(observation_lock) {
+			return observations.size() >= count;
+		});
+	}
+
 	string UploadedObject() const DUCKDB_EXCLUDES(upload_lock) {
 		annotated_lock_guard<annotated_mutex> lock(upload_lock);
 		return uploaded_object;
@@ -550,6 +557,7 @@ public:
 
 		annotated_lock_guard<annotated_mutex> lock(observation_lock);
 		observations.push_back(std::move(observation));
+		observation_recorded.notify_all();
 	}
 
 	string GetGeneration(const httplib::Request &request) const {
@@ -1498,6 +1506,7 @@ public:
 
 	//! Request observations
 	mutable annotated_mutex observation_lock;
+	mutable std::condition_variable observation_recorded;
 	mutable vector<MockS3RequestObservation> observations DUCKDB_GUARDED_BY(observation_lock);
 
 	//! Multipart upload state
@@ -1575,6 +1584,10 @@ string MockS3Server::CompletionBody() const {
 
 vector<MockS3RequestObservation> MockS3Server::Observations() const {
 	return impl->Observations();
+}
+
+bool MockS3Server::WaitForObservations(idx_t count) const {
+	return impl->WaitForObservations(count);
 }
 
 idx_t MockS3Server::MaximumConcurrentPartUploads() const {
