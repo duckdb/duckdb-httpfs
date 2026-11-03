@@ -144,6 +144,11 @@ public:
 	bool HandleResponse(const HTTPResponse &response) {
 		if (response.status == HTTPStatusCode::PreconditionFailed_412 &&
 		    read_config.condition.type != HTTPReadConditionType::NONE) {
+			// The server rejected the If-Match of the ETag captured at open before the handle returned any data
+			if (read_config.condition.type == HTTPReadConditionType::ETAG && CanReplaceReadVersion() &&
+			    handle.TryReplaceReadVersion()) {
+				etag_changed_before_read = true;
+			}
 			return false;
 		}
 		if (static_cast<int>(response.status) >= 400) {
@@ -154,6 +159,12 @@ public:
 		}
 
 		out_offset = 0;
+		// Nothing was returned under the ETag captured at open yet: switch to the version the server now has
+		if (CanReplaceReadVersion() && HTTPFileSystem::ResponseETagChanged(read_config, response) &&
+		    handle.TryReplaceReadVersion()) {
+			etag_changed_before_read = true;
+			return false;
+		}
 		validate_response(response);
 		if (!ValidateContentLength(response)) {
 			return false;
@@ -178,6 +189,10 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Finalize(unique_ptr<HTTPResponse> response, const GetRequestInfo &request) {
+		if (etag_changed_before_read) {
+			// The transfer was aborted: the handle reads a full download of the new version instead
+			return response;
+		}
 		if (range_request_not_supported) {
 			D_ASSERT(response);
 			SetRangeRequestNotSupported(*response);
@@ -192,6 +207,10 @@ public:
 	}
 
 private:
+	bool CanReplaceReadVersion() const {
+		return read_config.auto_fallback_to_full_download && !read_config.object_version.IsSet();
+	}
+
 	bool ValidateContentLength(const HTTPResponse &response) {
 		if (!response.HasHeader("Content-Length")) {
 			return true;
@@ -245,6 +264,7 @@ private:
 	std::function<void(const HTTPResponse &)> validate_response;
 	idx_t out_offset = 0;
 	bool range_request_not_supported = false;
+	bool etag_changed_before_read = false;
 };
 
 unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh, const string &url,
@@ -332,13 +352,17 @@ HTTPException HTTPFileSystem::GetHTTPError(FileHandle &, const HTTPResponse &res
 	return HTTPFSUtil::GetHTTPStatusError(response, request_type, "on", url, details);
 }
 
-void HTTPFileSystem::ValidateResponseVersion(HTTPFileHandle &hfh, const HTTPReadConfig &read_config,
-                                             const HTTPResponse &response) {
+bool HTTPFileSystem::ResponseETagChanged(const HTTPReadConfig &read_config, const HTTPResponse &response) {
 	if (!read_config.validate_etag || read_config.etag.empty() || !response.HasHeader("ETag")) {
-		return;
+		return false;
 	}
 	auto response_etag = response.GetHeaderValue("ETag");
-	if (response_etag.empty() || StripETagQuotes(response_etag) == StripETagQuotes(read_config.etag)) {
+	return !response_etag.empty() && StripETagQuotes(response_etag) != StripETagQuotes(read_config.etag);
+}
+
+void HTTPFileSystem::ValidateResponseVersion(HTTPFileHandle &hfh, const HTTPReadConfig &read_config,
+                                             const HTTPResponse &response) {
+	if (!ResponseETagChanged(read_config, response)) {
 		return;
 	}
 	EraseGlobalCacheEntry(hfh.path);
@@ -348,7 +372,7 @@ void HTTPFileSystem::ValidateResponseVersion(HTTPFileHandle &hfh, const HTTPRead
 	    "the remote file has changed.\nFor parquet or similar single table sources, consider "
 	    "retrying the query, for persistent FileHandles such as databases consider `DETACH` and re-`ATTACH` "
 	    "\nYou can disable checking etags via `SET unsafe_disable_etag_checks = true;`",
-	    hfh.path, read_config.etag, response_etag);
+	    hfh.path, read_config.etag, response.GetHeaderValue("ETag"));
 }
 
 void HTTPFileSystem::ValidateCachedFile(HTTPFileHandle &hfh, const HTTPReadConfig &read_config,

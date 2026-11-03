@@ -78,7 +78,7 @@ struct MockS3MetadataConfig {
 	string version_id;
 	bool version_on_head = false;
 	bool version_on_get = false;
-	//! Reject GETs whose If-Match does not equal the GET ETag
+	//! Reject GETs that send an If-Match not equal to the GET ETag
 	bool enforce_if_match = false;
 	//! Override the Content-Length reported by HEAD while keeping the GET body unchanged
 	optional_idx head_content_length;
@@ -288,6 +288,8 @@ public:
 	string S3Path() const;
 	const string &ObjectData() const;
 	void SetObjectGeneration(const string &generation);
+	//! Change the ETag returned by GET from now on
+	void SetGetETag(const string &etag);
 	string UploadedObject() const;
 	string CompletionBody() const;
 	vector<MockS3RequestObservation> Observations() const;

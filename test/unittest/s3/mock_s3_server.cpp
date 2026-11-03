@@ -338,6 +338,7 @@ public:
 
 	explicit Impl(MockS3ServerConfig config_p)
 	    : config(std::move(config_p)), live_generation(config.object.generation),
+	      live_get_etag(config.metadata.get_etag.empty() ? config.metadata.etag : config.metadata.get_etag),
 	      server_owner(CreateServer(config.use_ssl)), server(*server_owner) {
 		uploaded_object = config.upload.initial_published_object;
 		remaining_put_failures = config.failures.transient_put_failures;
@@ -591,7 +592,8 @@ public:
 	}
 
 	string GetResponseETag() const {
-		return config.metadata.get_etag.empty() ? config.metadata.etag : config.metadata.get_etag;
+		annotated_lock_guard<annotated_mutex> guard(get_etag_lock);
+		return live_get_etag;
 	}
 
 	void SetGetHeaders(httplib::Response &response, const string &generation) const {
@@ -1203,7 +1205,8 @@ public:
 				SendS3Error400(request, response, config.failures.failure_is_request_timeout);
 				return;
 			}
-			if (config.metadata.enforce_if_match && GetHeader(request, "If-Match") != GetResponseETag()) {
+			if (config.metadata.enforce_if_match && request.has_header("If-Match") &&
+			    GetHeader(request, "If-Match") != GetResponseETag()) {
 				response.status = 412;
 				Record(request, response.status);
 				return;
@@ -1241,7 +1244,7 @@ public:
 				}
 				if (config.full_get.chunked) {
 					response.set_chunked_content_provider(
-					    "application/octet-stream", [this, &data](size_t offset, httplib::DataSink &sink) {
+					    "application/octet-stream", [&data](size_t offset, httplib::DataSink &sink) {
 						    if (offset >= data.size()) {
 							    sink.done();
 							    return true;
@@ -1464,6 +1467,8 @@ public:
 	MockS3ServerConfig config;
 	mutable annotated_mutex generation_lock;
 	string live_generation DUCKDB_GUARDED_BY(generation_lock);
+	mutable annotated_mutex get_etag_lock;
+	string live_get_etag DUCKDB_GUARDED_BY(get_etag_lock);
 	unique_ptr<httplib::Server> server_owner;
 	httplib::Server &server;
 	std::thread server_thread;
@@ -1563,6 +1568,11 @@ void MockS3Server::SetObjectGeneration(const string &generation) {
 	D_ASSERT(impl->config.object.generations.count(generation));
 	annotated_lock_guard<annotated_mutex> guard(impl->generation_lock);
 	impl->live_generation = generation;
+}
+
+void MockS3Server::SetGetETag(const string &etag) {
+	annotated_lock_guard<annotated_mutex> guard(impl->get_etag_lock);
+	impl->live_get_etag = etag;
 }
 
 string MockS3Server::UploadedObject() const {

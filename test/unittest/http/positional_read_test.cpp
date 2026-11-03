@@ -303,20 +303,38 @@ CREATE SECRET positional_read_headers (
 	RequireQueryOk(con, "COMMIT");
 }
 
-static void RunPreconditionFailure(const string &client_implementation) {
+static vector<MockS3RequestObservation> FullGetObservations(const MockS3Server &server) {
+	vector<MockS3RequestObservation> result;
+	for (const MockS3RequestObservation &observation : server.Observations()) {
+		if (observation.method == "GET" && observation.range.empty()) {
+			result.push_back(observation);
+		}
+	}
+	return result;
+}
+
+static void RunPreconditionFailure(const string &client_implementation, bool data_read) {
 	MockS3ServerConfig config;
 	config.metadata.etag = "\"opened-etag\"";
-	config.metadata.get_etag = "\"changed-etag\"";
 	config.metadata.enforce_if_match = true;
 	MockS3Server server(std::move(config));
 
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureHTTPReadTest(db, con, client_implementation, 3);
+	if (!data_read) {
+		// Without the fallback, a rejected If-Match on the first read cannot switch to the new version
+		RequireQueryOk(con, "SET auto_fallback_to_full_download=false");
+	}
 	RequireQueryOk(con, "BEGIN TRANSACTION");
 
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	auto handle = fs.OpenFile(server.HTTPPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	if (data_read) {
+		ReadOutcome first = TryReadHandle(con, *handle, 20, 5);
+		REQUIRE_FALSE(first.failed);
+	}
+	server.SetGetETag("\"changed-etag\"");
 	handle->Seek(9);
 	auto outcome = TryReadHandle(con, *handle, 2, 5);
 	INFO(outcome.error);
@@ -327,9 +345,130 @@ static void RunPreconditionFailure(const string &client_implementation) {
 
 	auto observations = RangeObservations(server);
 	INFO(MockS3DescribeObservations(observations));
-	REQUIRE(observations.size() == 1);
-	REQUIRE(observations[0].status == 412);
-	REQUIRE(observations[0].if_match == "\"opened-etag\"");
+	REQUIRE(observations.size() == (data_read ? 2 : 1));
+	REQUIRE(observations.back().status == 412);
+	REQUIRE(observations.back().if_match == "\"opened-etag\"");
+	CHECK(FullGetObservations(server).empty());
+	RequireQueryOk(con, "COMMIT");
+}
+
+// A CDN can answer the HEAD and the first range GET from caches holding different ETags of the same content, and
+// either ignore If-Match or reject it with a 412 (https://blobs.duckdb.org, extensions.duckdb.org behind Cloudflare)
+static constexpr const char *OPENED_CDN_ETAG = "\"fe808df546815a343902df625a1f7932-4\"";
+static constexpr const char *CHANGED_CDN_ETAG = "\"493a33498735a3446e0b8fff7ca43452-4\"";
+
+static void RunFirstRangeReadETagChange(const string &client_implementation, bool enforce_if_match) {
+	MockS3ServerConfig config;
+	config.metadata.etag = OPENED_CDN_ETAG;
+	config.metadata.get_etag = CHANGED_CDN_ETAG;
+	config.metadata.enforce_if_match = enforce_if_match;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureHTTPReadTest(db, con, client_implementation);
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+
+	FileSystem &fs = FileSystem::GetFileSystem(*con.context);
+	unique_ptr<FileHandle> handle =
+	    fs.OpenFile(server.HTTPPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	ReadOutcome outcome = TryReadHandle(con, *handle, 2, 5);
+	INFO(outcome.error);
+	INFO(MockS3DescribeObservations(server.Observations()));
+	REQUIRE_FALSE(outcome.failed);
+	CHECK(outcome.data == "cdefg");
+	// Later reads are served from the download of the new version
+	outcome = TryReadHandle(con, *handle, 30, 6);
+	REQUIRE_FALSE(outcome.failed);
+	CHECK(outcome.data == "456789");
+
+	vector<MockS3RequestObservation> range_gets = RangeObservations(server);
+	REQUIRE(range_gets.size() == 1);
+	CHECK(range_gets[0].status == (enforce_if_match ? 412 : 206));
+	CHECK(range_gets[0].if_match == OPENED_CDN_ETAG);
+	vector<MockS3RequestObservation> full_gets = FullGetObservations(server);
+	REQUIRE(full_gets.size() == 1);
+	CHECK(full_gets[0].status == 200);
+	CHECK(full_gets[0].if_match.empty());
+	RequireQueryOk(con, "COMMIT");
+
+	unique_ptr<QueryResult> result =
+	    con.Query(StringUtil::Format("SELECT * FROM read_csv('%s', header=false)", server.HTTPPath()));
+	INFO((result->HasError() ? result->GetError() : string()));
+	REQUIRE_FALSE(result->HasError());
+	CHECK(result->Collection().GetValue(0, 0).ToString() == server.ObjectData());
+}
+
+static void RunETagChangeAfterRead(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.metadata.etag = OPENED_CDN_ETAG;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureHTTPReadTest(db, con, client_implementation);
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+
+	FileSystem &fs = FileSystem::GetFileSystem(*con.context);
+	unique_ptr<FileHandle> handle =
+	    fs.OpenFile(server.HTTPPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	ReadOutcome outcome = TryReadHandle(con, *handle, 2, 5);
+	REQUIRE_FALSE(outcome.failed);
+	CHECK(outcome.data == "cdefg");
+
+	// Data was returned under the opened ETag: switching versions now would mix them
+	server.SetGetETag(CHANGED_CDN_ETAG);
+	outcome = TryReadHandle(con, *handle, 30, 6);
+	INFO(MockS3DescribeObservations(server.Observations()));
+	REQUIRE(outcome.failed);
+	CHECK(outcome.error.find("was initially") != string::npos);
+	CHECK(FullGetObservations(server).empty());
+	RequireQueryOk(con, "COMMIT");
+}
+
+static void RunFirstRangeReadETagChangeWithoutFallback(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.metadata.etag = OPENED_CDN_ETAG;
+	config.metadata.get_etag = CHANGED_CDN_ETAG;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureHTTPReadTest(db, con, client_implementation);
+	RequireQueryOk(con, "SET auto_fallback_to_full_download=false");
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+
+	FileSystem &fs = FileSystem::GetFileSystem(*con.context);
+	unique_ptr<FileHandle> handle =
+	    fs.OpenFile(server.HTTPPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	ReadOutcome outcome = TryReadHandle(con, *handle, 2, 5);
+	INFO(MockS3DescribeObservations(server.Observations()));
+	REQUIRE(outcome.failed);
+	CHECK(outcome.error.find("was initially") != string::npos);
+	CHECK(FullGetObservations(server).empty());
+	RequireQueryOk(con, "COMMIT");
+}
+
+static void RunFirstRangeReadETagChangeWithResize(const string &client_implementation) {
+	MockS3ServerConfig config;
+	config.metadata.etag = OPENED_CDN_ETAG;
+	config.metadata.get_etag = CHANGED_CDN_ETAG;
+	config.metadata.head_content_length = 40;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureHTTPReadTest(db, con, client_implementation);
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+
+	FileSystem &fs = FileSystem::GetFileSystem(*con.context);
+	unique_ptr<FileHandle> handle =
+	    fs.OpenFile(server.HTTPPath(), FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	ReadOutcome outcome = TryReadHandle(con, *handle, 2, 5);
+	INFO(MockS3DescribeObservations(server.Observations()));
+	// The size the reader was given at open no longer holds for the new version
+	REQUIRE(outcome.failed);
+	CHECK(outcome.error.find("The size reported by HEAD") != string::npos);
 	RequireQueryOk(con, "COMMIT");
 }
 
@@ -547,8 +686,35 @@ TEST_CASE("configured headers do not override positional read headers", "[httpfs
 }
 
 TEST_CASE("HTTP ETag precondition failures are terminal", "[httpfs][positional-read][etag]") {
-	RunPreconditionFailure("curl");
-	RunPreconditionFailure("httplib");
+	for (const char *client : {"curl", "httplib"}) {
+		DYNAMIC_SECTION(client << " after a read") {
+			RunPreconditionFailure(client, true);
+		}
+		DYNAMIC_SECTION(client << " without fallback") {
+			RunPreconditionFailure(client, false);
+		}
+	}
+}
+
+TEST_CASE("HTTP ETag change before any data was read switches to a full download",
+          "[httpfs][positional-read][etag][full-download]") {
+	for (const char *client : {"curl", "httplib"}) {
+		DYNAMIC_SECTION(client << " switches") {
+			RunFirstRangeReadETagChange(client, false);
+		}
+		DYNAMIC_SECTION(client << " switches on a rejected If-Match") {
+			RunFirstRangeReadETagChange(client, true);
+		}
+		DYNAMIC_SECTION(client << " after a read") {
+			RunETagChangeAfterRead(client);
+		}
+		DYNAMIC_SECTION(client << " without fallback") {
+			RunFirstRangeReadETagChangeWithoutFallback(client);
+		}
+		DYNAMIC_SECTION(client << " with a different size") {
+			RunFirstRangeReadETagChangeWithResize(client);
+		}
+	}
 }
 
 TEST_CASE("HTTP read conditions survive transport retries", "[httpfs][positional-read][retry]") {
