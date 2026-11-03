@@ -26,6 +26,44 @@ static bool IsSuccessfulStatus(HTTPStatusCode status) {
 	return status_code >= 200 && status_code < 300;
 }
 
+//! What the handler read from a multipart initialization or completion response, kept from validation for the
+//! handling that follows
+struct MultipartDocument {
+	//! Whether the body parsed as an S3 XML document
+	bool readable = false;
+	S3XMLResponse response;
+};
+
+//! The handler's reading of a multipart initialization or completion response, run by the request executor before
+//! the retry quota is settled: only the document the operation expects is a success; an S3 error document and a
+//! final status are failures; an empty or malformed body and any other document are an unknown outcome, which the
+//! handler goes on to report to its caller (see InitializeMultipartUpload / CompleteMultipartUpload) and which must
+//! not refund the retry that led to it.
+static S3OperationOutcome ValidateMultipartResponse(const HTTPResponse &response, S3XMLResponseType expected,
+                                                    MultipartDocument &document) {
+	document = MultipartDocument();
+	if (response.HasRequestError() || !IsSuccessfulStatus(response.status)) {
+		return S3OperationOutcome::FAILURE;
+	}
+	if (!S3XMLResponseParser::TryParse(response.body, document.response)) {
+		return S3OperationOutcome::UNKNOWN;
+	}
+	document.readable = true;
+	if (document.response.type == S3XMLResponseType::ERROR) {
+		return S3OperationOutcome::FAILURE;
+	}
+	return document.response.type == expected ? S3OperationOutcome::SUCCESS : S3OperationOutcome::UNKNOWN;
+}
+
+//! An S3 error document behind a 2xx: the operation failed with the error it names
+static HTTPException GetEmbeddedError(const HTTPResponse &response, const string &operation,
+                                      const S3RequestContext &request_context, const S3XMLResponse &document) {
+	return HTTPException(response, "S3 multipart upload %s for \"%s\" failed: %s%s%s", operation,
+	                     request_context.display_url,
+	                     document.error_code.empty() ? "S3 returned an embedded error" : document.error_code,
+	                     document.error_message.empty() ? "" : ": ", document.error_message);
+}
+
 } // namespace
 
 S3UploadSession::WriteClaim::WriteClaim(S3UploadSession &session_p) : session(session_p) {
@@ -241,8 +279,11 @@ void S3UploadSession::FailOperation(ErrorData error, FailureDisposition disposit
 shared_ptr<const ErrorData> S3UploadSession::AbortMultipartUpload(const string &upload_id) {
 	S3RequestQuery query {{"uploadId", upload_id}};
 	try {
-		auto request_result =
-		    s3fs.get().DeleteRequest(*request_session, S3RequestOperation::ABORT_MULTIPART_UPLOAD, path, query);
+		auto request_result = s3fs.get().DeleteRequest(
+		    *request_session, S3RequestOperation::ABORT_MULTIPART_UPLOAD, path, query,
+		    [](const S3RequestData &, const HTTPResponse &response) {
+			    return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::NoContent_204});
+		    });
 		auto &response = request_result.response;
 		if (response->status == HTTPStatusCode::NoContent_204) {
 			return nullptr;
@@ -351,8 +392,12 @@ S3UploadSession::PreparedWrite S3UploadSession::PrepareWrite(const_data_ptr_t da
 
 string S3UploadSession::InitializeMultipartUpload() {
 	string result;
-	auto request_result = s3fs.get().PostRequest(*request_session, S3RequestOperation::CREATE_MULTIPART_UPLOAD, path,
-	                                             result, nullptr, 0, S3RequestQuery({{"uploads", ""}}));
+	MultipartDocument document;
+	auto request_result = s3fs.get().PostRequest(
+	    *request_session, S3RequestOperation::CREATE_MULTIPART_UPLOAD, path, result, nullptr, 0,
+	    S3RequestQuery({{"uploads", ""}}), [&](const S3RequestData &, const HTTPResponse &response) {
+		    return ValidateMultipartResponse(response, S3XMLResponseType::MULTIPART_INITIALIZATION, document);
+	    });
 	auto &response = request_result.response;
 	auto &request_context = request_result.context;
 	if (response->HasRequestError()) {
@@ -364,21 +409,23 @@ string S3UploadSession::InitializeMultipartUpload() {
 	if (!IsSuccessfulStatus(response->status)) {
 		throw GetStatusError(*response, request_context);
 	}
-
-	S3XMLResponse parsed_response;
-	if (!S3XMLResponseParser::TryParse(result, parsed_response)) {
+	// The document was read when the response was validated; report what it said
+	if (request_result.outcome == S3OperationOutcome::SUCCESS) {
+		return document.response.upload_id;
+	}
+	if (!document.readable) {
 		throw S3AmbiguousUploadException(StringUtil::Format(
 		    "S3 multipart upload initialization for \"%s\" returned malformed XML; the request was not retried and "
 		    "cannot be aborted without an upload ID",
 		    request_context.display_url));
 	}
-	if (parsed_response.type != S3XMLResponseType::MULTIPART_INITIALIZATION) {
-		throw S3AmbiguousUploadException(StringUtil::Format(
-		    "S3 multipart upload initialization for \"%s\" returned an unrecognized response; the request was not "
-		    "retried and cannot be aborted without an upload ID",
-		    request_context.display_url));
+	if (document.response.type == S3XMLResponseType::ERROR) {
+		throw GetEmbeddedError(*response, "initialization", request_context, document.response);
 	}
-	return parsed_response.upload_id;
+	throw S3AmbiguousUploadException(StringUtil::Format(
+	    "S3 multipart upload initialization for \"%s\" returned an unrecognized response; the request was not "
+	    "retried and cannot be aborted without an upload ID",
+	    request_context.display_url));
 }
 
 void S3UploadSession::PublishInitializationFailure(ErrorData error, FailureDisposition disposition)
@@ -457,8 +504,9 @@ void S3UploadSession::ThrowIfFailed() DUCKDB_EXCLUDES(state_lock) {
 }
 
 S3RequestResult S3UploadSession::RunUploadRequest(S3RequestOperation operation, const_data_ptr_t data, idx_t size,
-                                                  const S3RequestQuery &query) {
-	auto result = s3fs.get().PutRequest(*request_session, operation, path, data, size, query);
+                                                  const S3RequestQuery &query,
+                                                  const S3RequestExecutor::ValidateCallback &validate) {
+	auto result = s3fs.get().PutRequest(*request_session, operation, path, data, size, query, validate);
 	if (result.response->HasRequestError()) {
 		throw IOException("S3 upload request for \"%s\" could not be completed: %s", result.context.display_url,
 		                  result.response->GetRequestError());
@@ -467,7 +515,11 @@ S3RequestResult S3UploadSession::RunUploadRequest(S3RequestOperation operation, 
 }
 
 void S3UploadSession::UploadObject(const_data_ptr_t data, idx_t size) {
-	auto request_result = RunUploadRequest(S3RequestOperation::PUT_OBJECT, data, size, S3RequestQuery());
+	auto request_result = RunUploadRequest(
+	    S3RequestOperation::PUT_OBJECT, data, size, S3RequestQuery(),
+	    [](const S3RequestData &, const HTTPResponse &response) {
+		    return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200, HTTPStatusCode::Created_201});
+	    });
 	auto &response = request_result.response;
 	if (response->status != HTTPStatusCode::OK_200 && response->status != HTTPStatusCode::Created_201) {
 		throw GetStatusError(*response, request_result.context);
@@ -479,16 +531,25 @@ void S3UploadSession::UploadPart(PreparedPart &part) {
 	ThrowIfFailed();
 	D_ASSERT(upload_id);
 	S3RequestQuery query {{"partNumber", to_string(part.part_number)}, {"uploadId", *upload_id}};
-	auto request_result = RunUploadRequest(S3RequestOperation::UPLOAD_PART, part.data, part.size, query);
+	string etag;
+	auto request_result = RunUploadRequest(
+	    S3RequestOperation::UPLOAD_PART, part.data, part.size, query,
+	    [&](const S3RequestData &, const HTTPResponse &response) {
+		    // The part's ETag is what the completion sends back: a 200 without one did not upload a usable part
+		    etag.clear();
+		    if (S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200}) != S3OperationOutcome::SUCCESS) {
+			    return S3OperationOutcome::FAILURE;
+		    }
+		    if (response.headers.HasHeader("ETag")) {
+			    etag = response.headers.GetHeaderValue("ETag");
+		    }
+		    return etag.empty() ? S3OperationOutcome::FAILURE : S3OperationOutcome::SUCCESS;
+	    });
 	auto &response = request_result.response;
 	if (response->status != HTTPStatusCode::OK_200) {
 		throw GetStatusError(*response, request_result.context);
 	}
-	if (!response->headers.HasHeader("ETag")) {
-		throw IOException("Unexpected response when uploading to S3");
-	}
-	auto etag = response->headers.GetHeaderValue("ETag");
-	if (etag.empty()) {
+	if (request_result.outcome != S3OperationOutcome::SUCCESS) {
 		throw IOException("Unexpected response when uploading to S3");
 	}
 	StorePartETag(part.part_number, std::move(etag));
@@ -530,9 +591,13 @@ void S3UploadSession::CompleteMultipartUpload() {
 
 	S3RequestQuery query {{"uploadId", *snapshot.upload_id}};
 	string result;
-	auto request_result =
-	    s3fs.get().PostRequest(*request_session, S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, path, result,
-	                           const_data_ptr_cast(completion_body.data()), completion_body.size(), query);
+	MultipartDocument document;
+	auto request_result = s3fs.get().PostRequest(
+	    *request_session, S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, path, result,
+	    const_data_ptr_cast(completion_body.data()), completion_body.size(), query,
+	    [&](const S3RequestData &, const HTTPResponse &response) {
+		    return ValidateMultipartResponse(response, S3XMLResponseType::MULTIPART_COMPLETION, document);
+	    });
 	auto &response = request_result.response;
 	auto &request_context = request_result.context;
 	if (response->HasRequestError()) {
@@ -545,25 +610,22 @@ void S3UploadSession::CompleteMultipartUpload() {
 	if (!IsSuccessfulStatus(response->status)) {
 		throw GetStatusError(*response, request_context);
 	}
-
-	S3XMLResponse parsed_response;
-	if (!S3XMLResponseParser::TryParse(result, parsed_response)) {
+	// The document was read when the response was validated; report what it said
+	if (request_result.outcome == S3OperationOutcome::SUCCESS) {
+		return;
+	}
+	if (!document.readable) {
 		throw S3AmbiguousUploadException(StringUtil::Format(
 		    "S3 multipart upload completion for \"%s\" returned malformed XML; the request was not retried or aborted",
 		    request_context.display_url));
 	}
-	if (parsed_response.type == S3XMLResponseType::ERROR) {
-		throw HTTPException(
-		    *response, "S3 multipart upload completion for \"%s\" failed: %s%s%s", request_context.display_url,
-		    parsed_response.error_code.empty() ? "S3 returned an embedded error" : parsed_response.error_code,
-		    parsed_response.error_message.empty() ? "" : ": ", parsed_response.error_message);
+	if (document.response.type == S3XMLResponseType::ERROR) {
+		throw GetEmbeddedError(*response, "completion", request_context, document.response);
 	}
-	if (parsed_response.type != S3XMLResponseType::MULTIPART_COMPLETION) {
-		throw S3AmbiguousUploadException(StringUtil::Format("S3 multipart upload completion for \"%s\" returned an "
-		                                                    "unrecognized response; the request was not retried or "
-		                                                    "aborted",
-		                                                    request_context.display_url));
-	}
+	throw S3AmbiguousUploadException(StringUtil::Format("S3 multipart upload completion for \"%s\" returned an "
+	                                                    "unrecognized response; the request was not retried or "
+	                                                    "aborted",
+	                                                    request_context.display_url));
 }
 
 string S3UploadSession::GetDisplayPath() const {

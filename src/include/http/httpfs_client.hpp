@@ -94,6 +94,9 @@ private:
 class HTTPFSUtil : public HTTPUtil {
 public:
 	explicit HTTPFSUtil(optional_ptr<DatabaseInstance> db = nullptr);
+	//! Unsigned S3 headers identifying one logical request and its attempt, as sent by the AWS SDKs.
+	static constexpr const char *S3_INVOCATION_ID_HEADER = "amz-sdk-invocation-id";
+	static constexpr const char *S3_ATTEMPT_HEADER = "amz-sdk-request";
 
 public:
 	unique_ptr<HTTPParams> InitializeParameters(optional_ptr<FileOpener> opener,
@@ -105,6 +108,8 @@ public:
 	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
 	//! S3's 400 RequestTimeout is retryable; core only knows the generic statuses.
 	bool ShouldRetry(const BaseRequest &request, const HTTPResponse &response) override;
+	//! Tags S3 requests with the attempt number so the service can tell retries apart.
+	void PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) override;
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);

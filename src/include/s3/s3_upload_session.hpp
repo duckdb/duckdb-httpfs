@@ -1,5 +1,6 @@
 #pragma once
 
+#include "s3/s3_request.hpp"
 #include "s3/s3_settings.hpp"
 
 #include "duckdb/common/error_data.hpp"
@@ -147,7 +148,7 @@ private:
 
 	//! S3 upload and cleanup requests.
 	S3RequestResult RunUploadRequest(S3RequestOperation operation, const_data_ptr_t data, idx_t size,
-	                                 const S3RequestQuery &query);
+	                                 const S3RequestQuery &query, const S3RequestExecutor::ValidateCallback &validate);
 	void UploadObject(const_data_ptr_t data, idx_t size);
 	void UploadPart(PreparedPart &part);
 	shared_ptr<const ErrorData> AbortMultipartUpload(const string &upload_id);

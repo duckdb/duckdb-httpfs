@@ -49,6 +49,11 @@ enum class S3RequestOperation : uint8_t {
 	ABORT_MULTIPART_UPLOAD
 };
 enum class S3ReceivedResponseAction : uint8_t { ACCEPT, RETRY_FRESH_CONNECTION };
+//! What the operation's handler makes of a received response, decided before the retry quota is settled: only a
+//! validated SUCCESS refunds the retry the operation consumed; a FAILURE (an S3 error document, a final status) and
+//! an UNKNOWN outcome (a body the handler cannot read) keep it charged. The handler still reports an unknown outcome
+//! to its caller as before; the executor only never mistakes it for a success.
+enum class S3OperationOutcome : uint8_t { SUCCESS, FAILURE, UNKNOWN };
 
 struct S3RequestOperationInfo {
 	RequestType request_type;
@@ -110,6 +115,9 @@ struct S3RequestContext {
 struct S3RequestResult {
 	unique_ptr<HTTPResponse> response;
 	S3RequestContext context;
+	//! The operation's validated outcome (S3RequestExecutor::ValidateCallback), kept for the handling that follows;
+	//! FAILURE when no response was received or the last one was retryable but could not be retried.
+	S3OperationOutcome outcome = S3OperationOutcome::FAILURE;
 };
 
 struct S3RequestSpec {
@@ -159,6 +167,11 @@ struct S3RequestUtil {
 	static string GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len);
 	static bool IsRequestTimeout(const HTTPResponse &response);
 	static bool IsRetryableReceivedResponse(const HTTPResponse &response);
+	//! The validation of an operation whose outcome is its status alone (S3 answers these with an error status, never
+	//! with an error document behind a 2xx): a received response with one of the operation's accepted statuses is a
+	//! success, anything else a failure. Operations that read a document or a required header validate those too.
+	static S3OperationOutcome ValidateStatus(const HTTPResponse &response,
+	                                         std::initializer_list<HTTPStatusCode> accepted_statuses);
 	//! Whether a raised request error carries a throttling status, matching core's throttled retry admission.
 	static bool IsThrottledError(const ErrorData &error);
 
@@ -175,13 +188,18 @@ struct S3RequestExecutor {
 	using RegionRedirectCallback = std::function<void(const S3RequestData &, const string &, const string &)>;
 	using ReceivedResponseCallback =
 	    std::function<S3ReceivedResponseAction(const S3RequestData &, const HTTPResponse &)>;
+	//! The operation's authoritative validation of a received response the executor does not retry (its accepted
+	//! statuses, required headers or result document), run once before the host quota is settled. Every operation
+	//! supplies one; what it parses it keeps for the handling that follows, so nothing is read twice.
+	using ValidateCallback = std::function<S3OperationOutcome(const S3RequestData &, const HTTPResponse &)>;
 
 	static S3RequestResult RunSession(EncryptionUtil &encryption_util, HTTPRequestSession &session,
 	                                  const S3RequestSpec &spec, const RequestCallback &request,
+	                                  const ValidateCallback &validate,
 	                                  const RegionRedirectCallback &region_redirect = {},
 	                                  const ReceivedResponseCallback &response_callback = {});
 	static S3RequestResult RunHandle(EncryptionUtil &encryption_util, S3FileHandle &handle, const S3RequestSpec &spec,
-	                                 const RequestCallback &request);
+	                                 const RequestCallback &request, const ValidateCallback &validate);
 
 	static bool SetSessionRegion(HTTPRequestSession &session, const string &correct_region, string &previous_region);
 	static bool CredentialRefreshEnabled(optional_ptr<FileOpener> opener);
@@ -202,7 +220,7 @@ private:
 	static S3RequestResult Run(EncryptionUtil &encryption_util, HTTPRequestSession &session, const S3RequestSpec &spec,
 	                           const RequestCallback &request, const RefreshCallback &refresh_auth_params,
 	                           const SetRegionCallback &set_region, const FreshConnectionCallback &fresh_connection,
-	                           const ReceivedResponseCallback &response_callback = {});
+	                           const ReceivedResponseCallback &response_callback, const ValidateCallback &validate);
 	static bool TryRefreshSession(HTTPRequestSession &session, const S3RequestData &request_data);
 	static void InvalidateSessionConnections(HTTPRequestSession &session);
 	static S3RequestData CreateRequestData(EncryptionUtil &encryption_util, const CapturedHTTPRequestSnapshot &captured,

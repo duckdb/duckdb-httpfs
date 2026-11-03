@@ -28,6 +28,11 @@
 
 namespace duckdb {
 
+//! The validation of the executor tests' operations: a 200 got through, nothing else did
+static S3OperationOutcome AcceptOK(const S3RequestData &, const HTTPResponse &response) {
+	return S3RequestUtil::ValidateStatus(response, {HTTPStatusCode::OK_200});
+}
+
 namespace {
 
 static S3AuthConfig TestAuthConfig(S3ProviderType provider_type = S3ProviderType::S3, bool scheme_is_alias = false) {
@@ -1875,15 +1880,18 @@ TEST_CASE("GCS generation URL validation and signing", "[httpfs][s3][gcs-generat
 	::AESStateSSLFactory encryption_util;
 	for (const auto operation : {S3RequestOperation::HEAD_OBJECT, S3RequestOperation::GET_OBJECT}) {
 		S3RequestSpec spec {path, operation, {}, "", "", ""};
-		S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request) {
-			auto timestamp = request.headers.GetHeaderValue("x-amz-date");
-			auto expected = S3RequestUtil::CreateHeaders(encryption_util, parsed, operation,
-			                                             S3RequestQuery({{"generation", "123"}}), auth,
-			                                             timestamp.substr(0, 8), timestamp);
-			REQUIRE(request.http_url == parsed.GetHTTPUrl("generation=123"));
-			REQUIRE(request.headers.GetHeaderValue("Authorization") == expected.GetHeaderValue("Authorization"));
-			return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
-		});
+		S3RequestExecutor::RunSession(
+		    encryption_util, session, spec,
+		    [&](S3RequestData &request) {
+			    auto timestamp = request.headers.GetHeaderValue("x-amz-date");
+			    auto expected = S3RequestUtil::CreateHeaders(encryption_util, parsed, operation,
+			                                                 S3RequestQuery({{"generation", "123"}}), auth,
+			                                                 timestamp.substr(0, 8), timestamp);
+			    REQUIRE(request.http_url == parsed.GetHTTPUrl("generation=123"));
+			    REQUIRE(request.headers.GetHeaderValue("Authorization") == expected.GetHeaderValue("Authorization"));
+			    return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+		    },
+		    AcceptOK);
 	}
 }
 
@@ -1901,20 +1909,23 @@ TEST_CASE("GCS generation conditions are owned and omitted from HMAC requests", 
 	::AESStateSSLFactory encryption_util;
 	S3RequestSpec spec {path, S3RequestOperation::GET_OBJECT, {}, "", "", ""};
 	spec.read_condition = {HTTPReadConditionType::GCS_GENERATION_MATCH, "123"};
-	S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request) {
-		auto timestamp = request.headers.GetHeaderValue("x-amz-date");
-		auto expected =
-		    S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(), auth,
-		                                 timestamp.substr(0, 8), timestamp, "", "", "", {}, spec.read_condition);
-		auto unconditional = S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(),
-		                                                  auth, timestamp.substr(0, 8), timestamp);
-		REQUIRE(request.http_url == parsed.GetHTTPUrl());
-		// GCS rejects x-goog-* headers on AWS4-HMAC-SHA256 requests with 400 ExcessHeaderValues.
-		REQUIRE_FALSE(request.headers.HasHeader("x-goog-if-generation-match"));
-		REQUIRE(request.headers.GetHeaderValue("Authorization") == expected.GetHeaderValue("Authorization"));
-		REQUIRE(request.headers.GetHeaderValue("Authorization") == unconditional.GetHeaderValue("Authorization"));
-		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
-	});
+	S3RequestExecutor::RunSession(
+	    encryption_util, session, spec,
+	    [&](S3RequestData &request) {
+		    auto timestamp = request.headers.GetHeaderValue("x-amz-date");
+		    auto expected =
+		        S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(), auth,
+		                                     timestamp.substr(0, 8), timestamp, "", "", "", {}, spec.read_condition);
+		    auto unconditional = S3RequestUtil::CreateHeaders(encryption_util, parsed, spec.operation, S3RequestQuery(),
+		                                                      auth, timestamp.substr(0, 8), timestamp);
+		    REQUIRE(request.http_url == parsed.GetHTTPUrl());
+		    // GCS rejects x-goog-* headers on AWS4-HMAC-SHA256 requests with 400 ExcessHeaderValues.
+		    REQUIRE_FALSE(request.headers.HasHeader("x-goog-if-generation-match"));
+		    REQUIRE(request.headers.GetHeaderValue("Authorization") == expected.GetHeaderValue("Authorization"));
+		    REQUIRE(request.headers.GetHeaderValue("Authorization") == unconditional.GetHeaderValue("Authorization"));
+		    return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+	    },
+	    AcceptOK);
 	auto bearer_config = TestAuthConfig(S3ProviderType::GCS);
 	bearer_config.credentials.oauth2_bearer_token = "gcs-token";
 	auto bearer = ResolveTestAuth(bearer_config);
@@ -1973,9 +1984,9 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 	     false},
 	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true, false, false,
 	     false},
-	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, false, false,
+	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, true, true, false,
 	     false},
-	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, false,
+	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, true, true,
 	     true, true},
 	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
 	    {S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, true,
@@ -2142,10 +2153,13 @@ TEST_CASE("S3 rejects configured header conflicts before request dispatch", "[ht
 	                    "",
 	                    "",
 	                    ""};
-	REQUIRE_THROWS(S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &) {
-		request_count++;
-		return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
-	}));
+	REQUIRE_THROWS(S3RequestExecutor::RunSession(
+	    encryption_util, session, spec,
+	    [&](S3RequestData &) {
+		    request_count++;
+		    return make_uniq<HTTPResponse>(HTTPStatusCode::OK_200);
+	    },
+	    AcceptOK));
 	REQUIRE(request_count == 0);
 }
 
@@ -2229,23 +2243,26 @@ TEST_CASE("S3 region correction retains spent retries", "[httpfs][s3][retry][sha
 		::AESStateSSLFactory encryption_util;
 		S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
 		idx_t attempts = 0;
-		auto result = S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request) {
-			attempts++;
-			if (attempts == 2) {
-				auto response = make_uniq<HTTPResponse>(HTTPStatusCode::MovedPermanently_301);
-				response->headers.Insert("x-amz-bucket-region", "eu-west-1");
-				if (throw_redirect) {
-					throw HTTPException(*response, "region correction");
-				}
-				return response;
-			}
-			if (attempts > 2) {
-				REQUIRE(request.auth_params.GetCredentials().region == "eu-west-1");
-			}
-			auto response = make_uniq<HTTPResponse>(HTTPStatusCode::BadRequest_400);
-			response->body = "<Error><Code>RequestTimeout</Code></Error>";
-			return response;
-		});
+		auto result = S3RequestExecutor::RunSession(
+		    encryption_util, session, spec,
+		    [&](S3RequestData &request) {
+			    attempts++;
+			    if (attempts == 2) {
+				    auto response = make_uniq<HTTPResponse>(HTTPStatusCode::MovedPermanently_301);
+				    response->headers.Insert("x-amz-bucket-region", "eu-west-1");
+				    if (throw_redirect) {
+					    throw HTTPException(*response, "region correction");
+				    }
+				    return response;
+			    }
+			    if (attempts > 2) {
+				    REQUIRE(request.auth_params.GetCredentials().region == "eu-west-1");
+			    }
+			    auto response = make_uniq<HTTPResponse>(HTTPStatusCode::BadRequest_400);
+			    response->body = "<Error><Code>RequestTimeout</Code></Error>";
+			    return response;
+		    },
+		    AcceptOK);
 		REQUIRE(attempts == 3);
 		REQUIRE(result.response->status == HTTPStatusCode::BadRequest_400);
 	}
@@ -2286,7 +2303,7 @@ TEST_CASE("S3 malformed response cleanup does not require retry admission", "[ht
 				    }
 				    return response;
 			    },
-			    {},
+			    AcceptOK, {},
 			    [](const S3RequestData &, const HTTPResponse &) {
 				    return S3ReceivedResponseAction::RETRY_FRESH_CONNECTION;
 			    });
@@ -2326,15 +2343,21 @@ TEST_CASE("Overlapping S3 operations have independent retry budgets", "[httpfs][
 	};
 	idx_t outer_attempts = 0;
 	idx_t inner_attempts = 0;
-	S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &) {
-		if (++outer_attempts == 2) {
-			S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &) {
-				inner_attempts++;
-				return timeout();
-			});
-		}
-		return timeout();
-	});
+	S3RequestExecutor::RunSession(
+	    encryption_util, session, spec,
+	    [&](S3RequestData &) {
+		    if (++outer_attempts == 2) {
+			    S3RequestExecutor::RunSession(
+			        encryption_util, session, spec,
+			        [&](S3RequestData &) {
+				        inner_attempts++;
+				        return timeout();
+			        },
+			        AcceptOK);
+		    }
+		    return timeout();
+	    },
+	    AcceptOK);
 	REQUIRE(outer_attempts == 3);
 	REQUIRE(inner_attempts == 3);
 }
@@ -2356,15 +2379,18 @@ TEST_CASE("S3 request error context belongs to the final attempt", "[httpfs][s3]
 	                    "",
 	                    "",
 	                    ""};
-	auto result = S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request_data) {
-		CHECK(request_data.auth_params.GetCredentials().region == "request-region");
-		string previous_region;
-		REQUIRE(S3RequestExecutor::SetSessionRegion(session, "published-region", previous_region));
-		auto result = make_uniq<HTTPResponse>(HTTPStatusCode::BadRequest_400);
-		result->reason = "Bad Request";
-		result->body = "<Error><Code>InvalidRequest</Code></Error>";
-		return result;
-	});
+	auto result = S3RequestExecutor::RunSession(
+	    encryption_util, session, spec,
+	    [&](S3RequestData &request_data) {
+		    CHECK(request_data.auth_params.GetCredentials().region == "request-region");
+		    string previous_region;
+		    REQUIRE(S3RequestExecutor::SetSessionRegion(session, "published-region", previous_region));
+		    auto result = make_uniq<HTTPResponse>(HTTPStatusCode::BadRequest_400);
+		    result->reason = "Bad Request";
+		    result->body = "<Error><Code>InvalidRequest</Code></Error>";
+		    return result;
+	    },
+	    AcceptOK);
 
 	REQUIRE(result.response);
 	CHECK(session.Capture().snapshot->Cast<S3RequestSnapshot>().auth_params.GetCredentials().region ==

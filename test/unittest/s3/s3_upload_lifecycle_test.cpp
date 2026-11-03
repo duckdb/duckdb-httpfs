@@ -6,6 +6,8 @@
 #include "duckdb.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/http/http_retry_budget.hpp"
+#include "duckdb/main/http/http_util.hpp"
 
 #include <atomic>
 #include <thread>
@@ -152,6 +154,7 @@ struct S3UploadLifecycleTest {
 		DuckDB db(nullptr);
 		Connection con(db);
 		Configure(db, con, server, client_implementation, 3);
+		auto quota = HTTPUtil::Get(*db.instance).GetRetryQuota("http://" + server.Endpoint());
 		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 		auto handle = OpenWriter(con);
 		auto payload = MultipartPayload();
@@ -181,6 +184,11 @@ struct S3UploadLifecycleTest {
 		}
 		REQUIRE(Count(observations, "DELETE") == 0);
 		REQUIRE(server.UploadedObject() == payload);
+		if (leading_retryable_response) {
+			// The retry the leading response consumed is not refunded by a completion whose outcome is unknown: the
+			// handler validates the response before the quota is settled, and nothing ran after it
+			REQUIRE(quota->Available() == HTTPRetryQuota::INITIAL_CAPACITY - HTTPRetryQuota::RETRY_COST);
+		}
 	}
 
 	static void RunAmbiguousInitialization(const string &client_implementation,
