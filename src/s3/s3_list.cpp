@@ -63,6 +63,9 @@ public:
 	S3GlobResult(S3FileSystem &fs_p, const string &path, optional_ptr<FileOpener> opener,
 	             const S3AuthResolveOptions &options);
 
+	//! Hands each matching file to the callback as its page is listed, keeping none of them
+	void ForEachFile(const std::function<void(OpenFileInfo &info)> &callback);
+
 protected:
 	bool ExpandNextPath() const override;
 
@@ -200,6 +203,16 @@ bool S3GlobResult::ExpandNextPath() const {
 	}
 	AppendMatchingFiles(s3_keys);
 	return true;
+}
+
+void S3GlobResult::ForEachFile(const std::function<void(OpenFileInfo &info)> &callback) {
+	lock_guard<mutex> guard(lock);
+	do {
+		for (auto &file : expanded_files) {
+			callback(file);
+		}
+		expanded_files.clear();
+	} while (ExpandNextPath());
 }
 
 S3ListObjectsV2Result S3GlobResult::Request(const string &path, const string &continuation_token, S3ListMode mode,
@@ -436,7 +449,7 @@ bool S3FileSystem::ListFilesExtended(const string &directory, const std::functio
 	}
 	auto base_path = trimmed_dir + sep;
 
-	for (auto file : glob_res->Files()) {
+	glob_res->ForEachFile([&](OpenFileInfo &file) {
 		if (!StringUtil::StartsWith(file.path, base_path)) {
 			throw InvalidInputException(
 			    "Globbed directory \"%s\", but found file \"%s\" that does not start with base path \"%s\"", directory,
@@ -449,7 +462,7 @@ bool S3FileSystem::ListFilesExtended(const string &directory, const std::functio
 		}
 		file.path = std::move(relative_path);
 		callback(file);
-	}
+	});
 
 	return true;
 }
