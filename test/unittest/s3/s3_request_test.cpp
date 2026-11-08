@@ -1961,27 +1961,33 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 		RequestType request_type;
 		S3RequestTarget target;
 		bool retry_timeout;
+		bool retry_throttled;
 		bool retry_received_response;
 		bool uses_kms_headers;
 		bool uses_sse_customer_headers;
 	};
+	// Every operation is sent again when S3 throttles it, CreateMultipartUpload included
 	const array<ExpectedOperationInfo, 10> expected {{
-	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
-	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
-	    {S3RequestOperation::PUT_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, true, true},
-	    {S3RequestOperation::DELETE_OBJECT, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, false, false,
-	     false},
-	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true, false, false,
-	     false},
-	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, false, false,
-	     false},
-	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, false,
-	     true, true},
-	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
-	    {S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, true,
-	     false, true},
-	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, false,
+	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true, true, false, false,
+	     true},
+	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true, true, false, false,
+	     true},
+	    {S3RequestOperation::PUT_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, true, false, true,
+	     true},
+	    {S3RequestOperation::DELETE_OBJECT, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, true, false,
 	     false, false},
+	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true, true, false, false,
+	     false},
+	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, true, false,
+	     false, false},
+	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, true,
+	     false, true, true},
+	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, true, false, false,
+	     true},
+	    {S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, true,
+	     true, false, true},
+	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, true,
+	     false, false, false},
 	}};
 
 	for (const auto &entry : expected) {
@@ -1989,6 +1995,7 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 		REQUIRE(info.request_type == entry.request_type);
 		REQUIRE(info.target == entry.target);
 		REQUIRE(info.retry_timeout == entry.retry_timeout);
+		REQUIRE(info.retry_throttled == entry.retry_throttled);
 		REQUIRE(info.retry_received_response == entry.retry_received_response);
 		REQUIRE(info.uses_kms_headers == entry.uses_kms_headers);
 		REQUIRE(info.uses_sse_customer_headers == entry.uses_sse_customer_headers);

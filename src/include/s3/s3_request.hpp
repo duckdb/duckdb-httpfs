@@ -55,6 +55,10 @@ struct S3RequestOperationInfo {
 	S3RequestTarget target;
 	const char *description;
 	bool retry_timeout;
+	//! Sent again when S3 throttles it (HTTP 429 or 503, or a SlowDown or TooManyRequests error), with core's throttled
+	//! retries. S3 refused a throttled request, so this holds even for an operation that is otherwise not sent again
+	//! (CreateMultipartUpload): at worst an upload id is left without parts.
+	bool retry_throttled;
 	bool retry_received_response;
 	bool uses_kms_headers;
 	bool uses_sse_customer_headers;

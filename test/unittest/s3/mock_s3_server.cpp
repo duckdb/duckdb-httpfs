@@ -1064,9 +1064,9 @@ public:
 				SendS3Error400(request, response, config.failures.failure_is_request_timeout);
 			} else {
 				response.status = config.failures.transient_post_status;
-				response.set_content(
-				    "<Error><Code>TooManyRequests</Code><Message>Injected initialization throttle</Message></Error>",
-				    "application/xml");
+				response.set_content("<Error><Code>" + config.failures.transient_post_code +
+				                         "</Code><Message>Injected initialization failure</Message></Error>",
+				                     "application/xml");
 				Record(request, response.status);
 			}
 			return;

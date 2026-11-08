@@ -83,25 +83,26 @@ const string &S3RequestQuery::CanonicalQuery() const {
 
 const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation operation) {
 	static const array<S3RequestOperationInfo, 10> OPERATION_INFO = {
-	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true, false, false,
+	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true, true, false,
+	                            false, true},
+	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true, true, false, false,
 	                            true},
-	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true, false, false, true},
-	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, true,
-	                            true},
-	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "deleting", true, false, false,
-	                            false},
-	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true, false, false,
-	                            false},
-	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, false,
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, true, false,
+	                            true, true},
+	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "deleting", true, true, false,
 	                            false, false},
+	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true, true, false, false,
+	                            false},
+	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, true,
+	                            false, false, false},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "initializing multipart upload for",
-	                            false, false, true, true},
-	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, false,
-	                            true},
+	                            false, true, false, true, true},
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, true, false,
+	                            false, true},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "completing multipart upload for",
-	                            false, true, false, true},
+	                            false, true, true, false, true},
 	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "aborting multipart upload for",
-	                            true, false, false, false}};
+	                            true, true, false, false, false}};
 	auto index = static_cast<idx_t>(operation);
 	if (index >= OPERATION_INFO.size()) {
 		throw InternalException("Unknown S3 request operation");
@@ -676,6 +677,29 @@ static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const
 	}
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
 }
+// Whether S3 throttled the request, which then gets core's throttled retries: HTTP 429 or 503, or a SlowDown or
+// TooManyRequests error document, which can also come behind HTTP 200 (CompleteMultipartUpload). Narrower than
+// IsRetryableReceivedResponse on purpose: a RequestTimeout or a 500 is not throttling, and an operation that is not
+// replay-safe after those (CreateMultipartUpload) must still not be sent again for them.
+static bool IsThrottledReceivedResponse(const S3RequestData &request_data, const HTTPResponse &response) {
+	auto &operation_info = S3RequestUtil::GetOperationInfo(request_data.operation);
+	if (!operation_info.retry_throttled || response.HasRequestError()) {
+		return false;
+	}
+	if (response.status == HTTPStatusCode::TooManyRequests_429 ||
+	    response.status == HTTPStatusCode::ServiceUnavailable_503) {
+		return true;
+	}
+	// A successful response's body is only looked at for an operation whose success can carry an error document: a
+	// read's body is the object.
+	auto status = static_cast<int>(response.status);
+	if (response.body.empty() || (status < 400 && !operation_info.retry_received_response)) {
+		return false;
+	}
+	S3XMLError error;
+	return S3XMLResponseParser::TryParseError(response.body, error) &&
+	       (error.code == "SlowDown" || error.code == "TooManyRequests");
+}
 
 S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,
                                        const S3RequestSpec &spec, const RequestCallback &request,
@@ -705,7 +729,15 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 					retried_region = true;
 					continue;
 				}
-				bool should_retry = received_response && ShouldRetryReceivedResponse(request_data, *response);
+				// A throttled request gets core's throttled retries: more of them, backed off further, and counted as
+				// throttled. Checked first, as it holds for operations that are otherwise not sent again.
+				const bool throttled = received_response && IsThrottledReceivedResponse(request_data, *response);
+				string retry_after;
+				if (throttled && response->HasHeader("Retry-After")) {
+					retry_after = response->GetHeaderValue("Retry-After");
+				}
+				bool should_retry =
+				    throttled || (received_response && ShouldRetryReceivedResponse(request_data, *response));
 				if (received_response && response_callback &&
 				    response_callback(request_data, *response) == S3ReceivedResponseAction::RETRY_FRESH_CONNECTION) {
 					D_ASSERT(fresh_connection);
@@ -715,7 +747,10 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 				result = {std::move(response),
 				          S3RequestContext {request_data.operation, std::move(request_data.captured),
 				                            std::move(request_data.display_url)}};
-				return should_retry ? HTTPRetryDecision::Retry() : HTTPRetryDecision::Finish();
+				if (!should_retry) {
+					return HTTPRetryDecision::Finish();
+				}
+				return throttled ? HTTPRetryDecision::Throttled(retry_after) : HTTPRetryDecision::Retry();
 			} catch (std::exception &ex) {
 				ErrorData error(ex);
 				if (!retried_auth_refresh && IsAuthRefreshStatus(error) && refresh_auth_params(request_data)) {

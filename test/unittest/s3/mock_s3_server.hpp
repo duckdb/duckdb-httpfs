@@ -136,6 +136,8 @@ struct MockS3FailureConfig {
 	idx_t transient_post_failures = 0;
 	//! HTTP status used for injected multipart-init failures
 	int transient_post_status = 400;
+	//! S3 error code in the body of an injected multipart-init failure whose status is not 400
+	string transient_post_code = "TooManyRequests";
 	//! Leading multipart-completion response fault
 	MockS3CompletionFaultConfig completion_fault;
 	//! Whether injected 400s carry S3's retryable RequestTimeout code or a generic (non-retryable) code
