@@ -36,8 +36,7 @@ SET s3_enable_deprecated_url_parameters=true;
 statement ok
 set enable_external_file_cache=false;
 
-# Writing a new object issues one more HEAD than overwriting an existing one, so start from an
-# empty prefix to keep the request counts below stable across runs against the same bucket.
+# Start from an empty prefix so repeated runs use an independent fixture.
 statement ok
 COPY (SELECT 0 AS i, 0 AS value WHERE false) TO 's3://test-bucket-public/root-dir/metadata_cache' (FORMAT PARQUET, PARTITION_BY (i), OVERWRITE);
 
@@ -47,15 +46,16 @@ CREATE TABLE test as SELECT * FROM range(0,10) tbl(i);
 statement ok
 CREATE TABLE test1 as SELECT * FROM range(10,20) tbl(i);
 
+# Remote COPY writes directly without checking whether the output already exists.
 query II
 EXPLAIN ANALYZE COPY test TO 's3://test-bucket-public/root-dir/metadata_cache/test.parquet';
 ----
-analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 2.*GET\: 0.*PUT\: 1.*\#POST\: 0.*
+analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 0.*GET\: 0.*PUT\: 1.*\#POST\: 0.*
 
 query II
 EXPLAIN ANALYZE COPY test TO 's3://test-bucket-public/root-dir/metadata_cache/test1.parquet';
 ----
-analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 2.*GET\: 0.*PUT\: 1.*\#POST\: 0.*
+analyzed_plan	<REGEX>:.*HTTP Stats.*\#HEAD\: 0.*GET\: 0.*PUT\: 1.*\#POST\: 0.*
 
 # Now we query the file metadata without the global metadata cache: There should be 1 HEAD request for the file size,
 # then a GET for the pointer to the parquet metadata, then a GET for the metadata.
