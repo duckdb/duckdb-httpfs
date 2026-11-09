@@ -341,6 +341,51 @@ TEST_CASE("HTTP cached downloads accept absent GET ETags", "[httpfs][full-downlo
 	}
 }
 
+TEST_CASE("HTTP CSV auto-detection reads data when HEAD reports zero bytes", "[httpfs][full-download][issue-5924]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (const bool chunked : {false, true}) {
+			CAPTURE(client, chunked);
+			MockS3ServerConfig config;
+			config.object.key = "stock-exchanges";
+			config.object.data = "csvbase_row_id,Continent,Country,Name,MIC,Last changed\n"
+			                     "1,Africa,Lesotho,HYBSE,,2019-03-25\n"
+			                     "2,Asia,Kazakhstan,Astana International Financial Centre,AIXK,2018-11-18\n"
+			                     "3,Western Europe,Germany,Börse Berlin,XBER,2017-08-16\n"
+			                     "4,Asia,\"Korea, Republic of\",Korea Exchange,XKRX,2017-08-16\n";
+			// Regression for duckdb/duckdb#5924: sniff the downloaded CSV even when HEAD reports no data.
+			config.metadata.head_content_length = 0;
+			config.range.advertise = false;
+			config.range.behavior = MockS3RangeBehavior::IGNORE_RANGE;
+			config.full_get.chunked = chunked;
+			MockS3Server server(std::move(config));
+
+			DuckDB db(nullptr);
+			Connection con(db);
+			HTTPTestHelper::Configure(db, con, 0, client);
+			HTTPTestHelper::RequireQueryOk(con, "SET force_download_threshold=0");
+			auto result = con.Query("SELECT * FROM read_csv_auto('" + server.HTTPPath() + "')");
+			REQUIRE(result);
+			INFO((result->HasError() ? result->GetError() : string()));
+			REQUIRE_FALSE(result->HasError());
+			auto expected = con.Query(
+			    "SELECT * FROM (VALUES "
+			    "(1::BIGINT, 'Africa', 'Lesotho', 'HYBSE', NULL, DATE '2019-03-25'), "
+			    "(2, 'Asia', 'Kazakhstan', 'Astana International Financial Centre', 'AIXK', DATE '2018-11-18'), "
+			    "(3, 'Western Europe', 'Germany', 'Börse Berlin', 'XBER', DATE '2017-08-16'), "
+			    "(4, 'Asia', 'Korea, Republic of', 'Korea Exchange', 'XKRX', DATE '2017-08-16')"
+			    ") AS expected(csvbase_row_id, Continent, Country, Name, MIC, \"Last changed\")");
+			REQUIRE(expected);
+			REQUIRE_FALSE(expected->HasError());
+			REQUIRE(result->Equals(*expected));
+
+			const auto observations = server.Observations();
+			INFO(MockS3DescribeObservations(observations));
+			REQUIRE(HTTPTestHelper::CountRequests(observations, "HEAD", 200) == 1);
+			REQUIRE(HTTPTestHelper::CountRequests(observations, "GET", 200) == 1);
+		}
+	}
+}
+
 TEST_CASE("HTTP full-download fallback rejects HEAD and GET length mismatches", "[httpfs][full-download][issue-354]") {
 	MockS3ServerConfig config;
 	config.object.data = "AB";
