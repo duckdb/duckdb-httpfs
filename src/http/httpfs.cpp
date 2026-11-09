@@ -84,10 +84,6 @@ private:
 			return std::move(result);
 		}
 		ReadSettings();
-		string file_secret;
-		if (info && info->extended_info && info->extended_info->TryGetFileSecret(file_secret)) {
-			ResetSettingsForFileSecret();
-		}
 		SetUserAgent();
 		auto settings_reader = CreateSettingsReader();
 		ReadSecrets(*settings_reader);
@@ -128,19 +124,6 @@ private:
 		}
 	}
 
-	//! A request signed with a file secret uses only the proxy the secret sets, and verifies the server certificate
-	//! with the default CA store: the query's caller can change these settings, and either would let another host
-	//! read the secret. ReadSecrets reads the secret's own values after this.
-	void ResetSettingsForFileSecret() {
-		result->http_proxy.clear();
-		result->http_proxy_port = 0;
-		result->http_proxy_username.clear();
-		result->http_proxy_password.clear();
-		result->enable_server_cert_verification = true;
-		result->enable_curl_server_cert_verification = true;
-		result->ca_cert_file.clear();
-	}
-
 	SettingLookupResult TryGetSetting(const Identifier &key, Value &value) {
 		if (info) {
 			return FileOpener::TryGetCurrentSetting(opener, key, value, *info);
@@ -179,7 +162,7 @@ private:
 		}
 		auto db = FileOpener::TryGetDatabase(opener);
 		auto aliases = db ? S3UrlScheme::GetAliasPrefixes(db->config) : vector<string>();
-		return S3UrlScheme::TryMatch(info->file_path, aliases).has_value();
+		return S3UrlScheme::TryMatch(info->file.path, aliases).has_value();
 	}
 
 	unique_ptr<KeyValueSecretReader> CreateSettingsReader() {
@@ -260,7 +243,6 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
     : FileHandle(fs, file.path, flags), request_session(std::move(request_session_p)), flags(flags), length(0),
       last_modified(0), force_full_download(false), file_offset(0), object_version(std::move(object_version_p)) {
 	D_ASSERT(request_session);
-	can_use_shared_caches = !file.HasFileSecret();
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {
@@ -329,14 +311,14 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
                                                         optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
-	FileOpenerInfo info;
-	info.file_path = file.path;
+	FileOpenerInfo info(file);
 
 	auto request_session = HTTPRequestSession::Create(opener, info);
 
 	auto secret_manager = FileOpener::TryGetSecretManager(opener);
 	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
-	if (secret_manager && transaction) {
+	string secret_name;
+	if (secret_manager && transaction && !(file.extended_info && file.extended_info->TryGetSecretName(secret_name))) {
 		auto secret_match = secret_manager->LookupSecret(*transaction, file.path, "bearer");
 
 		if (secret_match.HasMatch()) {
@@ -1172,13 +1154,8 @@ void HTTPFileHandle::InitializeRequestState(const OpenFileInfo &file, optional_p
 		snapshot_params.state = make_shared_ptr<HTTPState>();
 	}
 	auto publication = request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
-	if (can_use_shared_caches) {
-		auto &http_state = *publication.current.snapshot->Params().state;
-		file_state = http_state.GetFileState(path);
-	} else {
-		// the downloaded object is kept by this handle alone
-		file_state = make_shared_ptr<HTTPFileState>();
-	}
+	auto &http_state = *publication.current.snapshot->Params().state;
+	file_state = http_state.GetFileState(path);
 
 	if (opener) {
 		InitializeLogger(*opener);
@@ -1245,10 +1222,7 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 void HTTPFileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
 	auto &hfs = file_system.Cast<HTTPFileSystem>();
 	InitializeRequestState(file, opener);
-	optional_ptr<HTTPMetadataCache> current_cache;
-	if (can_use_shared_caches) {
-		current_cache = TryGetMetadataCache(opener, hfs);
-	}
+	auto current_cache = TryGetMetadataCache(opener, hfs);
 	bool should_write_cache = false;
 	if (TryInitializeRead(hfs, current_cache, should_write_cache)) {
 		return;

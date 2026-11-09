@@ -111,21 +111,21 @@ S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpener
                                      const S3AuthResolveOptions &options) {
 	// Without a FileOpener we cannot access settings or secrets.
 	if (!opener) {
-		string file_secret;
-		if (info.extended_info && info.extended_info->TryGetFileSecret(file_secret)) {
+		string secret_name;
+		if (info.file.extended_info && info.file.extended_info->TryGetSecretName(secret_name)) {
 			// rather than signing with whatever credentials the environment has
-			throw InvalidConfigurationException("The file secret for '%s' cannot be used without a file opener",
-			                                    info.file_path);
+			throw InvalidConfigurationException("The named secret for '%s' cannot be used without a file opener",
+			                                    info.file.path);
 		}
 		S3AuthConfig config;
-		config.route = S3UrlScheme::MatchRoutedUrl(info.file_path);
+		config.route = S3UrlScheme::MatchRoutedUrl(info.file.path);
 		options.ApplyTo(config);
-		return Resolve(std::move(config), info.file_path);
+		return Resolve(std::move(config), info.file.path);
 	}
 
 	auto secret_types = S3SecretConfig::SecretTypes();
 	S3KeyValueReader secret_reader(*opener, info, secret_types.data(), secret_types.size());
-	return Resolve(secret_reader, info.file_path, options);
+	return Resolve(secret_reader, info.file.path, options);
 }
 
 S3AuthParams S3AuthResolver::Resolve(S3KeyValueReader &secret_reader, const string &file_path,
@@ -317,7 +317,6 @@ S3KeyValueReader::S3KeyValueReader(const KeyValueSecretReader &_reader) : reader
 	Value use_env_vars_for_secret_info_setting;
 	reader.TryGetSecretKeyOrSetting("enable_global_s3_configuration", "enable_global_s3_configuration",
 	                                use_env_vars_for_secret_info_setting);
-	// unset for a file secret, which no setting fills
 	use_env_variables_for_secret_settings =
 	    !use_env_vars_for_secret_info_setting.IsNull() && use_env_vars_for_secret_info_setting.GetValue<bool>();
 }

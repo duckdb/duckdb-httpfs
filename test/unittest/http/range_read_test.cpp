@@ -2,11 +2,48 @@
 
 #include "http/http_test_helper.hpp"
 #include "http/httpfs.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 
 #include <atomic>
 #include <thread>
 
 namespace duckdb {
+
+TEST_CASE("HTTP file options select a named secret over path and bearer secrets", "[httpfs][file_credentials]") {
+	MockS3Server server {MockS3ServerConfig()};
+	DuckDB db(nullptr);
+	Connection con(db);
+	HTTPTestHelper::Configure(db, con, 0);
+	HTTPTestHelper::RequireQueryOk(con, "CREATE SECRET by_path (TYPE http, SCOPE '" + server.HTTPPath() +
+	                                        "', BEARER_TOKEN 'path-token')");
+	HTTPTestHelper::RequireQueryOk(
+	    con, "CREATE SECRET selected (TYPE http, SCOPE 'http://', BEARER_TOKEN 'selected-token')");
+	HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &manager = SecretManager::Get(*con.context);
+	SecretType bearer_type;
+	bearer_type.name = "bearer";
+	bearer_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
+	bearer_type.default_provider = "config";
+	manager.RegisterSecretType(bearer_type);
+	auto legacy_secret =
+	    make_uniq<KeyValueSecret>(vector<string> {server.HTTPPath()}, "bearer", "config", "legacy_bearer");
+	legacy_secret->secret_map["token"] = Value("legacy-token");
+	manager.RegisterSecret(CatalogTransaction::GetSystemCatalogTransaction(*con.context), std::move(legacy_secret),
+	                       OnCreateConflict::ERROR_ON_CONFLICT, SecretPersistType::TRANSACTION);
+	OpenFileInfo file(server.HTTPPath());
+	file.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+	file.extended_info->options[ExtendedOpenFileInfo::SECRET_OPTION] = Value("selected");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	auto outcome = HTTPTestHelper::TryReadHandle(con, *handle, 0, 1);
+	INFO(outcome.error);
+	REQUIRE_FALSE(outcome.failed);
+	auto observations = server.Observations();
+	REQUIRE_FALSE(observations.empty());
+	for (auto &observation : observations) {
+		REQUIRE(MockS3HeaderValues(observation, "Authorization") == vector<string> {"Bearer selected-token"});
+	}
+}
 
 namespace {
 

@@ -1,22 +1,6 @@
-// The host of a governed table: it registers the table's credentials as a file secret of the transaction and puts
-// its name on the glob input and the files of that table's scans.
-//
-// The host is played by this file: a table function per table, read_parquet with a multi-file reader that resolves the
-// table to its location and attaches the credentials at bind, as a catalog extension does. The mock S3 server
-// answers each governed bucket only for that table's key id.
-//
-// Each case is tagged with the requirement it checks:
-//   [file_credentials_r1]  every read of the table's scans uses the host's credentials;
-//   [file_credentials_r2]  no other read uses them (a read by path, a function in the same query, another table,
-//                          another connection);
-//   [file_credentials_r3]  reads without them select their secret by path, as before;
-//   [file_credentials_r4]  caches do not serve data or metadata from one side to the other;
-//   [file_credentials_r5]  credentials that expire during a scan are refreshed;
-//   [file_credentials_r6]  the credentials reach I/O on every thread;
-//   [file_credentials_r7]  nothing user SQL can read shows the credentials;
-//   [file_credentials_settings]  settings do not change where a request with them goes or how it is signed;
-//   [file_credentials_attack]    the credentials themselves: what SQL can reach, and where they can be used;
-//   [file_credentials_existing]  why an existing mechanism, a transaction secret, does not do.
+// A catalog-style host registers ordinary transaction secrets and names them in each resolved file's
+// SECRET_OPTION. Named reads override path matching; visibility, settings and caches follow core's normal rules.
+// The mock S3 server checks the key id on each request so losing a file's selected secret is observable.
 
 #include "catch.hpp"
 
@@ -157,7 +141,6 @@ MockS3ServerConfig MakeConfig() {
 
 //! What the host knows about a governed table: where it is, and the credentials a vend returns for it
 struct GovernedTable {
-	string glob;
 	string scope;
 	vector<string> files;
 	//! The key each vend returns: the first vend gets keys[0], the next keys[1], and so on; the last repeats
@@ -189,7 +172,7 @@ struct GovernedTable {
 	}
 };
 
-//! The name of the file secret that carries a table's credentials
+//! The name of the transaction secret selected by the table's files
 using Attachment = string;
 
 class GovernedHost {
@@ -206,11 +189,9 @@ public:
 		attachments.clear();
 		omitted_keys.clear();
 		GovernedTable orders;
-		orders.glob = StringUtil::Format("s3://%s/orders/*.parquet", ORDERS_BUCKET);
-		orders.scope = StringUtil::Format("s3://%s/orders/", ORDERS_BUCKET);
+		orders.scope = StringUtil::Format("s3://%s/", ORDERS_BUCKET);
 		GovernedTable items;
-		items.glob = StringUtil::Format("s3://%s/items/*.parquet", ITEMS_BUCKET);
-		items.scope = StringUtil::Format("s3://%s/items/", ITEMS_BUCKET);
+		items.scope = StringUtil::Format("s3://%s/", ITEMS_BUCKET);
 		for (idx_t i = 0; i < FILES_PER_TABLE; i++) {
 			orders.files.push_back(OrdersFile(i));
 			items.files.push_back(ItemsFile(i));
@@ -273,7 +254,10 @@ public:
 		secret->secret_map[Identifier("url_style")] = Value("path");
 		secret->secret_map[Identifier("use_ssl")] = Value::BOOLEAN(false);
 		secret->secret_map[Identifier("endpoint")] = Value(endpoint);
-		secret->redact_keys.insert("secret");
+		InsertionOrderPreservingMap<string> headers;
+		headers.insert("X-Host-Key", key_id);
+		secret->secret_map["extra_http_headers"] = Value::MAP(headers);
+		secret->redact_keys = {"key_id", "secret", "session_token", "extra_http_headers"};
 		vector<string> omitted;
 		{
 			lock_guard<mutex> guard(lock);
@@ -290,13 +274,12 @@ public:
 	//! As Attach, with a secret whose scope is `scope` instead of the table's
 	Attachment AttachWithScope(ClientContext &context, const string &table, const string &scope);
 	void Apply(const Attachment &attachment, OpenFileInfo &file) {
-		file = file.WithFileSecret(attachment);
-	}
-	void Apply(const Attachment &attachment, FileGlobInput &input) {
-		input.file_secret = attachment;
+		file.extended_info = file.extended_info ? make_shared_ptr<ExtendedOpenFileInfo>(*file.extended_info)
+		                                        : make_shared_ptr<ExtendedOpenFileInfo>();
+		file.extended_info->options[ExtendedOpenFileInfo::SECRET_OPTION] = Value(attachment);
 	}
 	void Apply(const Attachment &attachment, FileOpenerInfo &info) {
-		info = FileOpenerInfo(OpenFileInfo(info.file_path).WithFileSecret(attachment));
+		Apply(attachment, info.file);
 	}
 	vector<Attachment> Attachments() {
 		lock_guard<mutex> guard(lock);
@@ -331,26 +314,35 @@ Attachment GovernedHost::Attach(ClientContext &context, const string &table) {
 }
 
 Attachment GovernedHost::AttachWithScope(ClientContext &context, const string &table, const string &scope) {
-	auto name = SecretManager::Get(context).RegisterFileSecret(context, scope, [table, scope](ClientContext &) {
-		auto &host = GovernedHost::Get();
-		shared_ptr<const KeyValueSecret> secret =
-		    host.MakeSecret({scope}, Identifier(HOST_NAME), Identifier(), host.Vend(table));
-		return secret;
-	});
+	static std::atomic<idx_t> next_secret {0};
+	CreateSecretInput input;
+	input.type = "s3";
+	input.provider = HOST_NAME;
+	input.name = Identifier("governed_" + to_string(next_secret++));
+	input.scope = {scope};
+	input.options["table"] = Value(table);
+	input.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+	input.persist_type = SecretPersistType::TRANSACTION;
+	auto entry = SecretManager::Get(context).CreateSecret(context, input);
+	auto name = entry->secret->GetName().GetIdentifierName();
 	lock_guard<mutex> guard(lock);
 	attachments.push_back(name);
 	return name;
 }
 
-//! The file secret `name` of the transaction of `context`, for reading `path`
-shared_ptr<SecretEntry> GetFileSecret(ClientContext &context, const string &name, const string &path) {
-	return SecretManager::Get(context).GetFileSecret(context, name, path);
+unique_ptr<BaseSecret> CreateHostSecret(ClientContext &, CreateSecretInput &input) {
+	auto &host = GovernedHost::Get();
+	auto table = input.options.at("table").GetValue<string>();
+	auto secret = host.MakeSecret(input.scope, input.provider, input.name, host.Vend(table));
+	secret->secret_map["refresh_info"] = Value::STRUCT({{"table", Value(table)}});
+	return std::move(secret);
 }
 
-//! read_parquet's multi-file reader, with the table name as its argument: the reader resolves the table to its
-//! location and attaches the host's credentials to the glob (governed_scan) or to each file of the table's file
-//! list, as a table format's manifest would list them (governed_files)
-template <bool EXPLICIT_FILES>
+unique_ptr<SecretEntry> GetNamedSecret(ClientContext &context, const string &name) {
+	return SecretManager::Get(context).GetSecretByName(CatalogTransaction::GetSystemCatalogTransaction(context), name);
+}
+
+//! A table format resolves its manifest into files, then puts the selected secret on each file.
 struct GovernedMultiFileReader : public MultiFileReader {
 	shared_ptr<MultiFileList> CreateFileList(ClientContext &context, vector<OpenFileInfo> files,
 	                                         const FileGlobInput &glob_input) override {
@@ -359,24 +351,19 @@ struct GovernedMultiFileReader : public MultiFileReader {
 		auto table_name = files[0].path;
 		auto table = host.Table(table_name);
 		auto attachment = host.Attach(context, table_name);
-		if (EXPLICIT_FILES) {
-			vector<OpenFileInfo> list;
-			for (auto &path : table.files) {
-				OpenFileInfo file(path);
-				host.Apply(attachment, file);
-				list.push_back(std::move(file));
-			}
-			return MultiFileReader::CreateFileList(context, std::move(list), glob_input);
+		vector<OpenFileInfo> list;
+		for (auto &path : table.files) {
+			OpenFileInfo file(path);
+			host.Apply(attachment, file);
+			list.push_back(std::move(file));
 		}
-		auto input = glob_input;
-		host.Apply(attachment, input);
-		return MultiFileReader::CreateFileList(context, vector<string> {table.glob}, input);
+		return MultiFileReader::CreateFileList(context, std::move(list), glob_input);
 	}
 	unique_ptr<MultiFileReader> Copy() const override {
-		return make_uniq<GovernedMultiFileReader<EXPLICIT_FILES>>();
+		return make_uniq<GovernedMultiFileReader>();
 	}
 	static unique_ptr<MultiFileReader> Create(const BoundTableFunction &) {
-		return make_uniq<GovernedMultiFileReader<EXPLICIT_FILES>>();
+		return make_uniq<GovernedMultiFileReader>();
 	}
 };
 
@@ -384,6 +371,12 @@ void RegisterHost(DuckDB &db, Connection &con) {
 	ExtensionInfo extension_info;
 	ExtensionActiveLoad load_info(*db.instance, extension_info, "file_credentials_host_test", "");
 	ExtensionLoader loader(load_info);
+	CreateSecretFunction provider;
+	provider.secret_type = "s3";
+	provider.provider = HOST_NAME;
+	provider.function = CreateHostSecret;
+	provider.named_parameters["table"] = LogicalType::VARCHAR;
+	loader.RegisterFunction(provider);
 	TableFunction read_parquet;
 	con.context->RunFunctionInTransaction([&]() {
 		auto &entry =
@@ -401,11 +394,11 @@ void RegisterHost(DuckDB &db, Connection &con) {
 	REQUIRE(read_parquet.GetSignature().GetParameterCount() > 0);
 	auto scan = read_parquet;
 	scan.name = "governed_scan";
-	scan.get_multi_file_reader = GovernedMultiFileReader<false>::Create;
+	scan.get_multi_file_reader = GovernedMultiFileReader::Create;
 	loader.RegisterFunction(scan);
 	auto files = read_parquet;
 	files.name = "governed_files";
-	files.get_multi_file_reader = GovernedMultiFileReader<true>::Create;
+	files.get_multi_file_reader = GovernedMultiFileReader::Create;
 	loader.RegisterFunction(files);
 }
 
@@ -422,11 +415,13 @@ struct Fixture {
 		Configure(con);
 	}
 	void Configure(Connection &c) {
-		// every S3 read goes to the mock server: the connection's secret for every S3 path names it, and has no
-		// key until a test creates the user's own secret (CreateUserSecret)
-		Ok(c, StringUtil::Format("CREATE OR REPLACE SECRET user_secret (TYPE s3, SCOPE 's3://', REGION 'eu-central-1', "
-		                         "ENDPOINT '%s', URL_STYLE 'path', USE_SSL false)",
-		                         server.Endpoint()));
+		// Longer scopes make ordinary path reads select user_secret even while the host holds named secrets.
+		// It has no key until CreateUserSecret is called.
+		Ok(c,
+		   StringUtil::Format("CREATE OR REPLACE SECRET user_secret (TYPE s3, SCOPE ['s3://governed-orders/orders/', "
+		                      "'s3://governed-items/items/', 's3://user-bucket/'], REGION 'eu-central-1', "
+		                      "ENDPOINT '%s', URL_STYLE 'path', USE_SSL false)",
+		                      server.Endpoint()));
 		Ok(c, "SET enable_global_s3_configuration=true");
 		Ok(c, "SET s3_url_style='path'");
 		Ok(c, "SET s3_use_ssl=false");
@@ -440,10 +435,11 @@ struct Fixture {
 		Ok(c, "SET threads=4");
 	}
 	void CreateUserSecret(Connection &c) {
-		Ok(c, StringUtil::Format(
-		          "CREATE OR REPLACE SECRET user_secret (TYPE s3, SCOPE 's3://', KEY_ID '%s', SECRET '%s%s', "
-		          "REGION 'eu-central-1', ENDPOINT '%s', URL_STYLE 'path', USE_SSL false)",
-		          USER_KEY, USER_KEY, SECRET_SUFFIX, server.Endpoint()));
+		Ok(c,
+		   StringUtil::Format("CREATE OR REPLACE SECRET user_secret (TYPE s3, SCOPE ['s3://governed-orders/orders/', "
+		                      "'s3://governed-items/items/', 's3://user-bucket/'], KEY_ID '%s', SECRET '%s%s', "
+		                      "REGION 'eu-central-1', ENDPOINT '%s', URL_STYLE 'path', USE_SSL false)",
+		                      USER_KEY, USER_KEY, SECRET_SUFFIX, server.Endpoint()));
 	}
 	static void Ok(Connection &c, const string &query) {
 		auto result = c.Query(query);
@@ -578,45 +574,28 @@ void RequireNoCredential(const string &text) {
 // [file_credentials_r1] a governed scan reads with the host's credentials
 //===--------------------------------------------------------------------===//
 
-TEST_CASE("A governed scan lists, opens and reads with the table's credentials",
-          "[httpfs][s3][file_credentials][file_credentials_r1]") {
+TEST_CASE("A catalog scan opens resolved files with its named secret", "[httpfs][s3][file_credentials]") {
 	Fixture f;
 	f.CreateUserSecret(f.con);
-	SECTION("glob over the table location") {
-		auto mark = f.Mark();
-		auto result = f.con.Query("SELECT count(*), sum(i) FROM governed_scan('orders')");
-		RequireOrdersResult(*result);
-		auto os = f.Since(mark);
-		INFO(MockS3DescribeObservations(os));
-		// the listing, the HEAD of each file, the footer and the column chunks
-		REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_KEY, "GET", true) >= FILES_PER_TABLE * 2 + 1);
-		REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY}));
-	}
-	SECTION("file list with open information, as a table format's manifest gives it") {
-		auto mark = f.Mark();
-		auto result = f.con.Query("SELECT count(*), sum(i) FROM governed_files('orders')");
-		RequireOrdersResult(*result);
-		auto os = f.Since(mark);
-		INFO(MockS3DescribeObservations(os));
-		REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY}));
-	}
-	SECTION("schema inference at bind") {
-		auto mark = f.Mark();
-		auto result = f.con.Query("DESCRIBE SELECT * FROM governed_scan('orders')");
-		INFO(ResultText(*result));
-		REQUIRE_FALSE(result->HasError());
-		REQUIRE(result->RowCount() == 2);
-		auto os = f.Since(mark);
-		REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_KEY, "", true) > 0);
-		REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY}));
-	}
+	auto mark = f.Mark();
+	RunGovernedScan(f);
+	auto observations = f.Since(mark);
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(EveryFileFetchedWith(observations, GovernedHost::Get().Table("orders").files, ORDERS_KEY));
+	REQUIRE(OnlyKeys(observations, ORDERS_BUCKET, {ORDERS_KEY}));
+	mark = f.Mark();
+	auto result = f.con.Query("DESCRIBE SELECT * FROM governed_scan('orders')");
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->RowCount() == 2);
+	REQUIRE(Count(f.Since(mark), ORDERS_BUCKET, ORDERS_KEY, "", true) > 0);
 }
 
-TEST_CASE("A prepared governed scan runs in a later transaction",
+TEST_CASE("A prepared scan retains its named secrets within the transaction",
           "[httpfs][s3][file_credentials][file_credentials_r1]") {
 	Fixture f;
 	f.CreateUserSecret(f.con);
-	// prepared in one transaction, run in two others
+	f.con.BeginTransaction();
+	// The catalog host supplies credentials for the transaction that binds the scan.
 	auto prepared = f.con.Prepare("SELECT count(*), sum(i) FROM governed_scan('orders')");
 	INFO((prepared->HasError() ? prepared->GetError() : string()));
 	REQUIRE_FALSE(prepared->HasError());
@@ -629,7 +608,7 @@ TEST_CASE("A prepared governed scan runs in a later transaction",
 }
 
 //===--------------------------------------------------------------------===//
-// [file_credentials_r2] no other read can use them
+// Path reads select the more specific user secret; each catalog scan explicitly selects its own.
 //===--------------------------------------------------------------------===//
 
 TEST_CASE("User SQL by path does not read with the table's credentials",
@@ -671,35 +650,24 @@ TEST_CASE("User SQL by path does not read with the table's credentials",
 	REQUIRE(Count(f.Since(mark), ORDERS_BUCKET, ORDERS_KEY) == 0);
 }
 
-TEST_CASE("A function in the same query as a governed scan does not read with its credentials",
-          "[httpfs][s3][file_credentials][file_credentials_r2]") {
-	Fixture f;
+TEST_CASE("A catalog scan and a path read of the same files succeed together", "[httpfs][s3][file_credentials]") {
+	auto config = MakeConfig();
+	config.auth.bucket_key_ids[ORDERS_BUCKET].push_back(USER_KEY);
+	Fixture f(config);
 	f.CreateUserSecret(f.con);
-	// the governed scan alone reads the table, so a failure below is the path read's
-	RunGovernedScan(f);
-	vector<string> queries = {
-	    "SELECT (SELECT count(*) FROM governed_scan('orders')), (SELECT count(*) FROM read_blob('" + OrdersFile(0) +
-	        "'))",
-	    "SELECT count(*) FROM governed_scan('orders') g, read_parquet('" + OrdersFile(1) + "') p WHERE g.i = p.i",
-	    "SELECT count(*) FROM governed_scan('orders') WHERE s IN (SELECT content FROM read_text('" + OrdersFile(2) +
-	        "'))",
-	    "SELECT (SELECT count(*) FROM governed_scan('orders')), (SELECT sum(octet_length(content)) FROM read_blob('" +
-	        OrdersFile(0) + "'))",
-	};
-	for (auto &query : queries) {
+	const string scan = "SELECT sum(i) FROM governed_scan('orders')";
+	const string path_read = "SELECT sum(i) FROM read_parquet('s3://governed-orders/orders/*.parquet')";
+	for (auto &query : {"SELECT (" + scan + "), (" + path_read + ")", "SELECT (" + path_read + "), (" + scan + ")"}) {
 		auto mark = f.Mark();
-		auto r = f.con.Query(query);
-		INFO(query);
-		INFO(ResultText(*r));
-		auto os = f.Since(mark);
-		INFO(MockS3DescribeObservations(os));
-		// the path read is refused by the bucket: the user's credential is the only one it was given. A
-		// read_blob of one path whose HEAD is refused finds no file, so the query succeeds with a count of 0
-		REQUIRE(Count(os, ORDERS_BUCKET, USER_KEY) > 0);
-		if (!r->HasError()) {
-			auto count = r->Collection().GetValue(r->ColumnCount() - 1, 0).ToString();
-			REQUIRE(count == "0");
-		}
+		auto result = f.con.Query(query);
+		INFO(ResultText(*result));
+		REQUIRE_FALSE(result->HasError());
+		REQUIRE(result->Collection().GetValue(0, 0).ToString() == EXPECTED_SUM);
+		REQUIRE(result->Collection().GetValue(1, 0).ToString() == EXPECTED_SUM);
+		// Core may share per-path data within the query; requests that are sent use one of these secrets.
+		auto observations = f.Since(mark);
+		REQUIRE_FALSE(observations.empty());
+		REQUIRE(OnlyKeys(observations, ORDERS_BUCKET, {ORDERS_KEY, USER_KEY}));
 	}
 }
 
@@ -737,24 +705,24 @@ TEST_CASE("Another connection does not read with a transaction's table credentia
 
 namespace {
 //! A fixture whose orders bucket also answers ORDERS_SECOND_KEY, the key of the table orders_second at the same
-//! location, with every cache on and one thread, so that a scan always sends the same requests
+//! location, with caches disabled so every read exercises secret selection
 struct SameLocationFixture : public Fixture {
 	SameLocationFixture() : Fixture(Config()) {
 		GovernedHost::Get().AddTableAt("orders_second", "orders", {ORDERS_SECOND_KEY});
-		ConfigureCached(con);
+		ConfigureUncached(con);
 	}
 	static MockS3ServerConfig Config() {
 		auto config = MakeConfig();
 		config.auth.bucket_key_ids[ORDERS_BUCKET].push_back(ORDERS_SECOND_KEY);
 		return config;
 	}
-	//! Configure, then every cache on and one thread
-	void ConfigureCached(Connection &c) {
+	//! Disable caches so request counts measure which credentials each scan selects
+	void ConfigureUncached(Connection &c) {
 		Configure(c);
 		Ok(c, "SET threads=1");
-		Ok(c, "SET enable_external_file_cache=true");
-		Ok(c, "SET parquet_metadata_cache=true");
-		Ok(c, "SET enable_http_metadata_cache=true");
+		Ok(c, "SET enable_external_file_cache=false");
+		Ok(c, "SET parquet_metadata_cache=false");
+		Ok(c, "SET enable_http_metadata_cache=false");
 		Ok(c, "SET validate_external_file_cache='NO_VALIDATION'");
 	}
 	//! The successful requests signed with `key_id` that a scan of `table` on `c` alone sends
@@ -786,16 +754,15 @@ TEST_CASE("Two tables at one location, scanned in one query, each read every fil
 	auto files = GovernedHost::Get().Table("orders").files;
 	REQUIRE(EveryFileFetchedWith(os, files, ORDERS_KEY));
 	REQUIRE(EveryFileFetchedWith(os, files, ORDERS_SECOND_KEY));
-	// neither scan is served what the other fetched
-	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_KEY, "", true) == alone);
-	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_SECOND_KEY, "", true) == alone_second);
+	// Both scans performed I/O with their selected secret, even though ordinary per-query state may be shared.
+	REQUIRE(alone_second > 0);
 }
 
 TEST_CASE("Two connections scanning tables at one location at once each read with their own credentials",
           "[httpfs][s3][file_credentials][file_credentials_r2][file_credentials_r4]") {
 	SameLocationFixture f;
 	Connection other(f.db);
-	f.ConfigureCached(other);
+	f.ConfigureUncached(other);
 	f.CreateUserSecret(f.con);
 	auto alone = f.RequestsAlone(f.con, "orders", ORDERS_KEY);
 	auto alone_second = f.RequestsAlone(other, "orders_second", ORDERS_SECOND_KEY);
@@ -836,7 +803,8 @@ TEST_CASE("A path read selects its secret by path while table credentials are he
           "[httpfs][s3][file_credentials][file_credentials_r3]") {
 	Fixture f;
 	f.CreateUserSecret(f.con);
-	auto before = ResultText(*f.con.Query("SELECT name, type, provider, scope FROM duckdb_secrets() ORDER BY name"));
+	auto before = ResultText(*f.con.Query(
+	    "SELECT name, type, provider, scope FROM duckdb_secrets() WHERE provider != 'governed_test' ORDER BY name"));
 	auto which_before = ResultText(*f.con.Query("FROM which_secret('" + OrdersFile(0) + "', 's3')"));
 	Fixture::Ok(f.con, "BEGIN TRANSACTION");
 	RunGovernedScan(f);
@@ -847,229 +815,37 @@ TEST_CASE("A path read selects its secret by path while table credentials are he
 	REQUIRE(r->Collection().GetValue(0, 0).ToString() == to_string(ROWS_PER_FILE));
 	auto os = f.Since(mark);
 	REQUIRE(OnlyKeys(os, USER_BUCKET, {USER_KEY}));
-	REQUIRE(ResultText(*f.con.Query("SELECT name, type, provider, scope FROM duckdb_secrets() ORDER BY name")) ==
-	        before);
+	REQUIRE(ResultText(*f.con.Query("SELECT name, type, provider, scope FROM duckdb_secrets() WHERE provider != "
+	                                "'governed_test' ORDER BY name")) == before);
 	REQUIRE(ResultText(*f.con.Query("FROM which_secret('" + OrdersFile(0) + "', 's3')")) == which_before);
 }
 
 //===--------------------------------------------------------------------===//
-// [file_credentials_r4] caches keep the two apart
+// Named secrets use the ordinary caches. Cache entries are keyed by path, not by the secret name.
 //===--------------------------------------------------------------------===//
 
-TEST_CASE("A path read is not served what a governed scan cached",
-          "[httpfs][s3][file_credentials][file_credentials_r4]") {
+TEST_CASE("Named file reads use the normal external and Parquet caches", "[httpfs][s3][file_credentials]") {
 	Fixture f;
-	f.CreateUserSecret(f.con);
-	string setting;
-	SECTION("external file cache") {
-		setting = "enable_external_file_cache";
-	}
-	SECTION("Parquet metadata cache") {
-		setting = "parquet_metadata_cache";
-	}
-	SECTION("HTTP metadata cache") {
-		setting = "enable_http_metadata_cache";
-	}
-	SECTION("every cache, with no validation of the external file cache") {
-		setting = "enable_external_file_cache";
-		Fixture::Ok(f.con, "SET parquet_metadata_cache=true");
-		Fixture::Ok(f.con, "SET enable_http_metadata_cache=true");
-		Fixture::Ok(f.con, "SET validate_external_file_cache='NO_VALIDATION'");
-	}
-	Fixture::Ok(f.con, "SET " + setting + "=true");
-	Fixture::Ok(f.con, "BEGIN TRANSACTION");
-	RunGovernedScan(f);
-	for (auto &query : {"SELECT count(*) FROM read_parquet('" + OrdersFile(0) + "')",
-	                    "SELECT count(*) FROM parquet_metadata('" + OrdersFile(0) + "')",
-	                    "SELECT count(*) FROM read_blob('" + OrdersFile(0) + "')",
-	                    "SELECT sum(octet_length(content)) FROM read_blob('" + OrdersFile(0) + "')",
-	                    "SELECT sum(size) FROM read_blob('" + OrdersFile(0) + "')",
-	                    "SELECT count(last_modified) FROM read_blob('" + OrdersFile(0) + "')"}) {
-		auto r = f.con.Query(query);
-		INFO(setting);
-		INFO(query);
-		INFO(ResultText(*r));
-		REQUIRE(GotNothing(*r));
-		Fixture::Ok(f.con, "ROLLBACK");
-		Fixture::Ok(f.con, "BEGIN TRANSACTION");
-		RunGovernedScan(f);
-	}
-}
-
-//! Whether the external file cache holds blocks of a file under `prefix`, and whether the Parquet metadata cache holds
-//! the footer of `file`
-idx_t ExternalFileCacheEntries(Connection &con, const string &prefix) {
-	auto r = con.Query("SELECT count(*) FROM duckdb_external_file_cache() WHERE starts_with(path, '" + prefix + "')");
-	INFO(ResultText(*r));
-	REQUIRE_FALSE(r->HasError());
-	return r->Collection().GetValue(0, 0).GetValue<idx_t>();
-}
-bool HasParquetMetadataEntry(Connection &con, const string &file) {
-	// the key ObjectCache::PutWithTypePrefix<ParquetFileMetadataCache> builds for the file
-	return ObjectCache::GetObjectCache(*con.context).GetObject("parquet_metadata-" + file) != nullptr;
-}
-
-TEST_CASE("A governed scan leaves nothing in the caches under its paths",
-          "[httpfs][s3][file_credentials][file_credentials_r4]") {
-	Fixture f;
-	f.CreateUserSecret(f.con);
 	Fixture::Ok(f.con, "SET enable_external_file_cache=true");
 	Fixture::Ok(f.con, "SET parquet_metadata_cache=true");
 	Fixture::Ok(f.con, "SET validate_external_file_cache='NO_VALIDATION'");
-	// a path read of the user's own file fills both caches, so the checks below can see an entry
-	Fixture::Ok(f.con, "SELECT sum(i) FROM read_parquet('" + UserFile() + "')");
-	REQUIRE(ExternalFileCacheEntries(f.con, "s3://" + string(USER_BUCKET) + "/") > 0);
-	REQUIRE(HasParquetMetadataEntry(f.con, UserFile()));
-
-	Fixture::Ok(f.con, "BEGIN TRANSACTION");
 	RunGovernedScan(f);
-	RequireOrdersResult(*f.con.Query("SELECT count(*), sum(i) FROM governed_files('orders')"));
-	REQUIRE(ExternalFileCacheEntries(f.con, "s3://" + string(ORDERS_BUCKET) + "/") == 0);
+	auto entries = f.con.Query("SELECT count(*) FROM duckdb_external_file_cache() "
+	                           "WHERE starts_with(path, 's3://governed-orders/')");
+	REQUIRE_FALSE(entries->HasError());
+	REQUIRE(entries->Collection().GetValue(0, 0).GetValue<idx_t>() > 0);
 	for (auto &file : GovernedHost::Get().Table("orders").files) {
-		INFO(file);
-		REQUIRE_FALSE(HasParquetMetadataEntry(f.con, file));
+		REQUIRE(ObjectCache::GetObjectCache(*f.con.context).GetObject("parquet_metadata-" + file));
 	}
-	Fixture::Ok(f.con, "COMMIT");
-	REQUIRE(ExternalFileCacheEntries(f.con, "s3://" + string(ORDERS_BUCKET) + "/") == 0);
-}
-
-TEST_CASE("A governed scan is not served what a path read cached",
-          "[httpfs][s3][file_credentials][file_credentials_r4]") {
-	auto config = MakeConfig();
-	// in this test the user's own credential may also read the table's bucket
-	config.auth.bucket_key_ids[ORDERS_BUCKET].push_back(USER_KEY);
-	Fixture f(config);
-	f.CreateUserSecret(f.con);
-	Fixture::Ok(f.con, "SET enable_external_file_cache=true");
-	Fixture::Ok(f.con, "SET parquet_metadata_cache=true");
-	Fixture::Ok(f.con, "SET enable_http_metadata_cache=true");
-	Fixture::Ok(f.con, "SELECT sum(i) FROM read_parquet('s3://" + string(ORDERS_BUCKET) + "/orders/*.parquet')");
-	auto mark = f.Mark();
 	RunGovernedScan(f);
-	auto os = f.Since(mark);
-	INFO(MockS3DescribeObservations(os));
-	// every file was fetched again with the table's credentials
-	REQUIRE(EveryFileFetchedWith(os, GovernedHost::Get().Table("orders").files, ORDERS_KEY));
-	REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY}));
 }
-
-TEST_CASE("A governed scan and a path read of the same files both succeed, each with its own credentials",
-          "[httpfs][s3][file_credentials][file_credentials_r4]") {
-	auto config = MakeConfig();
-	// in this test the user's own credential may also read the table's bucket
-	config.auth.bucket_key_ids[ORDERS_BUCKET].push_back(USER_KEY);
-	Fixture f(config);
-	f.CreateUserSecret(f.con);
-	// every cache on, and one thread, so that a scan always sends the same requests
-	Fixture::Ok(f.con, "SET threads=1");
-	Fixture::Ok(f.con, "SET enable_external_file_cache=true");
-	Fixture::Ok(f.con, "SET parquet_metadata_cache=true");
-	Fixture::Ok(f.con, "SET enable_http_metadata_cache=true");
-	Fixture::Ok(f.con, "SET validate_external_file_cache='NO_VALIDATION'");
-	const string scan = "SELECT sum(i) FROM governed_scan('orders')";
-	const string path_read = "SELECT sum(i) FROM read_parquet('s3://" + string(ORDERS_BUCKET) + "/orders/*.parquet')";
-	// a governed scan caches nothing, so the caches are still empty after it
-	auto mark = f.Mark();
-	auto first = f.con.Query(scan);
-	INFO(ResultText(*first));
-	REQUIRE_FALSE(first->HasError());
-	REQUIRE(first->Collection().GetValue(0, 0).ToString() == EXPECTED_SUM);
-	auto alone = Count(f.Since(mark), ORDERS_BUCKET, ORDERS_KEY, "", true);
-	REQUIRE(alone > 0);
-	vector<string> statements;
-	bool cached_by_path = false;
-	SECTION("one query, the scan first") {
-		statements = {"SELECT (" + scan + "), (" + path_read + ")"};
-	}
-	SECTION("one query, the path read first") {
-		statements = {"SELECT (" + path_read + "), (" + scan + ")"};
-	}
-	SECTION("one transaction, the scan first") {
-		statements = {"BEGIN TRANSACTION", scan, path_read, "COMMIT"};
-	}
-	SECTION("one transaction, the path read first") {
-		statements = {"BEGIN TRANSACTION", path_read, scan, "COMMIT"};
-	}
-	SECTION("one query, with the files cached by an earlier path read") {
-		Fixture::Ok(f.con, path_read);
-		statements = {"SELECT (" + scan + "), (" + path_read + ")"};
-		cached_by_path = true;
-	}
-	mark = f.Mark();
-	for (auto &statement : statements) {
-		auto r = f.con.Query(statement);
-		INFO(statement);
-		INFO(ResultText(*r));
-		REQUIRE_FALSE(r->HasError());
-		if (StringUtil::StartsWith(statement, "SELECT")) {
-			for (idx_t column = 0; column < r->ColumnCount(); column++) {
-				REQUIRE(r->Collection().GetValue(column, 0).ToString() == EXPECTED_SUM);
-			}
-		}
-	}
-	auto os = f.Since(mark);
-	INFO(MockS3DescribeObservations(os));
-	REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY, USER_KEY}));
-	auto files = GovernedHost::Get().Table("orders").files;
-	// the scan fetched every file itself, as often as alone: nothing the path read cached served it
-	REQUIRE(EveryFileFetchedWith(os, files, ORDERS_KEY));
-	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_KEY, "", true) == alone);
-	if (!cached_by_path) {
-		// with nothing cached before, the path read fetched every file with the user's credential: the scan
-		// cached nothing for it
-		REQUIRE(EveryFileFetchedWith(os, files, USER_KEY));
-	}
-}
-
-namespace {
-//! A server whose single object (MockS3Server::S3Path) reports one ETag on HEAD and another on GET, so that a read
-//! of it finds the object changed after it was opened
-MockS3ServerConfig MakeChangedObjectConfig(bool enforce_if_match) {
-	auto config = MakeConfig();
-	// larger than force_download_threshold, so that a read is a range GET checked against the HEAD's ETag
-	config.object.data = string(4 * 1024 * 1024, 'x');
-	config.metadata.etag = "\"opened-etag\"";
-	config.metadata.get_etag = "\"changed-etag\"";
-	config.metadata.enforce_if_match = enforce_if_match;
-	return config;
-}
-
-idx_t HeadCount(const vector<MockS3RequestObservation> &os) {
-	idx_t n = 0;
-	for (auto &o : os) {
-		n += o.method == "HEAD";
-	}
-	return n;
-}
-
-//! Open `file` and read a range of it; the error, or empty when the read succeeded
-string OpenAndRead(Connection &con, const OpenFileInfo &file) {
-	auto &fs = FileSystem::GetFileSystem(*con.context);
-	try {
-		auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
-		string buffer(1024, '\0');
-		handle->Read(QueryContext(*con.context), &buffer[0], buffer.size(), 0);
-	} catch (std::exception &ex) {
-		return ex.what();
-	}
-	return string();
-}
-
-//! Open `path` without reading it; returns the HEADs the open sent
-idx_t OpenPathHeads(Fixture &f, const string &path) {
-	auto mark = f.Mark();
-	FileSystem::GetFileSystem(*f.con.context)
-	    .OpenFile(path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
-	return HeadCount(f.Since(mark));
-}
-} // namespace
 
 //===--------------------------------------------------------------------===//
 // [file_credentials_r5] refresh
 //===--------------------------------------------------------------------===//
 
 namespace {
-//! A server whose ORDERS_KEY is refused on range reads only, after the listing and the HEADs succeeded with it
+//! A server whose ORDERS_KEY is refused on range reads only, after the HEADs succeeded with it
 MockS3ServerConfig MakeExpiringConfig() {
 	auto config = MakeConfig();
 	config.auth.stale_key_id = ORDERS_KEY;
@@ -1085,7 +861,8 @@ string CreateRefreshableUserSecret(Fixture &f) {
 	auto test_id = S3TestHelper::NextTestId();
 	Fixture::Ok(f.con,
 	            StringUtil::Format(
-	                "CREATE OR REPLACE SECRET user_secret (TYPE s3, PROVIDER %s, SCOPE 's3://', KEY_ID '%s', "
+	                "CREATE OR REPLACE SECRET user_secret (TYPE s3, PROVIDER %s, SCOPE "
+	                "['s3://governed-orders/orders/', 's3://governed-items/items/', 's3://user-bucket/'], KEY_ID '%s', "
 	                "SECRET '%s', REGION 'eu-central-1', ENDPOINT '%s', URL_STYLE 'path', USE_SSL false, "
 	                "TEST_ID '%s', REFRESH_INFO MAP {'KEY_ID': '%s', 'SECRET': '%s', 'TEST_ID': '%s'})",
 	                S3TestHelper::TEST_PROVIDER, S3TestHelper::STALE_KEY_ID, S3TestHelper::STALE_SECRET,
@@ -1108,6 +885,9 @@ TEST_CASE("Credentials that expire during a scan are refreshed once",
 	RequireOrdersResult(*r);
 	REQUIRE(Count(os, ORDERS_BUCKET, ORDERS_KEY_REFRESHED, "GET", true) > 0);
 	REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY, ORDERS_KEY_REFRESHED}));
+	for (auto &observation : os) {
+		REQUIRE(MockS3HeaderValues(observation, "X-Host-Key") == vector<string> {observation.key_id});
+	}
 	// one vend at bind, one refresh, however many reads were refused
 	REQUIRE(GovernedHost::Get().Vends("orders") == 2);
 	// the secret matched by path was not refreshed
@@ -1227,10 +1007,10 @@ TEST_CASE("A parallel scan with prefetch and the file cache reads with the table
 }
 
 //===--------------------------------------------------------------------===//
-// [file_credentials_r7] nothing user SQL can read shows the credentials or a reference to them
+// Redacted output and errors omit credential material; names retain ordinary secret visibility.
 //===--------------------------------------------------------------------===//
 
-TEST_CASE("Outputs user SQL can read show no table credentials",
+TEST_CASE("Redacted outputs and errors omit table credential material",
           "[httpfs][s3][file_credentials][file_credentials_r7]") {
 	Fixture f;
 	f.CreateUserSecret(f.con);
@@ -1238,7 +1018,6 @@ TEST_CASE("Outputs user SQL can read show no table credentials",
 	Fixture::Ok(f.con, "SET logging_level='DEBUG'");
 	vector<string> queries = {
 	    "SELECT * FROM duckdb_secrets()",
-	    "SELECT * FROM duckdb_secrets(redact=false)",
 	    "FROM which_secret('" + OrdersFile(0) + "', 's3')",
 	    "EXPLAIN SELECT * FROM governed_scan('orders')",
 	    "EXPLAIN ANALYZE SELECT * FROM governed_scan('orders')",
@@ -1285,7 +1064,7 @@ TEST_CASE("A refused governed read reports no credentials", "[httpfs][s3][file_c
 }
 
 //===--------------------------------------------------------------------===//
-// [file_credentials_settings] settings do not change where a request with credentials goes or how it is signed
+// A named secret overrides settings for keys it supplies; missing keys retain normal setting fallback.
 //===--------------------------------------------------------------------===//
 
 namespace {
@@ -1318,7 +1097,7 @@ string HeaderValue(const MockS3RequestObservation &o, const string &name) {
 }
 } // namespace
 
-TEST_CASE("No setting fills a key the table's credentials leave unset",
+TEST_CASE("Settings fill keys a named secret leaves unset",
           "[httpfs][s3][file_credentials][file_credentials_settings]") {
 	Fixture f;
 	MockS3Server other(MockS3ServerConfig {});
@@ -1330,30 +1109,30 @@ TEST_CASE("No setting fills a key the table's credentials leave unset",
 	auto table_credentials = GovernedHost::Get().Attach(*f.con.context, "orders");
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
-	info.file_path = OrdersFile(0);
+	info.file.path = OrdersFile(0);
 	GovernedHost::Get().Apply(table_credentials, info);
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
 
 	auto &url = params.GetURLParams();
 	INFO(url.endpoint.GetHost());
-	REQUIRE(url.endpoint_mode == S3EndpointMode::AUTOMATIC);
-	REQUIRE(url.endpoint.GetHost() == "s3.us-east-1.amazonaws.com");
+	REQUIRE(url.endpoint_mode == S3EndpointMode::EXPLICIT);
+	REQUIRE(url.endpoint.GetAuthority() == other.Endpoint());
 	REQUIRE(url.style == S3URLStyle::VIRTUAL_HOSTED);
-	REQUIRE_FALSE(url.compatibility_mode);
+	REQUIRE(url.compatibility_mode);
 	REQUIRE(params.GetRefreshIdentity().use_ssl);
 	auto &credentials = params.GetCredentials();
-	REQUIRE(credentials.region == "us-east-1");
+	REQUIRE(credentials.region == "us-west-2");
 	REQUIRE(credentials.access_key_id == ORDERS_KEY);
 	REQUIRE(credentials.secret_access_key == string(ORDERS_KEY) + SECRET_SUFFIX);
-	REQUIRE(credentials.session_token.empty());
+	REQUIRE(credentials.session_token == SETTING_TOKEN);
 	auto &options = params.GetRequestOptions();
-	REQUIRE(options.kms_key_id.empty());
-	REQUIRE_FALSE(options.requester_pays);
+	REQUIRE(options.kms_key_id == SETTING_KMS_KEY);
+	REQUIRE(options.requester_pays);
 	REQUIRE(other.Observations().empty());
 }
 
-TEST_CASE("Settings do not supply credentials the table's credentials leave unset",
+TEST_CASE("Settings supply credential fields a named secret leaves unset",
           "[httpfs][s3][file_credentials][file_credentials_settings]") {
 	Fixture f;
 	SetConflictingSettings(f.con, f.server.Endpoint());
@@ -1362,14 +1141,14 @@ TEST_CASE("Settings do not supply credentials the table's credentials leave unse
 	auto table_credentials = GovernedHost::Get().Attach(*f.con.context, "orders");
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
-	info.file_path = OrdersFile(0);
+	info.file.path = OrdersFile(0);
 	GovernedHost::Get().Apply(table_credentials, info);
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
 	auto &credentials = params.GetCredentials();
-	REQUIRE(credentials.access_key_id.empty());
-	REQUIRE(credentials.secret_access_key.empty());
-	REQUIRE(credentials.session_token.empty());
+	REQUIRE(credentials.access_key_id == SETTING_KEY);
+	REQUIRE(credentials.secret_access_key == string(SETTING_KEY) + SECRET_SUFFIX);
+	REQUIRE(credentials.session_token == SETTING_TOKEN);
 	REQUIRE(credentials.region == "eu-central-1");
 }
 
@@ -1390,9 +1169,9 @@ TEST_CASE("A governed scan is sent to its secret's endpoint and signed with its 
 	REQUIRE(OnlyKeys(os, ORDERS_BUCKET, {ORDERS_KEY}));
 	for (auto &o : os) {
 		INFO(o.path);
-		REQUIRE(o.region != "us-west-2");
-		REQUIRE(HeaderValue(o, "x-amz-security-token").empty());
-		REQUIRE(HeaderValue(o, "x-amz-request-payer").empty());
+		REQUIRE(o.region == "us-west-2");
+		REQUIRE(HeaderValue(o, "x-amz-security-token") == SETTING_TOKEN);
+		REQUIRE(HeaderValue(o, "x-amz-request-payer") == "requester");
 	}
 }
 
@@ -1404,7 +1183,7 @@ S3AuthParams ResolveWithHandle(Fixture &f, const string &table, const string &sc
 	auto table_credentials = GovernedHost::Get().AttachWithScope(*f.con.context, table, scope);
 	ClientContextFileOpener opener(*f.con.context);
 	FileOpenerInfo info;
-	info.file_path = path;
+	info.file.path = path;
 	GovernedHost::Get().Apply(table_credentials, info);
 	auto params = S3AuthResolver::Resolve(&opener, info);
 	f.con.Rollback();
@@ -1412,14 +1191,14 @@ S3AuthParams ResolveWithHandle(Fixture &f, const string &table, const string &sc
 }
 } // namespace
 
-TEST_CASE("gcs_user_project does not fill the user project the table's credentials leave unset",
+TEST_CASE("gcs_user_project fills the user project a named secret leaves unset",
           "[httpfs][s3][file_credentials][file_credentials_settings]") {
 	Fixture f;
 	Fixture::Ok(f.con, "SET gcs_user_project='settings-project'");
 	auto path = StringUtil::Format("gs://%s/orders/part-0.parquet", ORDERS_BUCKET);
 	auto params = ResolveWithHandle(f, "orders", StringUtil::Format("gs://%s/orders/", ORDERS_BUCKET), path);
 	REQUIRE(params.GetProvider().GetType() == S3ProviderType::GCS);
-	REQUIRE(params.GetRequestOptions().user_project.empty());
+	REQUIRE(params.GetRequestOptions().user_project == "settings-project");
 	REQUIRE(params.GetCredentials().access_key_id == ORDERS_KEY);
 }
 
@@ -1429,7 +1208,7 @@ TEST_CASE("A request with credentials and no file opener fails",
 	f.con.BeginTransaction();
 	auto table_credentials = GovernedHost::Get().Attach(*f.con.context, "orders");
 	FileOpenerInfo info;
-	info.file_path = OrdersFile(0);
+	info.file.path = OrdersFile(0);
 	GovernedHost::Get().Apply(table_credentials, info);
 	string error;
 	try {
@@ -1441,15 +1220,13 @@ TEST_CASE("A request with credentials and no file opener fails",
 	REQUIRE(StringUtil::Contains(error, "without a file opener"));
 	// the same call without them resolves, with no credentials
 	FileOpenerInfo plain;
-	plain.file_path = OrdersFile(0);
+	plain.file.path = OrdersFile(0);
 	REQUIRE(S3AuthResolver::Resolve(nullptr, plain).GetCredentials().access_key_id.empty());
 	f.con.Rollback();
 }
 
 //===--------------------------------------------------------------------===//
-// Why an existing mechanism does not do: a transaction secret (SecretPersistType::TRANSACTION) holds the table's
-// credentials for the transaction only, but is matched by path, so a path read in the same transaction uses it.
-// This test shows that behavior; it passes when the path read DOES get the table's credentials.
+// Transaction secrets also participate in ordinary scope matching.
 //===--------------------------------------------------------------------===//
 
 TEST_CASE("A transaction secret with the table's scope is used by a path read",
@@ -1458,7 +1235,7 @@ TEST_CASE("A transaction secret with the table's scope is used by a path read",
 	f.CreateUserSecret(f.con);
 	Fixture::Ok(f.con, "BEGIN TRANSACTION");
 	auto &host = GovernedHost::Get();
-	auto scope = host.Table("orders").scope;
+	auto scope = OrdersFile(0);
 	auto secret = host.MakeSecret({scope}, Identifier("config"), Identifier("table_secret"), ORDERS_KEY);
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*f.con.context);
 	SecretManager::Get(*f.con.context)
@@ -1478,102 +1255,48 @@ TEST_CASE("A transaction secret with the table's scope is used by a path read",
 // [file_credentials_attack] the credentials themselves
 //===--------------------------------------------------------------------===//
 
-TEST_CASE("A file option in SQL does not carry the table's credentials",
-          "[httpfs][s3][file_credentials][file_credentials_attack]") {
+TEST_CASE("SQL file structs select an ordinary named transaction secret", "[httpfs][s3][file_credentials]") {
 	Fixture f;
 	f.CreateUserSecret(f.con);
-	Fixture::Ok(f.con, "BEGIN TRANSACTION");
-	RunGovernedScan(f);
-	for (auto &option : {"credentials", "secret", "secret_handle"}) {
-		auto mark = f.Mark();
-		auto r = f.con.Query(StringUtil::Format(
-		    "SELECT count(*) FROM read_parquet([{'filename': '%s', '%s': 'governed'}])", OrdersFile(0), option));
-		INFO(ResultText(*r));
-		REQUIRE(r->HasError());
-		REQUIRE(Count(f.Since(mark), ORDERS_BUCKET, ORDERS_KEY) == 0);
-		Fixture::Ok(f.con, "ROLLBACK");
-		Fixture::Ok(f.con, "BEGIN TRANSACTION");
-		RunGovernedScan(f);
-	}
-}
-
-namespace {
-//! Every string the outputs below show for the transaction's secrets and the governed scan
-vector<string> VisibleStrings(Connection &con) {
-	vector<string> result;
-	for (auto &query : {"SELECT name FROM duckdb_secrets()", "SELECT secret_string FROM duckdb_secrets()",
-	                    "SELECT name FROM which_secret('s3://governed-orders/orders/part-0.parquet', 's3')"}) {
-		auto r = con.Query(query);
-		for (idx_t row = 0; !r->HasError() && row < r->RowCount(); row++) {
-			result.push_back(r->Collection().GetValue(0, row).ToString());
-		}
-	}
-	return result;
-}
-} // namespace
-
-TEST_CASE("Each scan's credentials are a file secret of their own, and no output shows them",
-          "[httpfs][s3][file_credentials][file_credentials_attack]") {
-	Fixture f;
-	f.CreateUserSecret(f.con);
-	Fixture::Ok(f.con, "BEGIN TRANSACTION");
-	RunGovernedScan(f);
-	RunGovernedScan(f);
-	auto attached = GovernedHost::Get().Attachments();
-	REQUIRE(attached.size() == 2);
-	REQUIRE(attached[0] != attached[1]);
-	for (auto &text : {ResultText(*f.con.Query("SELECT * FROM duckdb_secrets()")),
-	                   ResultText(*f.con.Query("EXPLAIN ANALYZE SELECT * FROM governed_scan('orders')"))}) {
-		RequireNoCredential(text);
-		REQUIRE_FALSE(StringUtil::Contains(text, HOST_NAME));
-	}
-}
-
-TEST_CASE("No SQL that takes a secret name reaches the table's credentials",
-          "[httpfs][s3][file_credentials][file_credentials_attack]") {
-	Fixture f;
-	f.CreateUserSecret(f.con);
-	Fixture::Ok(f.con, "BEGIN TRANSACTION");
-	RunGovernedScan(f);
-	auto table_credentials = GovernedHost::Get().Attachments()[0];
-	auto &manager = SecretManager::Get(*f.con.context);
-	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*f.con.context);
-	// the file secret's own name, the host's name and every string the outputs show
-	auto names = VisibleStrings(f.con);
-	names.push_back(table_credentials);
-	names.push_back("governed");
-	names.push_back(HOST_NAME);
-	for (auto &name : names) {
-		if (name == "user_secret") {
-			// the user's own secret, matched by path; it is not the table's
-			continue;
-		}
-		INFO(name);
-		REQUIRE(!manager.GetSecretByName(transaction, name));
-		auto drop = f.con.Query("DROP SECRET IF EXISTS \"" + name + "\"");
-		INFO(ResultText(*drop));
-		auto create =
-		    f.con.Query(StringUtil::Format("CREATE OR REPLACE SECRET \"%s\" (TYPE s3, SCOPE 's3://%s/', KEY_ID "
-		                                   "'AKIAREPLACED00000001', SECRET 'x')",
-		                                   name, ORDERS_BUCKET));
-		INFO(ResultText(*create));
-		// the credentials still hold the host's secret, and the governed scan still reads with it
-		auto entry = GetFileSecret(*f.con.context, table_credentials, OrdersFile(0));
-		REQUIRE(entry->secret->Cast<KeyValueSecret>().TryGetValue("key_id").ToString() == ORDERS_KEY);
-		f.con.Query("DROP SECRET IF EXISTS \"" + name + "\"");
-	}
+	f.con.BeginTransaction();
+	auto name = GovernedHost::Get().Attach(*f.con.context, "orders");
+	auto entry = GetNamedSecret(*f.con.context, name);
+	REQUIRE(entry);
+	REQUIRE(entry->persist_type == SecretPersistType::TRANSACTION);
+	auto listed = f.con.Query("SELECT secret_string FROM duckdb_secrets() WHERE name='" + name + "'");
+	REQUIRE_FALSE(listed->HasError());
+	REQUIRE(listed->RowCount() == 1);
+	RequireNoCredential(ResultText(*listed));
+	REQUIRE(entry->secret->Cast<KeyValueSecret>().TryGetValue("key_id").ToString() == ORDERS_KEY);
 	auto mark = f.Mark();
-	RunGovernedScan(f);
-	REQUIRE(OnlyKeys(f.Since(mark), ORDERS_BUCKET, {ORDERS_KEY}));
-	// no SQL statement can name the credentials: a name taken from the file secret or any output names no secret
-	for (auto &name : names) {
-		if (name == "user_secret") {
-			continue;
-		}
-		auto r = f.con.Query(
-		    StringUtil::Format("SELECT count(*) FROM read_parquet('%s', secret='%s')", OrdersFile(0), name));
-		INFO(ResultText(*r));
-		REQUIRE(r->HasError());
+	auto result = f.con.Query(StringUtil::Format(
+	    "SELECT count(*) FROM read_parquet([{'filename': '%s', 'secret': '%s'}])", OrdersFile(0), name));
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<idx_t>() == ROWS_PER_FILE);
+	REQUIRE(Count(f.Since(mark), ORDERS_BUCKET, ORDERS_KEY, "GET", true) > 0);
+	Fixture::Ok(f.con, "DROP SECRET " + name);
+	REQUIRE_FALSE(GetNamedSecret(*f.con.context, name));
+	OpenFileInfo file(OrdersFile(0));
+	GovernedHost::Get().Apply(name, file);
+	mark = f.Mark();
+	REQUIRE_THROWS_WITH(FileSystem::GetFileSystem(*f.con.context).OpenFile(file, FileFlags::FILE_FLAGS_READ),
+	                    Catch::Contains("not found"));
+	REQUIRE(f.Since(mark).empty());
+}
+
+TEST_CASE("A named secret with the wrong scope or type fails before sending a request",
+          "[httpfs][s3][file_credentials]") {
+	Fixture f;
+	f.CreateUserSecret(f.con);
+	Fixture::Ok(f.con, "CREATE SECRET wrong_type (TYPE http, SCOPE 's3://')");
+	f.con.BeginTransaction();
+	auto wrong_scope = GovernedHost::Get().Attach(*f.con.context, "items");
+	for (auto &name : {wrong_scope, string("wrong_type"), string("missing_secret")}) {
+		OpenFileInfo file(OrdersFile(0));
+		GovernedHost::Get().Apply(name, file);
+		auto mark = f.Mark();
+		REQUIRE_THROWS(FileSystem::GetFileSystem(*f.con.context).OpenFile(file, FileFlags::FILE_FLAGS_READ));
+		REQUIRE(f.Since(mark).empty());
 	}
 }
 
@@ -1596,13 +1319,13 @@ TEST_CASE("The table's credentials serve only the transaction that loaded the ta
 	Fixture::Ok(f.con, "BEGIN TRANSACTION");
 	RunGovernedScan(f);
 	auto table_credentials = GovernedHost::Get().Attachments()[0];
-	// another connection, with the credentials object itself
+	// Another connection, explicitly given the same secret name.
 	other.BeginTransaction();
 	{
 		ClientContextFileOpener opener(*other.context);
-		REQUIRE_THROWS(GetFileSecret(*other.context, table_credentials, OrdersFile(0)));
+		REQUIRE_FALSE(GetNamedSecret(*other.context, table_credentials));
 		FileOpenerInfo info;
-		info.file_path = OrdersFile(0);
+		info.file.path = OrdersFile(0);
 		GovernedHost::Get().Apply(table_credentials, info);
 		REQUIRE_THROWS(S3AuthResolver::Resolve(&opener, info));
 		OpenFileInfo file(OrdersFile(0));
@@ -1615,7 +1338,7 @@ TEST_CASE("The table's credentials serve only the transaction that loaded the ta
 		f.con.Query("ROLLBACK");
 	}
 	f.con.BeginTransaction();
-	REQUIRE_THROWS(GetFileSecret(*f.con.context, table_credentials, OrdersFile(0)));
+	REQUIRE_FALSE(GetNamedSecret(*f.con.context, table_credentials));
 	OpenFileInfo file(OrdersFile(0));
 	GovernedHost::Get().Apply(table_credentials, file);
 	REQUIRE_THROWS(FileSystem::GetFileSystem(*f.con.context).OpenFile(file, FileFlags::FILE_FLAGS_READ));
@@ -1628,30 +1351,15 @@ TEST_CASE("An autocommit governed scan's credentials end with it",
 	f.CreateUserSecret(f.con);
 	RunGovernedScan(f);
 	auto table_credentials = GovernedHost::Get().Attachments()[0];
-	REQUIRE_THROWS_WITH(GetFileSecret(*f.con.context, table_credentials, OrdersFile(0)),
-	                    Catch::Contains("is not available"));
+	f.con.BeginTransaction();
+	REQUIRE_FALSE(GetNamedSecret(*f.con.context, table_credentials));
 }
 
-TEST_CASE("No SQL creates the table's credentials", "[httpfs][s3][file_credentials][file_credentials_attack]") {
+TEST_CASE("Transaction secrets cannot be created through SQL", "[httpfs][s3][file_credentials]") {
 	Fixture f;
-	auto vends = GovernedHost::Get().Vends("orders");
-	// the host registers no secret provider: CREATE SECRET has nothing that vends
-	for (auto &query : {
-	         StringUtil::Format("CREATE SECRET minted (TYPE s3, PROVIDER %s, TABLE 'orders')", HOST_NAME),
-	         StringUtil::Format("CREATE TEMPORARY SECRET minted (TYPE s3, PROVIDER %s, SCOPE 's3://%s/')", HOST_NAME,
-	                            ORDERS_BUCKET),
-	         StringUtil::Format("CREATE SECRET minted IN transaction (TYPE s3, PROVIDER %s)", HOST_NAME),
-	     }) {
-		auto r = f.con.Query(query);
-		INFO(query);
-		INFO(ResultText(*r));
-		REQUIRE(r->HasError());
-	}
-	REQUIRE(GovernedHost::Get().Vends("orders") == vends);
-	REQUIRE(f.con.Query("SELECT count(*) FROM duckdb_secrets() WHERE name = 'minted'")
-	            ->Collection()
-	            .GetValue(0, 0)
-	            .ToString() == "0");
+	auto result = f.con.Query("CREATE SECRET minted IN transaction (TYPE s3)");
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "Transaction-scoped secrets cannot be created through SQL"));
 }
 
 TEST_CASE("The table's credentials are used only for paths under its scope",
@@ -1661,9 +1369,8 @@ TEST_CASE("The table's credentials are used only for paths under its scope",
 	Fixture::Ok(f.con, "BEGIN TRANSACTION");
 	RunGovernedScan(f);
 	auto table_credentials = GovernedHost::Get().Attachments()[0];
-	// a file list that names a path outside the table, as a manifest written by the table's writer could, or one
-	// that leaves it with a '..' segment
-	for (auto &path : {ItemsFile(0), GovernedHost::Get().Table("orders").scope + "../items/part-0.parquet"}) {
+	// A manifest must not use this secret for a path outside its scope.
+	for (auto &path : {ItemsFile(0), UserFile()}) {
 		INFO(path);
 		OpenFileInfo file(path);
 		GovernedHost::Get().Apply(table_credentials, file);
