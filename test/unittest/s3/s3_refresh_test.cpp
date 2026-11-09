@@ -444,10 +444,9 @@ static void PublishTestS3Region(const shared_ptr<HTTPRequestSession> &session, c
 		if (snapshot.auth_params.GetCredentials().region == region) {
 			return;
 		}
-		auto auth_params = snapshot.auth_params.WithRegion(region);
-		auto replacement = make_shared_ptr<S3RequestSnapshot>(
-		    snapshot.Params(), auth_params, snapshot.refresh_path, snapshot.client_context,
-		    snapshot.credential_refresh_enabled, true, snapshot.credential_generation);
+		auto replacement = snapshot.Copy();
+		replacement->auth_params = snapshot.auth_params.WithRegion(region);
+		replacement->region_redirected = true;
 		if (session->TryPublish(captured.snapshot, std::move(replacement)).published) {
 			return;
 		}
@@ -550,7 +549,7 @@ CREATE SECRET refresh_s3_endpoint_mode (
 	FileOpenerInfo info = {S3TestHelper::S3_PATH};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 	REQUIRE(auth_params.GetURLParams().endpoint_mode == initial_mode);
-	auto session = S3RequestExecutor::CreateSession(opener, S3TestHelper::S3_PATH, auth_params);
+	auto session = S3RequestExecutor::CreateSession(opener, info.file, auth_params);
 	if (!published_region.empty()) {
 		string previous_region;
 		REQUIRE(S3RequestExecutor::SetSessionRegion(*session, published_region, previous_region));

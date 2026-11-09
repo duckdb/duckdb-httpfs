@@ -7,7 +7,9 @@
 #include "s3/mock_s3_server.hpp"
 #include "s3/s3_test_helper.hpp"
 #include "s3/s3_auth.hpp"
+#include "s3/s3fs.hpp"
 
+#include "crypto.hpp"
 #include "duckdb.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
@@ -892,6 +894,89 @@ TEST_CASE("Credentials that expire during a scan are refreshed once",
 	REQUIRE(GovernedHost::Get().Vends("orders") == 2);
 	// the secret matched by path was not refreshed
 	S3TestHelper::AssertNoRefresh(user_test_id);
+}
+
+TEST_CASE("Named S3 files retain metadata through credential refresh and region correction",
+          "[httpfs][s3][file_credentials][refresh]") {
+	for (const string client : {"curl", "httplib"}) {
+		for (bool standalone_session : {false, true}) {
+			DYNAMIC_SECTION(client << (standalone_session ? " request session" : " file handle")) {
+				auto config = MakeExpiringConfig();
+				config.auth.required_region = "ap-southeast-2";
+				const auto etag = config.metadata.etag;
+				Fixture f(std::move(config));
+				Fixture::Ok(f.con, "SET httpfs_client_implementation='" + client + "'");
+				auto user_test_id = CreateRefreshableUserSecret(f);
+				GovernedHost::Get().SetKeys("orders", {ORDERS_KEY, ORDERS_KEY_REFRESHED});
+				f.con.BeginTransaction();
+
+				OpenFileInfo file(OrdersFile(0));
+				GovernedHost::Get().Apply(GovernedHost::Get().Attach(*f.con.context, "orders"), file);
+				const auto &bytes = ParquetBytes();
+				auto &options = file.extended_info->options;
+				options["file_size"] = Value::UBIGINT(bytes.size());
+				options["last_modified"] = Value::TIMESTAMP(timestamp_t(0));
+				options["etag"] = Value(etag);
+				options["footer_size"] =
+				    Value::UBIGINT(Load<uint32_t>(const_data_ptr_cast(bytes.data()) + bytes.size() - 8));
+				auto &fs = FileSystem::GetFileSystem(*f.con.context);
+				const auto flags = FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO;
+				unique_ptr<FileHandle> handle;
+				shared_ptr<HTTPRequestSession> session;
+				if (standalone_session) {
+					ClientContextFileOpener opener(*f.con.context);
+					FileOpenerInfo info(file);
+					session = S3RequestExecutor::CreateSession(opener, file, S3AuthResolver::Resolve(opener, info));
+				} else {
+					handle = fs.OpenFile(file, flags);
+					session = handle->Cast<S3FileHandle>().request_session;
+				}
+				REQUIRE(f.server.Observations().empty());
+
+				::AESStateSSLFactory encryption_util;
+				S3RequestSpec spec {file.path, S3RequestOperation::GET_OBJECT, {}, "", "", ""};
+				string buffer;
+				auto result =
+				    S3RequestExecutor::RunSession(encryption_util, *session, spec, [&](S3RequestData &request_data) {
+					    buffer.clear();
+					    auto headers = request_data.headers;
+					    headers.Insert("Range", "bytes=0-1023");
+					    headers.Insert("If-Match", etag);
+					    GetRequestInfo request(
+					        request_data.http_url, headers, *request_data.http_params,
+					        [](const HTTPResponse &) { return true; },
+					        [&](const_data_ptr_t data, idx_t size) {
+						        buffer.append(const_char_ptr_cast(data), size);
+						        return true;
+					        });
+					    request.try_request = true;
+					    return S3RequestExecutor::SendSessionRequest(*session, request_data, request);
+				    });
+				REQUIRE(result.response->status == HTTPStatusCode::PartialContent_206);
+				REQUIRE(buffer == bytes.substr(0, 1024));
+				auto captured = session->Capture();
+				auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
+				REQUIRE(snapshot.credential_generation == 1);
+				REQUIRE(snapshot.auth_params.GetCredentials().region == "ap-southeast-2");
+				REQUIRE(snapshot.file.ToValue() == file.ToValue());
+
+				// Reusing the retained file must still select its secret and skip the metadata HEAD.
+				auto reopened = fs.OpenFile(snapshot.file, flags);
+				reopened->Read(QueryContext(*f.con.context), &buffer[0], buffer.size(), 0);
+				REQUIRE(buffer == bytes.substr(0, 1024));
+				auto observations = f.server.Observations();
+				INFO(MockS3DescribeObservations(observations));
+				for (const auto &observation : observations) {
+					REQUIRE(observation.method == "GET");
+					REQUIRE(observation.if_match == etag);
+					REQUIRE(MockS3HeaderValues(observation, "X-Host-Key") == vector<string> {observation.key_id});
+				}
+				REQUIRE(OnlyKeys(observations, ORDERS_BUCKET, {ORDERS_KEY, ORDERS_KEY_REFRESHED}));
+				REQUIRE(GovernedHost::Get().Vends("orders") == 2);
+				S3TestHelper::AssertNoRefresh(user_test_id);
+			}
+		}
+	}
 }
 
 TEST_CASE("Reads of two files refused at once refresh the table's credentials once",

@@ -2130,7 +2130,7 @@ TEST_CASE("S3 rejects configured header conflicts before request dispatch", "[ht
 	config.credentials.access_key_id = "key";
 	config.credentials.secret_access_key = "secret";
 	auto auth_params = ResolveTestAuth(std::move(config));
-	auto snapshot = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, "s3://bucket/key",
+	auto snapshot = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, OpenFileInfo("s3://bucket/key"),
 	                                                   weak_ptr<ClientContext>(), false);
 	HTTPRequestSession session(snapshot);
 	::AESStateSSLFactory encryption_util;
@@ -2223,8 +2223,8 @@ TEST_CASE("S3 region correction retains spent retries", "[httpfs][s3][retry][sha
 		params.retry_wait_ms = 0;
 		auto config = TestAuthConfig();
 		config.credentials.region = "us-east-1";
-		auto snapshot = make_shared_ptr<S3RequestSnapshot>(params, ResolveTestAuth(config), "s3://bucket/key",
-		                                                   weak_ptr<ClientContext>(), false);
+		auto snapshot = make_shared_ptr<S3RequestSnapshot>(
+		    params, ResolveTestAuth(config), OpenFileInfo("s3://bucket/key"), weak_ptr<ClientContext>(), false);
 		HTTPRequestSession session(snapshot);
 		::AESStateSSLFactory encryption_util;
 		S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
@@ -2268,8 +2268,8 @@ TEST_CASE("S3 malformed response cleanup does not require retry admission", "[ht
 			HTTPTestHelper::Configure(db, con, retries, client, true);
 			HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 			ClientContextFileOpener opener(*con.context);
-			auto session =
-			    S3RequestExecutor::CreateSession(opener, "s3://bucket/key", ResolveTestAuth(TestAuthConfig()));
+			auto session = S3RequestExecutor::CreateSession(opener, OpenFileInfo("s3://bucket/key"),
+			                                                ResolveTestAuth(TestAuthConfig()));
 			::AESStateSSLFactory encryption_util;
 			S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
 			idx_t attempts = 0;
@@ -2314,8 +2314,8 @@ TEST_CASE("Overlapping S3 operations have independent retry budgets", "[httpfs][
 	HTTPFSParams params(http_util);
 	params.retries = 2;
 	params.retry_wait_ms = 0;
-	auto snapshot = make_shared_ptr<S3RequestSnapshot>(params, ResolveTestAuth(TestAuthConfig()), "s3://bucket/key",
-	                                                   weak_ptr<ClientContext>(), false);
+	auto snapshot = make_shared_ptr<S3RequestSnapshot>(
+	    params, ResolveTestAuth(TestAuthConfig()), OpenFileInfo("s3://bucket/key"), weak_ptr<ClientContext>(), false);
 	HTTPRequestSession session(snapshot);
 	::AESStateSSLFactory encryption_util;
 	S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
@@ -2346,7 +2346,7 @@ TEST_CASE("S3 request error context belongs to the final attempt", "[httpfs][s3]
 	config.credentials.region = "request-region";
 	config.endpoint = "s3.request-region.amazonaws.com";
 	auto auth_params = ResolveTestAuth(std::move(config));
-	auto snapshot = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, "s3://bucket/key",
+	auto snapshot = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, OpenFileInfo("s3://bucket/key"),
 	                                                   weak_ptr<ClientContext>(), false);
 	HTTPRequestSession session(snapshot);
 	::AESStateSSLFactory encryption_util;

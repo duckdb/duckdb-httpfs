@@ -78,11 +78,10 @@ private:
 
 struct S3RequestSnapshot : public HTTPRequestSnapshot {
 public:
-	S3RequestSnapshot(const HTTPFSParams &http_params, const S3AuthParams &auth_params_p, string refresh_path_p,
+	S3RequestSnapshot(const HTTPFSParams &http_params, const S3AuthParams &auth_params_p, OpenFileInfo file_p,
 	                  weak_ptr<ClientContext> client_context_p = {}, bool credential_refresh_enabled_p = true,
 	                  bool region_redirected_p = false, idx_t credential_generation_p = 0,
-	                  optional<S3MultipartUploadPolicy> multipart_upload_policy_p = {},
-	                  string secret_name_p = string());
+	                  optional<S3MultipartUploadPolicy> multipart_upload_policy_p = {});
 
 public:
 	//! A copy of this snapshot, carrying every field over. A caller that has to change a field
@@ -95,9 +94,8 @@ public:
 public:
 	static constexpr HTTPRequestSnapshotType TYPE = HTTPRequestSnapshotType::S3;
 	S3AuthParams auth_params;
-	string refresh_path;
-	//! The file's selected secret; refresh looks it up by name when set, otherwise by refresh_path.
-	string secret_name;
+	//! The original file and all its options, including the secret selected for credential refresh.
+	OpenFileInfo file;
 	weak_ptr<ClientContext> client_context;
 	bool credential_refresh_enabled;
 	bool region_redirected;
@@ -196,12 +194,10 @@ struct S3RequestExecutor {
 
 	static bool SetSessionRegion(HTTPRequestSession &session, const string &correct_region, string &previous_region);
 	static bool CredentialRefreshEnabled(optional_ptr<FileOpener> opener);
-	//! The file's selected secret name, or empty to match a secret by path.
 	static S3RefreshableHTTPParams ReadRefreshableHTTPParams(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,
-	                                                         const string &path, const string &secret_name = string());
-	static shared_ptr<HTTPRequestSession> CreateSession(optional_ptr<FileOpener> opener, const string &path,
-	                                                    const S3AuthParams &auth_params,
-	                                                    const string &secret_name = string());
+	                                                         const OpenFileInfo &file);
+	static shared_ptr<HTTPRequestSession> CreateSession(optional_ptr<FileOpener> opener, const OpenFileInfo &file,
+	                                                    const S3AuthParams &auth_params);
 	static unique_ptr<HTTPResponse> SendSessionRequest(HTTPRequestSession &session, S3RequestData &request_data,
 	                                                   BaseRequest &request);
 	static unique_ptr<HTTPResponse> SendHandleRequest(S3FileHandle &handle, S3RequestData &request_data,

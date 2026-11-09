@@ -176,7 +176,7 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 
 	shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
 
-	request_session = S3RequestExecutor::CreateSession(opener, glob_pattern, s3_auth_params);
+	request_session = S3RequestExecutor::CreateSession(opener, info.file, s3_auth_params);
 }
 
 bool S3GlobResult::ExpandNextPath() const {

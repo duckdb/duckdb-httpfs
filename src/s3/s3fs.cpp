@@ -42,15 +42,10 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 		                              S3Provider::GetVersionParameterName(requested_version.GetType()));
 	}
 	auto captured = request_session->Capture();
-	// Retain the selected name so refresh renews the same secret used to open the file.
-	string secret_name;
-	if (file.extended_info) {
-		file.extended_info->TryGetSecretName(secret_name);
-	}
 	request_session->TryPublish(captured.snapshot,
-	                            make_shared_ptr<S3RequestSnapshot>(
-	                                captured.snapshot->Params(), auth_params_p, file.path, weak_ptr<ClientContext>(),
-	                                true, false, 0, std::move(multipart_upload_policy), std::move(secret_name)));
+	                            make_shared_ptr<S3RequestSnapshot>(captured.snapshot->Params(), auth_params_p, file,
+	                                                               weak_ptr<ClientContext>(), true, false, 0,
+	                                                               std::move(multipart_upload_policy)));
 	auto_fallback_to_full_file_download = false;
 	if (flags.OpenForReading() && flags.OpenForWriting()) {
 		throw NotImplementedException("Cannot open an HTTP file for both reading and writing");

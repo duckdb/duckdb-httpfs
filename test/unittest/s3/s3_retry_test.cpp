@@ -992,7 +992,7 @@ static void RunThrottledListSignalTest(const string &client_implementation, idx_
 	ClientContextFileOpener opener(*con.context);
 	FileOpenerInfo info = {S3TestHelper::S3_PATH};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
-	auto session = S3RequestExecutor::CreateSession(opener, S3TestHelper::S3_PATH, auth_params);
+	auto session = S3RequestExecutor::CreateSession(opener, info.file, auth_params);
 	::AESStateSSLFactory encryption_util;
 	auto result = AWSListObjectV2::Request(encryption_util, *session, "s3://refresh-bucket/", "", S3ListMode::FLAT);
 

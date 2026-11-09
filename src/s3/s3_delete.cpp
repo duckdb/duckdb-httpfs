@@ -90,7 +90,7 @@ static void AddDeleteHTTPHash(hash_t &result, const S3RefreshableHTTPParams &htt
 void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener) {
 	FileOpenerInfo info = {path};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
-	auto session = S3RequestExecutor::CreateSession(opener, path, auth_params);
+	auto session = S3RequestExecutor::CreateSession(opener, info.file, auth_params);
 	auto request_result = DeleteRequest(*session, S3RequestOperation::DELETE_OBJECT, path, {});
 	auto &res = request_result.response;
 	if (res->HasRequestError()) {
@@ -319,7 +319,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 
 		S3DeleteBatchUrlInfo url_info = {parsed_url.GetPrefix(), parsed_url.GetBucketHTTPUrl(), auth_params};
 		auto refreshable_http_params = S3RequestExecutor::ReadRefreshableHTTPParams(
-		    HTTPFSUtil::GetHTTPUtil(opener).Cast<HTTPFSUtil>(), opener, path);
+		    HTTPFSUtil::GetHTTPUtil(opener).Cast<HTTPFSUtil>(), opener, info.file);
 		auto identity =
 		    CreateDeleteBatchIdentity(std::move(url_info), std::move(refreshable_http_params), opener, path);
 		auto entry = delete_batches.find(identity);
