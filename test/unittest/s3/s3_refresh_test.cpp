@@ -437,6 +437,60 @@ static void RunMultipleStaleHandlesSingleRefreshScenario() {
 	S3TestHelper::AssertSingleRefresh(test_id);
 }
 
+//! duckdb-httpfs#462: a transaction that cannot see another transaction's refresh of the same secret
+static void RunRefreshAfterOtherTransactionScenario(bool other_commits_first) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.stale_key_id = S3TestHelper::STALE_KEY_ID;
+	config.auth.refresh_target = MockS3RefreshTarget::HEAD;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection other(db);
+	Connection con(db);
+	auto test_id = S3TestHelper::ConfigureRefresh(db, other, server, "httplib", false);
+	for (const auto &setting : {"httpfs_client_implementation", "httpfs_connection_caching", "s3_endpoint", "s3_region",
+	                            "s3_use_ssl", "s3_url_style"}) {
+		auto value = other.Query(StringUtil::Format("SELECT current_setting('%s')", setting));
+		REQUIRE_FALSE(value->HasError());
+		S3TestHelper::RequireQueryOk(
+		    con, StringUtil::Format("SET %s = '%s'", setting, value->Collection().GetValue(0, 0).ToString()));
+	}
+
+	// pin this transaction's snapshot to the stale secret before the other transaction refreshes it
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	S3TestHelper::RequireQueryOk(con, "SELECT count(*) FROM duckdb_secrets()");
+
+	S3TestHelper::RequireQueryOk(other, "BEGIN TRANSACTION");
+	OpenForRead(other, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	if (other_commits_first) {
+		S3TestHelper::RequireQueryOk(other, "COMMIT");
+	}
+
+	OpenForRead(con, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+	if (!other_commits_first) {
+		S3TestHelper::RequireQueryOk(other, "COMMIT");
+	}
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(S3TestHelper::CountObservations(observations, "HEAD", S3TestHelper::FRESH_KEY_ID, 200) == 2);
+	S3TestHelper::AssertSingleRefresh(test_id);
+
+	// the other transaction's replace is what later transactions see
+	Connection later(db);
+	S3TestHelper::RequireQueryOk(later, "BEGIN TRANSACTION");
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*later.context);
+	auto secret = SecretManager::Get(*db.instance).GetSecretByName(transaction, "refresh_s3");
+	REQUIRE(secret);
+	REQUIRE(secret->persist_type == SecretPersistType::TEMPORARY);
+	REQUIRE(StringUtil::Contains(secret->secret->ToString(SecretDisplayType::UNREDACTED),
+	                             StringUtil::Format("key_id=%s", S3TestHelper::FRESH_KEY_ID)));
+	S3TestHelper::RequireQueryOk(later, "ROLLBACK");
+}
+
 static void PublishTestS3Region(const shared_ptr<HTTPRequestSession> &session, const string &region) {
 	for (;;) {
 		auto captured = session->Capture();
@@ -781,6 +835,15 @@ TEST_CASE("HTTPFS can disable S3 credential refresh", "[httpfs][s3][refresh]") {
 
 TEST_CASE("HTTPFS reuses one S3 credential refresh across stale handles", "[httpfs][s3][refresh]") {
 	RunMultipleStaleHandlesSingleRefreshScenario();
+}
+
+TEST_CASE("HTTPFS refreshes a secret another transaction already refreshed", "[httpfs][s3][refresh]") {
+	SECTION("while the other transaction is open") {
+		RunRefreshAfterOtherTransactionScenario(false);
+	}
+	SECTION("after the other transaction commits") {
+		RunRefreshAfterOtherTransactionScenario(true);
+	}
 }
 
 TEST_CASE("S3 credential publication is independent from client invalidation", "[httpfs][s3][refresh]") {
