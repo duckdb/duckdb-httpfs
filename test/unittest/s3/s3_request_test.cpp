@@ -947,7 +947,7 @@ static void RunDirectDeleteErrorScenario(const string &client_implementation) {
 
 static S3AuthParams ReadSecretAuthParams(Connection &con, KeyValueSecret &secret,
                                          const string &path = "s3://bucket/key") {
-	ClientContextFileOpener opener(*con.context);
+	ClientContextFileOpener opener(con.context->GetContext());
 	S3KeyValueReader secret_reader {KeyValueSecretReader(secret, opener)};
 	S3AuthResolveOptions options;
 	options.enable_deprecated_url_parameters = true;
@@ -2267,7 +2267,7 @@ TEST_CASE("S3 malformed response cleanup does not require retry admission", "[ht
 			Connection con(db);
 			HTTPTestHelper::Configure(db, con, retries, client, true);
 			HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-			ClientContextFileOpener opener(*con.context);
+			ClientContextFileOpener opener(con.context->GetContext());
 			auto session = S3RequestExecutor::CreateSession(opener, OpenFileInfo("s3://bucket/key"),
 			                                                ResolveTestAuth(TestAuthConfig()));
 			::AESStateSSLFactory encryption_util;

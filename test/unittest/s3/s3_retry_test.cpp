@@ -989,7 +989,7 @@ static void RunThrottledListSignalTest(const string &client_implementation, idx_
 	ConfigureListRetryTest(db, con, server, client_implementation, 2);
 
 	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-	ClientContextFileOpener opener(*con.context);
+	ClientContextFileOpener opener(con.context->GetContext());
 	FileOpenerInfo info = {S3TestHelper::S3_PATH};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 	auto session = S3RequestExecutor::CreateSession(opener, info.file, auth_params);

@@ -254,6 +254,7 @@ public:
 
 	//! Helper functions to get the HTTP state
 	static shared_ptr<HTTPState> TryGetState(ClientContext &context);
+	static shared_ptr<HTTPState> TryGetState(Context &context);
 	static shared_ptr<HTTPState> TryGetState(optional_ptr<FileOpener> opener);
 
 	//! Called by the ClientContext when the current query ends

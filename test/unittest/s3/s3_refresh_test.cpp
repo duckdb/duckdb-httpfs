@@ -545,7 +545,7 @@ CREATE SECRET refresh_s3_endpoint_mode (
 	                                                     refreshed_endpoint, test_id));
 
 	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-	ClientContextFileOpener opener(*con.context);
+	ClientContextFileOpener opener(con.context->GetContext());
 	FileOpenerInfo info = {S3TestHelper::S3_PATH};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 	REQUIRE(auth_params.GetURLParams().endpoint_mode == initial_mode);

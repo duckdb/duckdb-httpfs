@@ -99,6 +99,8 @@ private:
 	void AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const;
 
 private:
+	//! The client of the opener (if any): used to schedule the listing tasks and to log
+	optional_ptr<ClientContext> context;
 	S3FileSystem &fs;
 	string glob_pattern;
 	optional_ptr<FileOpener> opener;
@@ -138,8 +140,9 @@ private:
 
 S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, optional_ptr<FileOpener> opener,
                            const S3AuthResolveOptions &options)
-    : LazyMultiFileList(FileOpener::TryGetClientContext(opener)), fs(fs_p), glob_pattern(glob_pattern_p),
-      opener(opener) {
+    : LazyMultiFileList(FileOpener::TryGetContext(opener)),
+      context(Context::TryGetClientContext(FileOpener::TryGetContext(opener))), fs(fs_p),
+      glob_pattern(glob_pattern_p), opener(opener) {
 	if (!opener) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
 	}

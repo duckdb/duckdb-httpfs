@@ -109,9 +109,9 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks,
 		                                 info);
 		FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
-		auto context = FileOpener::TryGetClientContext(opener);
+		auto context = FileOpener::TryGetContext(opener);
 		Value external_cache_enabled;
-		if (context &&
+		if (context && context->IsClient() &&
 		    context->TryGetCurrentUserSetting(EnableExternalFileCacheSetting::SettingIndex, external_cache_enabled) &&
 		    external_cache_enabled.GetValue<bool>()) {
 			result->override_response_cache_policy = true;
@@ -650,7 +650,7 @@ void HTTPFileSystem::EraseGlobalCacheEntry(const string &path) {
 // Get either the local, global, or no cache depending on settings
 static optional_ptr<HTTPMetadataCache> TryGetMetadataCache(optional_ptr<FileOpener> opener, HTTPFileSystem &httpfs) {
 	auto db = FileOpener::TryGetDatabase(opener);
-	auto client_context = FileOpener::TryGetClientContext(opener);
+	auto context = FileOpener::TryGetContext(opener);
 	if (!db) {
 		return nullptr;
 	}
@@ -664,9 +664,9 @@ static optional_ptr<HTTPMetadataCache> TryGetMetadataCache(optional_ptr<FileOpen
 
 	if (use_shared_cache) {
 		return httpfs.GetGlobalCache();
-	} else if (client_context) {
-		return client_context->registered_state->GetOrCreate<HTTPMetadataCache>("http_cache",
-		                                                                        HTTPMetadataCacheMode::QUERY_LOCAL);
+	} else if (context && context->IsClient()) {
+		return context->GetRegisteredState().GetOrCreate<HTTPMetadataCache>("http_cache",
+		                                                                     HTTPMetadataCacheMode::QUERY_LOCAL);
 	}
 	return nullptr;
 }
@@ -1114,9 +1114,9 @@ void HTTPFileHandle::LoadFileInfo() {
 }
 
 void HTTPFileHandle::InitializeLogger(FileOpener &opener) {
-	auto context = opener.TryGetClientContext();
-	if (context) {
-		logger = context->logger;
+	auto &context = opener.TryGetContext();
+	if (context.IsClient()) {
+		logger = context.GetLoggerPtr();
 		return;
 	}
 	auto database = opener.TryGetDatabase();
@@ -1153,17 +1153,21 @@ HTTPMetadataCacheEntry HTTPFileHandle::GetCacheEntry() const {
 }
 
 void HTTPFileHandle::InitializeRequestState(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
-	auto client_context = FileOpener::TryGetClientContext(opener);
+	auto context = FileOpener::TryGetContext(opener);
 	auto database = FileOpener::TryGetDatabase(opener);
-	if (client_context) {
-		buffer_allocator = BufferAllocator::Get(*client_context);
+	if (context) {
+		buffer_allocator = BufferAllocator::Get(*context);
 	} else {
 		buffer_allocator = database ? BufferAllocator::Get(*database) : Allocator::DefaultAllocator();
 	}
 	auto captured = request_session->Capture();
 	auto snapshot_params = captured.snapshot->Params();
 	if (database) {
-		const auto validation = ExternalFileCacheUtil::GetCacheValidationMode(file, client_context, *database);
+		optional_ptr<Context> cache_context;
+		if (context && context->IsClient()) {
+			cache_context = context;
+		}
+		const auto validation = ExternalFileCacheUtil::GetCacheValidationMode(file, cache_context, *database);
 		snapshot_params.override_response_cache_policy =
 		    snapshot_params.override_response_cache_policy || validation == CacheValidationMode::NO_VALIDATION;
 	}
