@@ -81,4 +81,40 @@ TEST_CASE("Curl cancels stalled transfers without retaining the caller", "[httpf
 	CHECK(server.Observations().size() == 2);
 }
 
+TEST_CASE("An independent deadline does not extend the HTTP transport timeout", "[httpfs][cancellation]") {
+	for (const auto use_curl : {false, true}) {
+		for (const auto before_headers : {false, true}) {
+			INFO("curl=" << use_curl << ", before_headers=" << before_headers);
+			MockS3ServerConfig config;
+			config.upload.block_initialization = before_headers;
+			config.full_get.block_until_released = !before_headers;
+			MockS3Server server(std::move(config));
+			unique_ptr<HTTPFSUtil> http = use_curl ? make_uniq<HTTPFSCurlUtil>() : make_uniq<HTTPFSUtil>();
+			HTTPFSParams params(*http);
+			params.timeout = 1;
+			auto client = http->InitializeClient(params, "http://" + server.Endpoint());
+			auto result = std::async(std::launch::async, [&]() {
+				const auto deadline = NumericCast<idx_t>(TimePoint::GetTickMs()) + 60000;
+				if (before_headers) {
+					PostRequestInfo request(server.HTTPPath() + "?uploads", HTTPHeaders(), params, nullptr, 0);
+					request.deadline = deadline;
+					return client->Post(request);
+				}
+				GetRequestInfo request(server.HTTPPath(), HTTPHeaders(), params, nullptr, nullptr);
+				request.deadline = deadline;
+				return client->Get(request);
+			});
+			const auto started = before_headers ? server.WaitForMultipartInitialization() : server.WaitForFullGet();
+			const auto completed = result.wait_for(std::chrono::seconds(3));
+			server.ReleaseMultipartInitialization();
+			server.ReleaseFullGet();
+			auto response = result.get();
+			CHECK(started);
+			CHECK(completed == std::future_status::ready);
+			REQUIRE(response);
+			CHECK(response->HasRequestError());
+		}
+	}
+}
+
 } // namespace duckdb

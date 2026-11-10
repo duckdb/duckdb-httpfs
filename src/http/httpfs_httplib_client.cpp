@@ -161,8 +161,16 @@ public:
 			remaining = NumericCast<time_t>(info.deadline.GetIndex() > now ? info.deadline.GetIndex() - now : 1);
 		}
 		client->set_max_timeout(remaining);
-		const auto seconds = remaining ? remaining / 1000 : NumericCast<time_t>(info.params.timeout);
-		const auto useconds = remaining ? (remaining % 1000) * 1000 : NumericCast<time_t>(info.params.timeout_usec);
+		auto seconds = NumericCast<time_t>(info.params.timeout);
+		auto useconds = NumericCast<time_t>(info.params.timeout_usec);
+		if (remaining) {
+			const auto deadline_seconds = remaining / 1000;
+			const auto deadline_useconds = (remaining % 1000) * 1000;
+			if (seconds > deadline_seconds || (seconds == deadline_seconds && useconds > deadline_useconds)) {
+				seconds = deadline_seconds;
+				useconds = deadline_useconds;
+			}
+		}
 		client->set_connection_timeout(seconds, useconds);
 		client->set_read_timeout(seconds, useconds);
 		client->set_write_timeout(seconds, useconds);
