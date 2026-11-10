@@ -1,5 +1,6 @@
 #include "http/httpfs_client.hpp"
 #include "http/http_state.hpp"
+#include "duckdb/common/limits.hpp"
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
@@ -158,7 +159,9 @@ public:
 		auto remaining = time_t(0);
 		if (info.deadline.IsValid()) {
 			const auto now = NumericCast<idx_t>(TimePoint::GetTickMs());
-			remaining = NumericCast<time_t>(info.deadline.GetIndex() > now ? info.deadline.GetIndex() - now : 1);
+			const auto remaining_ms = info.deadline.GetIndex() > now ? info.deadline.GetIndex() - now : 1;
+			remaining = NumericCast<time_t>(
+			    MinValue<idx_t>(remaining_ms, NumericCast<idx_t>(NumericLimits<time_t>::Maximum())));
 		}
 		client->set_max_timeout(remaining);
 		auto seconds = NumericCast<time_t>(info.params.timeout);

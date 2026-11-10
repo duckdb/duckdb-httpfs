@@ -2,6 +2,7 @@
 
 #include "http/http_test_helper.hpp"
 #include "http/httpfs_client.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
 
 #include <chrono>
@@ -115,6 +116,20 @@ TEST_CASE("An independent deadline does not extend the HTTP transport timeout", 
 			CHECK(response->HasRequestError());
 		}
 	}
+}
+
+TEST_CASE("A distant independent deadline remains valid for httplib", "[httpfs][cancellation]") {
+	MockS3Server server {MockS3ServerConfig()};
+	HTTPFSUtil http;
+	HTTPFSParams params(http);
+	params.timeout = 1;
+	auto client = http.InitializeClient(params, "http://" + server.Endpoint());
+	GetRequestInfo request(server.HTTPPath(), HTTPHeaders(), params, nullptr, nullptr);
+	request.deadline = NumericLimits<idx_t>::Maximum() - 1;
+	auto response = client->Get(request);
+	REQUIRE(response);
+	CHECK_FALSE(response->HasRequestError());
+	CHECK(response->body == server.ObjectData());
 }
 
 } // namespace duckdb
