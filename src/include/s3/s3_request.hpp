@@ -132,6 +132,8 @@ struct S3RequestSpec {
 	string content_md5;
 	HTTPObjectVersion object_version;
 	HTTPReadCondition read_condition;
+	//! A body a remote signer has to inspect before signing, such as the keys deleted by DeleteObjects
+	string signing_body;
 };
 
 struct S3RequestData {

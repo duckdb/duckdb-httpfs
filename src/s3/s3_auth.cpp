@@ -136,6 +136,36 @@ S3AuthParams S3AuthResolver::Resolve(S3KeyValueReader &secret_reader, const stri
 	return Resolve(std::move(config), file_path);
 }
 
+static map<string, string> ReadStringMap(const Value &value, const char *name) {
+	map<string, string> result;
+	if (value.IsNull()) {
+		return result;
+	}
+	if (value.type().id() != LogicalTypeId::MAP) {
+		throw InvalidInputException("Secret option '%s' must be a MAP, found '%s'", name, value.type().ToString());
+	}
+	for (auto &entry : MapValue::GetChildren(value)) {
+		auto &key_value = StructValue::GetChildren(entry);
+		if (key_value[0].IsNull() || key_value[1].IsNull()) {
+			throw InvalidInputException("Secret option '%s' cannot contain NULL keys or values", name);
+		}
+		result[key_value[0].ToString()] = key_value[1].ToString();
+	}
+	return result;
+}
+
+static void ReadRemoteSigner(S3KeyValueReader &secret_reader, S3AuthRemoteSigner &remote_signer) {
+	secret_reader.TryGetSecretKey("signer_url", remote_signer.url);
+	Value headers;
+	if (secret_reader.TryGetSecretKey("signer_headers", headers)) {
+		remote_signer.headers = ReadStringMap(headers, "signer_headers");
+	}
+	Value properties;
+	if (secret_reader.TryGetSecretKey("signer_properties", properties)) {
+		remote_signer.properties = ReadStringMap(properties, "signer_properties");
+	}
+}
+
 static void SetEndpoint(S3AuthConfig &config, string endpoint) {
 	config.endpoint = std::move(endpoint);
 	auto trimmed_endpoint = config.endpoint;
@@ -152,6 +182,7 @@ S3AuthConfig S3AuthResolver::ReadConfig(S3KeyValueReader &secret_reader, const s
 	secret_reader.TryGetSecretKeyOrSetting("key_id", "s3_access_key_id", credentials.access_key_id);
 	secret_reader.TryGetSecretKeyOrSetting("secret", "s3_secret_access_key", credentials.secret_access_key);
 	secret_reader.TryGetSecretKeyOrSetting("session_token", "s3_session_token", credentials.session_token);
+	ReadRemoteSigner(secret_reader, config.remote_signer);
 	secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", config.use_ssl);
 	// a setting only, like enable_global_s3_configuration: it chooses an endpoint, it is not part of a credential
 	secret_reader.TryGetSecretKeyOrSetting("s3_use_global_endpoint", "s3_use_global_endpoint",
@@ -261,7 +292,7 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	    (config.endpoint_mode == S3EndpointMode::AUTOMATIC || EndpointIsAWS(endpoint))) {
 		bool region_defaulted = false;
 		if (credentials.region.empty()) {
-			if (credentials.access_key_id.empty()) {
+			if (credentials.access_key_id.empty() && !config.remote_signer.IsEnabled()) {
 				if (config.endpoint_mode == S3EndpointMode::AUTOMATIC) {
 					endpoint.SetHost("s3.amazonaws.com");
 				}
@@ -285,6 +316,7 @@ S3AuthParams S3AuthResolver::Resolve(S3AuthConfig config, const string &file_pat
 	S3AuthParams result;
 	result.provider = S3Provider::Resolve(std::move(config.route), endpoint);
 	result.credentials = std::move(credentials);
+	result.remote_signer = std::move(config.remote_signer);
 	result.url = {std::move(endpoint),       config.endpoint_mode,     style,
 	              config.compatibility_mode, config.endpoint_from_url, config.enable_deprecated_url_parameters,
 	              config.use_global_endpoint};
@@ -318,8 +350,8 @@ S3AuthParams S3AuthParams::WithRegion(string region) const {
 }
 
 bool S3AuthParams::operator==(const S3AuthParams &other) const {
-	return provider == other.provider && credentials == other.credentials && url == other.url &&
-	       request_options == other.request_options;
+	return provider == other.provider && credentials == other.credentials && remote_signer == other.remote_signer &&
+	       url == other.url && request_options == other.request_options;
 }
 
 S3KeyValueReader::S3KeyValueReader(FileOpener &opener_p, optional_ptr<FileOpenerInfo> info, const char **secret_types,
