@@ -469,6 +469,15 @@ static void RunRefreshAfterOtherTransactionScenario(bool other_commits_first) {
 	}
 
 	OpenForRead(con, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+	// the replace conflicts, so this transaction holds the fresh credentials in its own secret storage
+	{
+		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*con.context);
+		auto secret = SecretManager::Get(*db.instance).GetSecretByName(transaction, "refresh_s3");
+		REQUIRE(secret);
+		REQUIRE(secret->persist_type == SecretPersistType::TRANSACTION);
+		REQUIRE(StringUtil::Contains(secret->secret->ToString(SecretDisplayType::UNREDACTED),
+		                             StringUtil::Format("key_id=%s", S3TestHelper::FRESH_KEY_ID)));
+	}
 	S3TestHelper::RequireQueryOk(con, "COMMIT");
 	if (!other_commits_first) {
 		S3TestHelper::RequireQueryOk(other, "COMMIT");
@@ -489,6 +498,69 @@ static void RunRefreshAfterOtherTransactionScenario(bool other_commits_first) {
 	REQUIRE(StringUtil::Contains(secret->secret->ToString(SecretDisplayType::UNREDACTED),
 	                             StringUtil::Format("key_id=%s", S3TestHelper::FRESH_KEY_ID)));
 	S3TestHelper::RequireQueryOk(later, "ROLLBACK");
+}
+
+static void RunReusedCredentialsExpiredScenario() {
+	static constexpr const char *FIRST_KEY_ID = "FRESH_KEY_1";
+	static constexpr const char *SECOND_KEY_ID = "FRESH_KEY_2";
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	config.auth.refresh_target = MockS3RefreshTarget::LIST_OBJECTS_GET;
+	// the first refreshed key has already expired by the time it is used
+	config.auth.bucket_key_ids[S3TestHelper::BUCKET] = {SECOND_KEY_ID};
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto test_id = S3TestHelper::ConfigureRefresh(db, con, server, "httplib", false);
+	S3TestHelper::RequireQueryOk(con, StringUtil::Format(R"(
+CREATE OR REPLACE SECRET refresh_s3 (
+	TYPE S3,
+	PROVIDER %s,
+	SCOPE 's3://refresh-bucket/',
+	KEY_ID '%s',
+	SECRET '%s',
+	TEST_ID '%s',
+	REFRESH_INFO MAP {
+		'KEY_ID': '%s',
+		'SECRET': '%s',
+		'TEST_ID': '%s',
+		'TEST_ROTATE_KEY': 'true'
+	}
+))",
+	                                                     S3TestHelper::TEST_PROVIDER, S3TestHelper::STALE_KEY_ID,
+	                                                     S3TestHelper::STALE_SECRET, test_id,
+	                                                     S3TestHelper::FRESH_KEY_ID, S3TestHelper::FRESH_SECRET,
+	                                                     test_id));
+
+	// a refresh whose transaction rolls back: the secret keeps the stale key, the lineage has FRESH_KEY_1
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	{
+		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*con.context);
+		auto secret = SecretManager::Get(*db.instance).GetSecretByName(transaction, "refresh_s3");
+		REQUIRE(secret);
+		REQUIRE(CreateS3SecretFunctions::TryRefreshS3Secret(*con.context, *secret) ==
+		        S3CredentialRefresh::REFRESHED);
+	}
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+	REQUIRE(S3TestHelper::RefreshCount(test_id) == 1);
+
+	for (idx_t i = 0; i < 2; i++) {
+		auto result = con.Query("SELECT file FROM glob('s3://refresh-bucket/object*.bin')");
+		REQUIRE(result);
+		INFO((result->HasError() ? result->GetError() : string()));
+		REQUIRE_FALSE(result->HasError());
+		REQUIRE(result->RowCount() == 1);
+	}
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(S3TestHelper::CountObservations(observations, "GET", S3TestHelper::STALE_KEY_ID, 403) == 1);
+	REQUIRE(S3TestHelper::CountObservations(observations, "GET", FIRST_KEY_ID, 403) == 1);
+	REQUIRE(S3TestHelper::CountObservations(observations, "GET", SECOND_KEY_ID, 200) == 2);
+	// FRESH_KEY_1 was reused once and rejected; the provider ran again only then
+	REQUIRE(S3TestHelper::RefreshCount(test_id) == 2);
 }
 
 static void PublishTestS3Region(const shared_ptr<HTTPRequestSession> &session, const string &region) {
@@ -788,7 +860,8 @@ TEST_CASE("HTTPFS preserves transaction-scoped S3 secrets during refresh", "[htt
 	REQUIRE(created_secret->persist_type == SecretPersistType::TRANSACTION);
 	REQUIRE(created_secret->storage_mode == SecretManager::TRANSACTION_STORAGE_NAME);
 
-	REQUIRE(CreateS3SecretFunctions::TryRefreshS3Secret(*con.context, *created_secret));
+	REQUIRE(CreateS3SecretFunctions::TryRefreshS3Secret(*con.context, *created_secret) ==
+	        S3CredentialRefresh::REFRESHED);
 	S3TestHelper::AssertSingleRefresh(test_id);
 
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*con.context);
@@ -844,6 +917,10 @@ TEST_CASE("HTTPFS refreshes a secret another transaction already refreshed", "[h
 	SECTION("after the other transaction commits") {
 		RunRefreshAfterOtherTransactionScenario(true);
 	}
+}
+
+TEST_CASE("HTTPFS refreshes again when reused credentials have expired", "[httpfs][s3][refresh]") {
+	RunReusedCredentialsExpiredScenario();
 }
 
 TEST_CASE("S3 credential publication is independent from client invalidation", "[httpfs][s3][refresh]") {

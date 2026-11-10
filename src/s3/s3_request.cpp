@@ -458,16 +458,21 @@ S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(HTTPFSUtil 
 	return S3RefreshableHTTPParams(*params);
 }
 
-static bool TryRefreshS3SecretForPath(ClientContext &context, const string &path) {
+//! Combine refreshes of several secrets: any reuse makes the whole refresh unverified
+static S3CredentialRefresh CombineRefresh(S3CredentialRefresh left, S3CredentialRefresh right) {
+	return MaxValue(left, right);
+}
+
+static S3CredentialRefresh TryRefreshS3SecretForPath(ClientContext &context, const string &path) {
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	bool refreshed_secret = false;
+	auto result = S3CredentialRefresh::NONE;
 	for (const auto type : S3SecretConfig::SecretTypes()) {
 		auto res = context.db->GetSecretManager().LookupSecret(transaction, path, type);
 		if (res.HasMatch()) {
-			refreshed_secret |= CreateS3SecretFunctions::TryRefreshS3Secret(context, *res.secret_entry);
+			result = CombineRefresh(result, CreateS3SecretFunctions::TryRefreshS3Secret(context, *res.secret_entry));
 		}
 	}
-	return refreshed_secret;
+	return result;
 }
 
 bool S3RequestExecutor::CredentialRefreshEnabled(optional_ptr<FileOpener> opener) {
@@ -504,36 +509,44 @@ static bool ReloadS3AuthMaterial(optional_ptr<FileOpener> opener, const OpenFile
 	return true;
 }
 
-static bool TryRefreshS3AuthMaterial(optional_ptr<ClientContext> context, optional_ptr<FileOpener> opener,
-                                     const OpenFileInfo &file, S3AuthParams &auth_params, HTTPFSParams &http_params,
-                                     bool credential_refresh_enabled, bool preserve_region = false) {
+static S3CredentialRefresh TryRefreshS3AuthMaterial(optional_ptr<ClientContext> context,
+                                                    optional_ptr<FileOpener> opener, const OpenFileInfo &file,
+                                                    S3AuthParams &auth_params, HTTPFSParams &http_params,
+                                                    bool credential_refresh_enabled, bool preserve_region = false) {
 	if (!credential_refresh_enabled) {
-		return false;
+		return S3CredentialRefresh::NONE;
 	}
 	if (!context) {
-		return false;
+		return S3CredentialRefresh::NONE;
 	}
 	if (ReloadS3AuthMaterial(opener, file, auth_params, http_params, preserve_region)) {
-		return true;
+		return S3CredentialRefresh::REFRESHED;
 	}
 
 	auto http_state = HTTPState::TryGetState(*context);
-	return http_state->RunCredentialRefresh([&]() {
+	auto result = S3CredentialRefresh::NONE;
+	http_state->RunCredentialRefresh([&]() {
 		if (ReloadS3AuthMaterial(opener, file, auth_params, http_params, preserve_region)) {
+			result = S3CredentialRefresh::REFRESHED;
 			return true;
 		}
 		string secret_name;
 		if (file.extended_info && file.extended_info->TryGetSecretName(secret_name)) {
 			auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*context);
 			auto secret = SecretManager::Get(*context).GetSecretByName(transaction, secret_name);
-			if (!secret || !CreateS3SecretFunctions::TryRefreshS3Secret(*context, *secret)) {
-				return false;
+			if (secret) {
+				result = CreateS3SecretFunctions::TryRefreshS3Secret(*context, *secret);
 			}
-		} else if (!TryRefreshS3SecretForPath(*context, file.path)) {
-			return false;
+		} else {
+			result = TryRefreshS3SecretForPath(*context, file.path);
 		}
-		return ReloadS3AuthMaterial(opener, file, auth_params, http_params, preserve_region);
+		if (result != S3CredentialRefresh::NONE &&
+		    !ReloadS3AuthMaterial(opener, file, auth_params, http_params, preserve_region)) {
+			result = S3CredentialRefresh::NONE;
+		}
+		return result != S3CredentialRefresh::NONE;
 	});
+	return result;
 }
 
 S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_util,
@@ -677,12 +690,40 @@ static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
 }
 
+//! Auth refreshes allowed for one request.
+//!
+//! Rule: one refresh, plus another after each refresh that only reused credentials, up to MAX_REFRESHES.
+//! Why: reused credentials were derived by an earlier refresh and may have expired since. If they are rejected, the
+//! next refresh holds them and runs the provider. Rejected credentials that were freshly derived are not refreshed
+//! again, so a permission error still costs one provider run per request.
+struct S3AuthRefreshBudget {
+	static constexpr idx_t MAX_REFRESHES = 3;
+
+	template <class REFRESH_FUNCTION>
+	bool TryRefresh(const REFRESH_FUNCTION &refresh_auth_params, const S3RequestData &request_data) {
+		if (refreshes > 0 && (!last_reused || refreshes >= MAX_REFRESHES)) {
+			return false;
+		}
+		auto refresh = refresh_auth_params(request_data);
+		if (refresh == S3CredentialRefresh::NONE) {
+			return false;
+		}
+		refreshes++;
+		last_reused = refresh == S3CredentialRefresh::REUSED;
+		return true;
+	}
+
+private:
+	idx_t refreshes = 0;
+	bool last_reused = false;
+};
+
 S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,
                                        const S3RequestSpec &spec, const RequestCallback &request,
                                        const RefreshCallback &refresh_auth_params, const SetRegionCallback &set_region,
                                        const FreshConnectionCallback &fresh_connection,
                                        const ReceivedResponseCallback &response_callback) {
-	bool retried_auth_refresh = false;
+	S3AuthRefreshBudget auth_refresh;
 	bool retried_region = false;
 	HTTPRetryBudget retry_budget(session.Capture().snapshot->Params());
 	S3RequestResult result {};
@@ -693,9 +734,8 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 			try {
 				auto response = request(request_data);
 				auto received_response = response && !response->HasRequestError();
-				if (received_response && !retried_auth_refresh && IsAuthRefreshStatus(*response) &&
-				    refresh_auth_params(request_data)) {
-					retried_auth_refresh = true;
+				if (received_response && IsAuthRefreshStatus(*response) &&
+				    auth_refresh.TryRefresh(refresh_auth_params, request_data)) {
 					continue;
 				}
 				string correct_region;
@@ -718,8 +758,7 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 				return should_retry ? HTTPRetryDecision::Retry() : HTTPRetryDecision::Finish();
 			} catch (std::exception &ex) {
 				ErrorData error(ex);
-				if (!retried_auth_refresh && IsAuthRefreshStatus(error) && refresh_auth_params(request_data)) {
-					retried_auth_refresh = true;
+				if (IsAuthRefreshStatus(error) && auth_refresh.TryRefresh(refresh_auth_params, request_data)) {
 					continue;
 				}
 				string correct_region;
@@ -736,35 +775,44 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 	return result;
 }
 
-bool S3RequestExecutor::TryRefreshSession(HTTPRequestSession &session, const S3RequestData &request_data) {
+//! How the credentials of a snapshot another request already refreshed were obtained
+static S3CredentialRefresh RefreshOf(const S3RequestSnapshot &snapshot) {
+	return snapshot.credentials_reused ? S3CredentialRefresh::REUSED : S3CredentialRefresh::REFRESHED;
+}
+
+S3CredentialRefresh S3RequestExecutor::TryRefreshSession(HTTPRequestSession &session,
+                                                         const S3RequestData &request_data) {
 	auto current = session.Capture();
 	auto &failed_snapshot = request_data.captured.snapshot->Cast<S3RequestSnapshot>();
 	auto &current_snapshot = current.snapshot->Cast<S3RequestSnapshot>();
 	if (current_snapshot.credential_generation != failed_snapshot.credential_generation) {
-		return true;
+		return RefreshOf(current_snapshot);
 	}
 	if (!current_snapshot.credential_refresh_enabled) {
-		return false;
+		return S3CredentialRefresh::NONE;
 	}
 
 	auto context = current_snapshot.client_context.lock();
 	if (!context) {
-		return false;
+		return S3CredentialRefresh::NONE;
 	}
 	ClientContextFileOpener opener(*context);
 	auto refreshed_auth_params = current_snapshot.auth_params;
 	auto refreshed_http_params = current_snapshot.Params();
-	if (!TryRefreshS3AuthMaterial(context, opener, current_snapshot.file, refreshed_auth_params, refreshed_http_params,
-	                              current_snapshot.credential_refresh_enabled, current_snapshot.region_redirected)) {
-		return session.Capture().snapshot->Cast<S3RequestSnapshot>().credential_generation !=
-		       failed_snapshot.credential_generation;
+	auto refresh =
+	    TryRefreshS3AuthMaterial(context, opener, current_snapshot.file, refreshed_auth_params, refreshed_http_params,
+	                             current_snapshot.credential_refresh_enabled, current_snapshot.region_redirected);
+	if (refresh == S3CredentialRefresh::NONE) {
+		auto &latest = session.Capture().snapshot->Cast<S3RequestSnapshot>();
+		return latest.credential_generation != failed_snapshot.credential_generation ? RefreshOf(latest)
+		                                                                             : S3CredentialRefresh::NONE;
 	}
 	auto refreshed_http_material = S3RefreshableHTTPParams(refreshed_http_params);
 	for (;;) {
 		current = session.Capture();
 		auto &latest = current.snapshot->Cast<S3RequestSnapshot>();
 		if (latest.credential_generation != failed_snapshot.credential_generation) {
-			return true;
+			return RefreshOf(latest);
 		}
 
 		auto merged_auth_params = refreshed_auth_params;
@@ -781,9 +829,10 @@ bool S3RequestExecutor::TryRefreshSession(HTTPRequestSession &session, const S3R
 		auto replacement = latest.Copy(merged_http_params);
 		replacement->auth_params = merged_auth_params;
 		replacement->credential_generation = latest.credential_generation + 1;
+		replacement->credentials_reused = refresh == S3CredentialRefresh::REUSED;
 		auto publication = session.TryPublish(current.snapshot, std::move(replacement));
 		if (publication.published) {
-			return true;
+			return refresh;
 		}
 	}
 }
@@ -903,9 +952,11 @@ shared_ptr<S3RequestSnapshot> S3RequestSnapshot::Copy() const {
 }
 
 shared_ptr<S3RequestSnapshot> S3RequestSnapshot::Copy(const HTTPFSParams &http_params) const {
-	return make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, file, client_context,
-	                                          credential_refresh_enabled, region_redirected, credential_generation,
-	                                          multipart_upload_policy);
+	auto result = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, file, client_context,
+	                                                 credential_refresh_enabled, region_redirected,
+	                                                 credential_generation, multipart_upload_policy);
+	result->credentials_reused = credentials_reused;
+	return result;
 }
 
 string S3RequestUtil::GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len) {

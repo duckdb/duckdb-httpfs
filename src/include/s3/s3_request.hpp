@@ -1,5 +1,6 @@
 #pragma once
 
+#include "create_secret_functions.hpp"
 #include "http/httpfs.hpp"
 #include "s3/s3_url.hpp"
 
@@ -101,6 +102,8 @@ public:
 	bool region_redirected;
 	idx_t credential_generation;
 	optional<S3MultipartUploadPolicy> multipart_upload_policy;
+	//! The credentials were reused from an earlier refresh, not freshly derived, so they may have expired
+	bool credentials_reused = false;
 };
 
 struct S3RequestContext {
@@ -205,14 +208,14 @@ struct S3RequestExecutor {
 
 private:
 	using FreshConnectionCallback = std::function<void(const S3RequestData &)>;
-	using RefreshCallback = std::function<bool(const S3RequestData &)>;
+	using RefreshCallback = std::function<S3CredentialRefresh(const S3RequestData &)>;
 	using SetRegionCallback = std::function<void(const S3RequestData &, const string &)>;
 
 	static S3RequestResult Run(EncryptionUtil &encryption_util, HTTPRequestSession &session, const S3RequestSpec &spec,
 	                           const RequestCallback &request, const RefreshCallback &refresh_auth_params,
 	                           const SetRegionCallback &set_region, const FreshConnectionCallback &fresh_connection,
 	                           const ReceivedResponseCallback &response_callback = {});
-	static bool TryRefreshSession(HTTPRequestSession &session, const S3RequestData &request_data);
+	static S3CredentialRefresh TryRefreshSession(HTTPRequestSession &session, const S3RequestData &request_data);
 	static void InvalidateSessionConnections(HTTPRequestSession &session);
 	static S3RequestData CreateRequestData(EncryptionUtil &encryption_util, const CapturedHTTPRequestSnapshot &captured,
 	                                       const S3RequestSpec &spec, HTTPRetryBudget &retry_budget);
