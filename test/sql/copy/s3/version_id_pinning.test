@@ -123,12 +123,12 @@ SELECT * FROM 's3://test-bucket/root-dir/version_pinning/test.parquet' LIMIT 5;
 9
 16
 
+# COPY overwrites the object with a PUT and no preliminary HEAD.
 query I
 SELECT request.type FROM (FROM duckdb_logs_parsed('HTTP') WHERE http_header(response.headers, 'x-amz-version-id') IS NOT NULL);
 ----
 HEAD
 GET
-HEAD
 PUT
 GET
 GET

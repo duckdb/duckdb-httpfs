@@ -299,10 +299,10 @@ TEST_CASE("S3 COPY preserves ordinary legacy and direct literal writes", "[httpf
 			                                      suffix + "' (FORMAT CSV" +
 			                                      (direct ? "" : ", PARTITION_BY(value), OVERWRITE_OR_IGNORE") + ")");
 			idx_t puts = 0;
-			idx_t not_found = 0;
+			idx_t heads = 0;
 			for (const auto &request : server.Observations()) {
-				if (request.method == "HEAD" && request.status == 404) {
-					not_found++;
+				if (request.method == "HEAD") {
+					heads++;
 				}
 				if (request.method != "PUT") {
 					continue;
@@ -315,8 +315,11 @@ TEST_CASE("S3 COPY preserves ordinary legacy and direct literal writes", "[httpf
 				}
 			}
 			REQUIRE(puts == 1);
-			// Remote COPY no longer probes whether its output already exists.
-			REQUIRE(not_found == 0);
+			REQUIRE(server.UploadedObject() == (direct ? "value,payload\n42,7\n" : "payload\n7\n"));
+			if (direct) {
+				// Core opens remote CSV outputs for overwrite without probing whether the object exists.
+				REQUIRE(heads == 0);
+			}
 		}
 	}
 }

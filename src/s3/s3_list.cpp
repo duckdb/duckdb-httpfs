@@ -147,7 +147,7 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_list_concurrency", list_concurrency)) {
 		max_list_concurrency = MaxValue<idx_t>(list_concurrency.GetValue<idx_t>(), 1);
 	}
-	FileOpenerInfo info = {glob_pattern};
+	FileOpenerInfo info(glob_pattern);
 
 	// Trim any query parameters from the string
 	auto s3_auth_params = S3AuthResolver::Resolve(opener, info, options);
@@ -176,7 +176,7 @@ S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, opt
 
 	shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
 
-	request_session = S3RequestExecutor::CreateSession(opener, glob_pattern, s3_auth_params);
+	request_session = S3RequestExecutor::CreateSession(opener, info.file, s3_auth_params);
 }
 
 bool S3GlobResult::ExpandNextPath() const {

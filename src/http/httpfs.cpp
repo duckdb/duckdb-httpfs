@@ -162,7 +162,7 @@ private:
 		}
 		auto db = FileOpener::TryGetDatabase(opener);
 		auto aliases = db ? S3UrlScheme::GetAliasPrefixes(db->config) : vector<string>();
-		return S3UrlScheme::TryMatch(info->file_path, aliases).has_value();
+		return S3UrlScheme::TryMatch(info->file.path, aliases).has_value();
 	}
 
 	unique_ptr<KeyValueSecretReader> CreateSettingsReader() {
@@ -212,7 +212,9 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
                                                         optional_ptr<FileOpenerInfo> info) {
 	auto result = InitializeRawParameters(*this, opener, info);
 	result->RefreshTransportReuseDomain();
-	return result;
+	// Explicit move: returning the derived type as the base type relies on the implicit move rules of C++20 (P1825),
+	// which GCC 12 does not apply in C++17 mode
+	return std::move(result);
 }
 
 unique_ptr<HTTPFSParams> HTTPFSUtil::InitializeRawParameters(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,
@@ -311,14 +313,14 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
                                                         optional_ptr<FileOpener> opener) {
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
-	FileOpenerInfo info;
-	info.file_path = file.path;
+	FileOpenerInfo info(file);
 
 	auto request_session = HTTPRequestSession::Create(opener, info);
 
 	auto secret_manager = FileOpener::TryGetSecretManager(opener);
 	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
-	if (secret_manager && transaction) {
+	string secret_name;
+	if (secret_manager && transaction && !(file.extended_info && file.extended_info->TryGetSecretName(secret_name))) {
 		auto secret_match = secret_manager->LookupSecret(*transaction, file.path, "bearer");
 
 		if (secret_match.HasMatch()) {
@@ -1169,9 +1171,9 @@ void HTTPFileHandle::InitializeRequestState(const OpenFileInfo &file, optional_p
 	if (!snapshot_params.state) {
 		snapshot_params.state = make_shared_ptr<HTTPState>();
 	}
-	request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
-	auto request_snapshot = request_session->Capture().snapshot;
-	file_state = request_snapshot->Params().state->GetFileState(path);
+	auto publication = request_session->TryPublish(captured.snapshot, CreateRequestSnapshot(snapshot_params));
+	auto &http_state = *publication.current.snapshot->Params().state;
+	file_state = http_state.GetFileState(path);
 
 	if (opener) {
 		InitializeLogger(*opener);

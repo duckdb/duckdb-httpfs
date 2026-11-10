@@ -77,7 +77,7 @@ jobs:
 
       - name: Run HTTPFS C++ unit tests
         shell: bash
-        run: ./build/release/test/unittest_httpfs "[httpfs][s3]"
+        run: ./build/release/test/unittest_httpfs "[httpfs]"
 
       - name: Install test server
         shell: bash

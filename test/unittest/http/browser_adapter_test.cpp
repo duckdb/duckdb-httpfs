@@ -81,7 +81,7 @@ TEST_CASE("HTTPFS owns browser parameters and preserves its provider", "[httpfs]
 		HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 		ClientContextFileOpener opener(*con.context);
 		FileOpenerInfo info;
-		info.file_path = server.HTTPPath();
+		info.file.path = server.HTTPPath();
 		auto session = HTTPRequestSession::Create(&opener, &info);
 		auto snapshot = session->Capture().snapshot;
 		REQUIRE(&snapshot->Params().http_util == &adapter);
