@@ -800,7 +800,7 @@ bool S3RequestExecutor::TryRefreshSession(HTTPRequestSession &session, const S3R
 	if (!context) {
 		return false;
 	}
-	ClientContextFileOpener opener(*context);
+	ClientContextFileOpener opener(context->GetContext());
 	auto refreshed_auth_params = current_snapshot.auth_params;
 	auto refreshed_http_params = current_snapshot.Params();
 	if (!TryRefreshS3AuthMaterial(context, opener, current_snapshot.file, refreshed_auth_params, refreshed_http_params,
@@ -1202,7 +1202,7 @@ shared_ptr<HTTPRequestSession> S3RequestExecutor::CreateSession(optional_ptr<Fil
 	FileOpenerInfo info(file);
 	auto request_session = HTTPRequestSession::Create(opener, info);
 	weak_ptr<ClientContext> weak_context;
-	auto context = FileOpener::TryGetClientContext(opener);
+	auto context = Context::TryGetClientContext(FileOpener::TryGetContext(opener));
 	auto refresh_enabled = CredentialRefreshEnabled(opener);
 	if (context && refresh_enabled) {
 		weak_context = context->shared_from_this();

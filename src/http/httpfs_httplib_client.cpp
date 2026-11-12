@@ -1,5 +1,6 @@
 #include "http/httpfs_client.hpp"
 #include "http/http_state.hpp"
+#include "duckdb/common/limits.hpp"
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
@@ -153,7 +154,39 @@ public:
 		}
 	}
 
+	void ConfigureRequestDeadline(BaseRequest &info) {
+		info.InterruptCheck();
+		auto remaining = time_t(0);
+		if (info.deadline.IsValid()) {
+			const auto now = NumericCast<idx_t>(TimePoint::GetTickMs());
+			const auto remaining_ms = info.deadline.GetIndex() > now ? info.deadline.GetIndex() - now : 1;
+			remaining = NumericCast<time_t>(
+			    MinValue<idx_t>(remaining_ms, NumericCast<idx_t>(NumericLimits<time_t>::Maximum())));
+		}
+		client->set_max_timeout(remaining);
+		auto seconds = NumericCast<time_t>(info.params.timeout);
+		auto useconds = NumericCast<time_t>(info.params.timeout_usec);
+		if (remaining) {
+			const auto deadline_seconds = remaining / 1000;
+			const auto deadline_useconds = (remaining % 1000) * 1000;
+			if (seconds > deadline_seconds || (seconds == deadline_seconds && useconds > deadline_useconds)) {
+				seconds = deadline_seconds;
+				useconds = deadline_useconds;
+			}
+		}
+		client->set_connection_timeout(seconds, useconds);
+		client->set_read_timeout(seconds, useconds);
+		client->set_write_timeout(seconds, useconds);
+		// Updating httplib's fields does not update a reused TLS socket's blocking I/O timeouts.
+		const auto socket = client->socket();
+		if (socket != INVALID_SOCKET) {
+			duckdb_httplib_openssl::detail::set_socket_opt_time(socket, SOL_SOCKET, SO_RCVTIMEO, seconds, useconds);
+			duckdb_httplib_openssl::detail::set_socket_opt_time(socket, SOL_SOCKET, SO_SNDTIMEO, seconds, useconds);
+		}
+	}
+
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::GET_REQUEST);
@@ -170,6 +203,7 @@ public:
 		return transfer.Finish(std::move(result));
 	}
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::PUT_REQUEST);
@@ -192,6 +226,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::HEAD_REQUEST);
@@ -201,6 +236,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::DELETE_REQUEST);
@@ -210,6 +246,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		if (state) {
 			state->RecordRequest(RequestType::OPTIONS_REQUEST);
 		}
@@ -218,6 +255,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
+		ConfigureRequestDeadline(info);
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
 		if (state) {
 			state->RecordRequest(RequestType::POST_REQUEST);
@@ -225,6 +263,9 @@ public:
 		}
 		// We use a custom Request method here, because there is no Post call with a contentreceiver in httplib
 		duckdb_httplib_openssl::Request req;
+		if (info.deadline.IsValid()) {
+			req.start_time_ = std::chrono::steady_clock::now();
+		}
 		if (info.send_post_as_get_request) {
 			req.method = "GET";
 		} else {

@@ -924,7 +924,7 @@ TEST_CASE("Named S3 files retain metadata through credential refresh and region 
 				unique_ptr<FileHandle> handle;
 				shared_ptr<HTTPRequestSession> session;
 				if (standalone_session) {
-					ClientContextFileOpener opener(*f.con.context);
+					ClientContextFileOpener opener(f.con.context->GetContext());
 					FileOpenerInfo info(file);
 					session = S3RequestExecutor::CreateSession(opener, file, S3AuthResolver::Resolve(opener, info));
 				} else {
@@ -1192,7 +1192,7 @@ TEST_CASE("Settings fill keys a named secret leaves unset",
 	GovernedHost::Get().SetOmittedKeys({"region", "url_style", "use_ssl", "endpoint", "session_token"});
 	f.con.BeginTransaction();
 	auto table_credentials = GovernedHost::Get().Attach(*f.con.context, "orders");
-	ClientContextFileOpener opener(*f.con.context);
+	ClientContextFileOpener opener(f.con.context->GetContext());
 	FileOpenerInfo info;
 	info.file.path = OrdersFile(0);
 	GovernedHost::Get().Apply(table_credentials, info);
@@ -1224,7 +1224,7 @@ TEST_CASE("Settings supply credential fields a named secret leaves unset",
 	GovernedHost::Get().SetOmittedKeys({"key_id", "secret", "session_token"});
 	f.con.BeginTransaction();
 	auto table_credentials = GovernedHost::Get().Attach(*f.con.context, "orders");
-	ClientContextFileOpener opener(*f.con.context);
+	ClientContextFileOpener opener(f.con.context->GetContext());
 	FileOpenerInfo info;
 	info.file.path = OrdersFile(0);
 	GovernedHost::Get().Apply(table_credentials, info);
@@ -1266,7 +1266,7 @@ namespace {
 S3AuthParams ResolveWithHandle(Fixture &f, const string &table, const string &scope, const string &path) {
 	f.con.BeginTransaction();
 	auto table_credentials = GovernedHost::Get().AttachWithScope(*f.con.context, table, scope);
-	ClientContextFileOpener opener(*f.con.context);
+	ClientContextFileOpener opener(f.con.context->GetContext());
 	FileOpenerInfo info;
 	info.file.path = path;
 	GovernedHost::Get().Apply(table_credentials, info);
@@ -1407,7 +1407,7 @@ TEST_CASE("The table's credentials serve only the transaction that loaded the ta
 	// Another connection, explicitly given the same secret name.
 	other.BeginTransaction();
 	{
-		ClientContextFileOpener opener(*other.context);
+		ClientContextFileOpener opener(other.context->GetContext());
 		REQUIRE_FALSE(GetNamedSecret(*other.context, table_credentials));
 		FileOpenerInfo info;
 		info.file.path = OrdersFile(0);
