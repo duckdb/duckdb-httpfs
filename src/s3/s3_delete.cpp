@@ -291,6 +291,9 @@ S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    return RunPostRequest(request_data.http_url, request_data.headers, params, result,
 		                          const_data_ptr_cast(body.data()), body.length(), [&](BaseRequest &request) {
+			                          // S3's answer is returned rather than thrown, as for the other POSTs, so that the
+			                          // executor sees a throttle and sends the request again
+			                          request.try_request = true;
 			                          return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		                          });
 	    });
