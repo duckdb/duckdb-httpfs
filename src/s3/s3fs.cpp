@@ -36,7 +36,7 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
     : HTTPFileHandle(fs, file, flags, std::move(request_session_p),
                      file.extended_info ? auth_params_p.GetProvider().ReadObjectVersion(*file.extended_info)
                                         : HTTPObjectVersion()),
-      requested_version(S3Url::Parse(file.path, auth_params_p).GetObjectVersion()) {
+      requested_version(S3Url::Parse(file.path, auth_params_p).GetObjectVersion()), opened_from_listing(initialized) {
 	if (flags.OpenForWriting() && requested_version.IsSet()) {
 		throw NotImplementedException("%s is only supported for reading",
 		                              S3Provider::GetVersionParameterName(requested_version.GetType()));

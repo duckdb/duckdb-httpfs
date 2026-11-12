@@ -215,10 +215,23 @@ public:
 		auto guard = range_request_state.BeginRequest();
 		guard.MarkSupported();
 	}
+	//! Version a read conditioned on etag returned, so every handle opened with that etag can pin to it
+	HTTPObjectVersion GetLearnedVersion(const string &etag) {
+		annotated_lock_guard<annotated_mutex> guard(learned_version_lock);
+		return learned_version_etag == etag ? learned_version : HTTPObjectVersion();
+	}
+	void SetLearnedVersion(const string &etag, HTTPObjectVersion version) {
+		annotated_lock_guard<annotated_mutex> guard(learned_version_lock);
+		learned_version_etag = etag;
+		learned_version = std::move(version);
+	}
 
 private:
 	shared_ptr<CachedFile> cached_file;
 	RangeRequestState range_request_state;
+	annotated_mutex learned_version_lock;
+	string learned_version_etag DUCKDB_GUARDED_BY(learned_version_lock);
+	HTTPObjectVersion learned_version DUCKDB_GUARDED_BY(learned_version_lock);
 };
 
 struct HTTPStateCounters {
