@@ -2,6 +2,7 @@
 #include "duckdb/main/http/http_retry_budget.hpp"
 
 #include "s3/s3fs.hpp"
+#include "s3/s3_remote_signer.hpp"
 #include "s3/s3_settings.hpp"
 #include "s3/s3_xml_response.hpp"
 #include "create_secret_functions.hpp"
@@ -9,6 +10,8 @@
 
 #include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/common/hash_functions.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/optional.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/main/http/http_util.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -188,6 +191,7 @@ public:
 	void Create() {
 		headers["Host"] = host;
 		InitializeDefaults();
+		headers["x-amz-date"] = datetime_now;
 		AddRequestHeaders();
 		auto canonical_headers = BuildCanonicalHeaders();
 		auto signed_headers = BuildSignedHeaders(canonical_headers);
@@ -195,6 +199,13 @@ public:
 		auto signature = CreateSignature(canonical_request);
 		headers["Authorization"] = "AWS4-HMAC-SHA256 Credential=" + auth_params.GetCredentials().access_key_id + "/" +
 		                           CredentialScope() + ", SignedHeaders=" + signed_headers + ", Signature=" + signature;
+	}
+
+	//! The headers a remote signer has to sign, which dates and signs the request itself
+	void CreateUnsigned() {
+		headers["Host"] = host;
+		InitializeDefaults();
+		AddRequestHeaders();
 	}
 
 private:
@@ -210,7 +221,6 @@ private:
 	}
 
 	void AddRequestHeaders() {
-		headers["x-amz-date"] = datetime_now;
 		headers["x-amz-content-sha256"] = payload_hash;
 		auto &credentials = auth_params.GetCredentials();
 		auto &request_options = auth_params.GetRequestOptions();
@@ -416,6 +426,14 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 		}
 		return headers;
 	}
+	case S3AuthType::REMOTE_SIGNED: {
+		// Signed by S3RemoteSigner once the request is about to be sent
+		S3HeaderBuilder(encryption_util, encoded_path, query, host, "s3", operation, auth_params, std::move(date_now),
+		                std::move(datetime_now), std::move(payload_hash), std::move(content_type),
+		                std::move(content_md5), headers)
+		    .CreateUnsigned();
+		return headers;
+	}
 	}
 	throw InternalException("Unknown S3 authentication type");
 }
@@ -428,13 +446,38 @@ static bool IsAuthRefreshErrorBody(const string &body) {
 	return error.code == "ExpiredToken" || error.code == "InvalidToken" || error.code == "TokenRefreshRequired";
 }
 
+//! How to retry a failed signing request. Nothing was sent to S3 yet, so unlike the S3 request itself it can always be
+//! repeated: an unreachable signer is a transient failure, and its 5xx, 408 and 429 responses are retried as such.
+static optional<HTTPRetryDecision> GetSignerRetryDecision(const ErrorData &error) {
+	auto &extra_info = error.ExtraInfo();
+	auto entry = extra_info.find("status_code");
+	if (entry == extra_info.end()) {
+		if (error.Type() == ExceptionType::IO) {
+			return HTTPRetryDecision::Transient();
+		}
+		return optional<HTTPRetryDecision>();
+	}
+	int32_t status;
+	if (!TryCast::Operation(string_t(entry->second), status)) {
+		return optional<HTTPRetryDecision>();
+	}
+	if (status == 429 || status == 503) {
+		return HTTPRetryDecision::Throttled();
+	}
+	if (status == 408 || (status >= 500 && status < 600)) {
+		return HTTPRetryDecision::Retry();
+	}
+	return optional<HTTPRetryDecision>();
+}
+
 static bool IsAuthRefreshStatus(const ErrorData &error) {
 	auto &extra_info = error.ExtraInfo();
 	auto entry = extra_info.find("status_code");
 	if (entry == extra_info.end()) {
 		return false;
 	}
-	if (entry->second == "401" || entry->second == "403") {
+	// 419 is how a remote signer reports that the credentials authenticating the client to it expired
+	if (entry->second == "401" || entry->second == "403" || entry->second == "419") {
 		return true;
 	}
 	if (entry->second != "400") {
@@ -724,11 +767,29 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 	bool retried_region = false;
 	HTTPRetryBudget retry_budget(session.Capture().snapshot->Params());
 	S3RequestResult result {};
+	//! Set while the last attempt could not get its request signed
+	ErrorData signer_error;
 	retry_budget.Run([&]() {
 		// Only bounded auth/region corrections bypass transient retry admission.
 		for (;;) {
 			auto request_data = CreateRequestData(encryption_util, session.Capture(), spec, retry_budget);
 			try {
+				// Signed here so that a rejected signing request goes through the same auth refresh as a response
+				auto &auth_params = request_data.auth_params;
+				if (auth_params.GetProvider().GetAuthType(auth_params) == S3AuthType::REMOTE_SIGNED) {
+					try {
+						S3RemoteSigner::Sign(request_data, spec.signing_body);
+						signer_error = ErrorData();
+					} catch (std::exception &ex) {
+						ErrorData error(ex);
+						auto decision = GetSignerRetryDecision(error);
+						if (!decision) {
+							throw;
+						}
+						signer_error = std::move(error);
+						return *decision;
+					}
+				}
 				auto response = request(request_data);
 				auto received_response = response && !response->HasRequestError();
 				if (received_response && !retried_auth_refresh && IsAuthRefreshStatus(*response) &&
@@ -781,6 +842,10 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 			}
 		}
 	});
+	if (signer_error.HasError()) {
+		// The retries ran out before the signer signed the request
+		signer_error.Throw();
+	}
 	result.context.throttled_retries = retry_budget.ThrottledRetries();
 	return result;
 }

@@ -9,7 +9,9 @@
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/client_context_state.hpp"
+#include "duckdb/main/http/http_util.hpp"
 
 #include <condition_variable>
 #include <functional>
@@ -221,6 +223,12 @@ private:
 	RangeRequestState range_request_state;
 };
 
+//! A request as returned by a remote signer: the URL to send it to and the headers to send with it
+struct HTTPSignedRequest {
+	string url;
+	HTTPHeaders headers;
+};
+
 struct HTTPStateCounters {
 	//! Request counts
 	idx_t head_count = 0;
@@ -252,6 +260,10 @@ public:
 	shared_ptr<HTTPFileState> GetFileState(const string &path);
 	void EraseFileState(const string &path);
 
+	//! Signed requests the signer allowed to be reused, until they expire or the query ends
+	bool TryGetSignedRequest(const string &key, HTTPSignedRequest &result);
+	void PutSignedRequest(const string &key, HTTPSignedRequest request, timestamp_t expires_at);
+
 	//! Helper functions to get the HTTP state
 	static shared_ptr<HTTPState> TryGetState(ClientContext &context);
 	static shared_ptr<HTTPState> TryGetState(optional_ptr<FileOpener> opener);
@@ -282,6 +294,15 @@ private:
 	annotated_mutex file_states_mutex;
 	//! Per-path state shared by all file handles in this query
 	unordered_map<string, shared_ptr<HTTPFileState>> file_states DUCKDB_GUARDED_BY(file_states_mutex);
+
+	struct CachedSignedRequest {
+		HTTPSignedRequest request;
+		timestamp_t expires_at;
+	};
+	//! Number of cached signed requests from which expired ones are swept on insertion
+	static constexpr idx_t SIGNED_REQUEST_SWEEP_SIZE = 1024;
+	annotated_mutex signed_requests_mutex;
+	unordered_map<string, CachedSignedRequest> signed_requests DUCKDB_GUARDED_BY(signed_requests_mutex);
 };
 
 } // namespace duckdb

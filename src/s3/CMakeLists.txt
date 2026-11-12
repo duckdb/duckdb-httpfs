@@ -5,6 +5,7 @@ target_sources(
           s3_endpoint.cpp
           s3_list.cpp
           s3_provider.cpp
+          s3_remote_signer.cpp
           s3_request.cpp
           s3_settings.cpp
           s3_upload_session.cpp
