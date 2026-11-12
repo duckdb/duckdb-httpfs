@@ -1961,33 +1961,34 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 		RequestType request_type;
 		S3RequestTarget target;
 		bool retry_timeout;
-		bool retry_throttled;
+		S3ThrottleRetry retry_throttled;
 		bool retry_received_response;
 		bool uses_kms_headers;
 		bool uses_sse_customer_headers;
 	};
-	// Every operation is sent again when S3 throttles it, CreateMultipartUpload included
+	// Every operation is sent again when S3 throttles it. CreateMultipartUpload, which is otherwise never sent
+	// again, only when S3's error document says SlowDown or TooManyRequests
 	const array<ExpectedOperationInfo, 10> expected {{
-	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true, true, false, false,
-	     true},
-	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true, true, false, false,
-	     true},
-	    {S3RequestOperation::PUT_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, true, false, true,
-	     true},
-	    {S3RequestOperation::DELETE_OBJECT, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, true, false,
-	     false, false},
-	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true, true, false, false,
-	     false},
-	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, true, false,
-	     false, false},
-	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, true,
-	     false, true, true},
-	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, true, false, false,
-	     true},
-	    {S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, true,
-	     true, false, true},
-	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, true,
-	     false, false, false},
+	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, true},
+	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, true},
+	    {S3RequestOperation::PUT_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, true, true},
+	    {S3RequestOperation::DELETE_OBJECT, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, false},
+	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, false},
+	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false,
+	     S3ThrottleRetry::BY_STATUS, false, false, false},
+	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false,
+	     S3ThrottleRetry::BY_ERROR_CODE, false, true, true},
+	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, true},
+	    {S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false,
+	     S3ThrottleRetry::BY_STATUS, true, false, true},
+	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, false},
 	}};
 
 	for (const auto &entry : expected) {

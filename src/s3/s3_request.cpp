@@ -83,26 +83,26 @@ const string &S3RequestQuery::CanonicalQuery() const {
 
 const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation operation) {
 	static const array<S3RequestOperationInfo, 10> OPERATION_INFO = {
-	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true, true, false,
-	                            false, true},
-	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true, true, false, false,
-	                            true},
-	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, true, false,
-	                            true, true},
-	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "deleting", true, true, false,
-	                            false, false},
-	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true, true, false, false,
-	                            false},
-	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, true,
-	                            false, false, false},
+	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, true},
+	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, true},
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true,
+	                            S3ThrottleRetry::BY_STATUS, false, true, true},
+	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "deleting", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, false},
+	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, false},
+	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false,
+	                            S3ThrottleRetry::BY_STATUS, false, false, false},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "initializing multipart upload for",
-	                            false, true, false, true, true},
-	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, true, false,
-	                            false, true},
+	                            false, S3ThrottleRetry::BY_ERROR_CODE, false, true, true},
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, true},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "completing multipart upload for",
-	                            false, true, true, false, true},
+	                            false, S3ThrottleRetry::BY_STATUS, true, false, true},
 	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "aborting multipart upload for",
-	                            true, true, false, false, false}};
+	                            true, S3ThrottleRetry::BY_STATUS, false, false, false}};
 	auto index = static_cast<idx_t>(operation);
 	if (index >= OPERATION_INFO.size()) {
 		throw InternalException("Unknown S3 request operation");
@@ -677,14 +677,31 @@ static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const
 	}
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
 }
-// Whether S3 throttled the request, which then gets core's throttled retries: HTTP 429 or 503, or a SlowDown or
-// TooManyRequests error document, which can also come behind HTTP 200 (CompleteMultipartUpload). Narrower than
-// IsRetryableReceivedResponse on purpose: a RequestTimeout or a 500 is not throttling, and an operation that is not
-// replay-safe after those (CreateMultipartUpload) must still not be sent again for them.
-static bool IsThrottledReceivedResponse(const S3RequestData &request_data, const HTTPResponse &response) {
-	auto &operation_info = S3RequestUtil::GetOperationInfo(request_data.operation);
-	if (!operation_info.retry_throttled || response.HasRequestError()) {
+// Whether the body is an S3 error document saying that the request was throttled: SlowDown, or TooManyRequests.
+static bool HasThrottlingErrorCode(const HTTPResponse &response) {
+	if (response.body.empty()) {
 		return false;
+	}
+	S3XMLError error;
+	return S3XMLResponseParser::TryParseError(response.body, error) &&
+	       (error.code == "SlowDown" || error.code == "TooManyRequests");
+}
+
+// Whether S3 throttled the request, which then gets core's throttled retries. Narrower than
+// IsRetryableReceivedResponse on purpose: a RequestTimeout or a 500 is not throttling. An operation that is safe to
+// send again counts HTTP 429 and 503, and a throttling error document, which can also come behind HTTP 200
+// (CompleteMultipartUpload). One that is otherwise not sent again (CreateMultipartUpload) counts only the error
+// document: a bare 503, another error code or a body that is not an S3 error document does not show that the request
+// was refused, so it gets the single attempt it always had.
+static bool IsThrottledReceivedResponse(const S3RequestData &request_data, const HTTPResponse &response) {
+	if (response.HasRequestError()) {
+		return false;
+	}
+	auto &operation_info = S3RequestUtil::GetOperationInfo(request_data.operation);
+	auto status = static_cast<int>(response.status);
+	if (operation_info.retry_throttled == S3ThrottleRetry::BY_ERROR_CODE) {
+		// A successful response is the operation's result, not a refusal
+		return status >= 400 && HasThrottlingErrorCode(response);
 	}
 	if (response.status == HTTPStatusCode::TooManyRequests_429 ||
 	    response.status == HTTPStatusCode::ServiceUnavailable_503) {
@@ -692,13 +709,10 @@ static bool IsThrottledReceivedResponse(const S3RequestData &request_data, const
 	}
 	// A successful response's body is only looked at for an operation whose success can carry an error document: a
 	// read's body is the object.
-	auto status = static_cast<int>(response.status);
-	if (response.body.empty() || (status < 400 && !operation_info.retry_received_response)) {
+	if (status < 400 && !operation_info.retry_received_response) {
 		return false;
 	}
-	S3XMLError error;
-	return S3XMLResponseParser::TryParseError(response.body, error) &&
-	       (error.code == "SlowDown" || error.code == "TooManyRequests");
+	return HasThrottlingErrorCode(response);
 }
 
 S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,

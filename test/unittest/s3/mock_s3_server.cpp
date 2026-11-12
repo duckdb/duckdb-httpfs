@@ -349,6 +349,7 @@ public:
 		remaining_delete_disconnects = config.failures.transient_delete_disconnects;
 		remaining_post_failures = config.failures.transient_post_failures;
 		remaining_completion_faults = config.failures.completion_fault.count;
+		remaining_bulk_delete_failures = config.bulk_delete.transient_failures;
 		if (config.range.behavior == MockS3RangeBehavior::SHORT_SUCCESS && config.range.behavior_requests > 0) {
 			server.set_keep_alive_max_count(1);
 		}
@@ -897,6 +898,15 @@ public:
 	}
 
 	void SendBulkDeleteResponse(const httplib::Request &request, httplib::Response &response) const {
+		if (remaining_bulk_delete_failures.load() > 0) {
+			remaining_bulk_delete_failures--;
+			response.status = config.bulk_delete.transient_failure_status;
+			response.set_content("<Error><Code>" + config.bulk_delete.transient_failure_code +
+			                         "</Code><Message>Injected bulk delete failure</Message></Error>",
+			                     "application/xml");
+			Record(request, response.status);
+			return;
+		}
 		auto key_count = CountDeleteKeys(request.body);
 		if (config.bulk_delete.maximum_key_count.IsValid() &&
 		    key_count > config.bulk_delete.maximum_key_count.GetIndex()) {
@@ -1064,9 +1074,13 @@ public:
 				SendS3Error400(request, response, config.failures.failure_is_request_timeout);
 			} else {
 				response.status = config.failures.transient_post_status;
-				response.set_content("<Error><Code>" + config.failures.transient_post_code +
-				                         "</Code><Message>Injected initialization failure</Message></Error>",
-				                     "application/xml");
+				if (!config.failures.transient_post_code.empty()) {
+					response.set_content("<Error><Code>" + config.failures.transient_post_code +
+					                         "</Code><Message>Injected initialization failure</Message></Error>",
+					                     "application/xml");
+				} else if (!config.failures.transient_post_body.empty()) {
+					response.set_content(config.failures.transient_post_body, "text/html");
+				}
 				Record(request, response.status);
 			}
 			return;
@@ -1671,6 +1685,7 @@ public:
 	mutable atomic<idx_t> remaining_delete_disconnects {0};
 	mutable atomic<idx_t> remaining_post_failures {0};
 	mutable atomic<idx_t> remaining_completion_faults {0};
+	mutable atomic<idx_t> remaining_bulk_delete_failures {0};
 
 	//! Request observations
 	mutable annotated_mutex observation_lock;

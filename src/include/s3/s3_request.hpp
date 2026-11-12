@@ -49,16 +49,23 @@ enum class S3RequestOperation : uint8_t {
 	ABORT_MULTIPART_UPLOAD
 };
 enum class S3ReceivedResponseAction : uint8_t { ACCEPT, RETRY_FRESH_CONNECTION };
+//! Which responses show that S3 throttled a request, which is then sent again with core's throttled retries
+enum class S3ThrottleRetry : uint8_t {
+	//! HTTP 429 or 503, or a SlowDown or TooManyRequests error document: for an operation that is safe to send again
+	BY_STATUS,
+	//! Only a SlowDown or TooManyRequests error document, S3's own answer that it throttled the request and so refused
+	//! it: for an operation that is otherwise not sent again (CreateMultipartUpload). A bare 503, another error code or
+	//! a body that is not an S3 error document does not show that the request was refused, so it is not sent again.
+	BY_ERROR_CODE
+};
 
 struct S3RequestOperationInfo {
 	RequestType request_type;
 	S3RequestTarget target;
 	const char *description;
 	bool retry_timeout;
-	//! Sent again when S3 throttles it (HTTP 429 or 503, or a SlowDown or TooManyRequests error), with core's throttled
-	//! retries. S3 refused a throttled request, so this holds even for an operation that is otherwise not sent again
-	//! (CreateMultipartUpload): at worst an upload id is left without parts.
-	bool retry_throttled;
+	//! Which throttled responses the operation is sent again after, with core's throttled retries
+	S3ThrottleRetry retry_throttled;
 	bool retry_received_response;
 	bool uses_kms_headers;
 	bool uses_sse_customer_headers;
