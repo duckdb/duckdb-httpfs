@@ -50,6 +50,7 @@ struct HTTPFSExtensionLoader {
 		auto &instance = loader.GetDatabaseInstance();
 		auto &config = DBConfig::GetConfig(instance);
 		RegisterSettings(instance);
+		HTTPFSUtil::RegisterCertificateFunctions(loader);
 		RegisterSecrets(loader);
 		ConfigureEncryption(config);
 

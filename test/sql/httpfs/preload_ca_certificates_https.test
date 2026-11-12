@@ -1,0 +1,44 @@
+# name: test/sql/httpfs/preload_ca_certificates_https.test
+# description: Preloaded default CA bundles keep HTTPS working after local filesystem lockdown
+# group: [httpfs]
+
+require httpfs
+
+require skip_reload
+
+# Connection failures must not hide a certificate-loading regression.
+set ignore_error_messages
+
+foreach client curl httplib
+
+load
+
+statement ok another_connection
+SELECT 1;
+
+statement ok
+SET httpfs_client_implementation = '{client}';
+
+statement ok
+SET GLOBAL enable_server_cert_verification = true;
+
+statement ok
+CALL httpfs_preload_ca_certificates();
+
+statement ok
+SET disabled_filesystems = 'LocalFileSystem';
+
+statement ok
+SET lock_configuration = true;
+
+query I another_connection
+SELECT count(*) FROM read_csv_auto('https://github.com/duckdb/duckdb/raw/main/data/csv/customer.csv');
+----
+10
+
+statement error
+SELECT * FROM read_csv_auto('README.md');
+----
+File system LocalFileSystem has been disabled by configuration
+
+endloop

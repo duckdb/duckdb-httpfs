@@ -32,6 +32,7 @@ class HTTPState;
 class HTTPFSUtil;
 class HTTPException;
 class HTTPRequestSession;
+class ExtensionLoader;
 struct HTTPFSParams;
 
 struct HTTPFSHeaderValue {
@@ -119,6 +120,8 @@ public:
 	//! at a well-known location. It is read through the database's file system, so allowed_paths applies to it.
 	//! Returns nullptr when no bundle is available, in which case the client relies on the platform's own store.
 	shared_ptr<const string> GetCertificateBundle(const string &ca_cert_file);
+	//! Register the SQL command for loading the configured CA bundle before filesystem lockdown.
+	static void RegisterCertificateFunctions(ExtensionLoader &loader);
 	static bool IsSecureConnection(const string &proto_host_port);
 	//! A client's transport error, naming file descriptor exhaustion when that is what made it fail: the clients
 	//! report it as whatever step could not open its socket or file (a host lookup, a connection, memory).
