@@ -160,8 +160,10 @@ static void RunHTTPStateCounterScenario(HTTPFSUtil &http_util) {
 	auto get_response = http_util.Request(get, client);
 	REQUIRE(get_response);
 
+	// PutRequestInfo keeps a reference to the content type
+	const string put_content_type = "application/octet-stream";
 	PutRequestInfo put(server.HTTPPath(), HTTPHeaders(), params, const_data_ptr_cast(put_body.data()), put_body.size(),
-	                   "application/octet-stream");
+	                   put_content_type);
 	auto put_response = http_util.Request(put, client);
 	REQUIRE(put_response);
 
