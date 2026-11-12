@@ -35,6 +35,7 @@ public:
 	                                       bool refresh_credentials, const string &http_proxy = "");
 	static void AssertSingleRefresh(const string &test_id);
 	static void AssertNoRefresh(const string &test_id);
+	static idx_t RefreshCount(const string &test_id);
 	static bool HasRequestWithKey(const vector<MockS3RequestObservation> &observations, const string &key_id);
 	static idx_t CountObservations(const vector<MockS3RequestObservation> &observations, const string &method,
 	                               const string &key_id, int status);

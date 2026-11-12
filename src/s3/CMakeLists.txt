@@ -6,6 +6,7 @@ target_sources(
           s3_list.cpp
           s3_provider.cpp
           s3_request.cpp
+          s3_secret_refresh.cpp
           s3_settings.cpp
           s3_upload_session.cpp
           s3_url.cpp

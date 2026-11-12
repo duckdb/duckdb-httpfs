@@ -1,8 +1,14 @@
 #include "create_secret_functions.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "s3/s3_provider.hpp"
+#include "s3/s3_secret_refresh.hpp"
 #include "s3/s3fs.hpp"
+#include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/common/error_data.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/extension_entries.hpp"
+#include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/file_system.hpp"
 
@@ -172,26 +178,116 @@ static bool SecretCredentialMaterialChanged(const KeyValueSecret &old_secret, co
 	return false;
 }
 
+static optional_ptr<const CreateSecretFunction> FindSecretFunction(const vector<CreateSecretFunction> &functions,
+                                                                   const CreateSecretInput &input) {
+	for (auto &function : functions) {
+		if (StringUtil::CIEquals(function.secret_type, input.type.GetIdentifierName()) &&
+		    function.provider == input.provider) {
+			return &function;
+		}
+	}
+	return nullptr;
+}
+
+//! Load the extension that provides a secret provider, as `SecretManager::CreateSecret` would (e.g. aws for
+//! s3/credential_chain)
+static void AutoloadSecretProvider(ClientContext &context, const CreateSecretInput &input) {
+	Value autoload;
+	if (!context.TryGetCurrentSetting("autoload_known_extensions", autoload) || !autoload.GetValue<bool>()) {
+		return;
+	}
+	auto key = Identifier(input.type.GetIdentifierName() + "/" + input.provider.GetIdentifierName());
+	auto extension = ExtensionHelper::FindExtensionInEntries(key, EXTENSION_SECRET_PROVIDERS);
+	if (!extension.empty()) {
+		ExtensionHelper::TryAutoLoadExtension(*context.db, extension);
+	}
+}
+
+//! Run the provider of a refresh input without registering the secret it returns
+static unique_ptr<const BaseSecret> DeriveRefreshedSecret(ClientContext &context, CreateSecretInput &refresh_input) {
+	auto &secret_manager = context.db->GetSecretManager();
+	if (refresh_input.provider.empty()) {
+		refresh_input.provider =
+		    Identifier(secret_manager.LookupType(refresh_input.type.GetIdentifierName()).default_provider);
+	}
+	auto functions = secret_manager.AllSecretFunctions();
+	auto function = FindSecretFunction(functions, refresh_input);
+	if (!function) {
+		AutoloadSecretProvider(context, refresh_input);
+		functions = secret_manager.AllSecretFunctions();
+		function = FindSecretFunction(functions, refresh_input);
+	}
+	if (!function) {
+		throw InvalidInputException("Secret provider %s for type %s not found",
+		                            refresh_input.provider.GetIdentifierName(), refresh_input.type.GetIdentifierName());
+	}
+	auto secret = function->function(context, refresh_input);
+	if (!secret) {
+		throw InternalException("CreateSecretFunction for type: %s and provider: %s did not return a secret!",
+		                        refresh_input.type, refresh_input.provider);
+	}
+	return std::move(secret);
+}
+
+//! Publish refreshed credentials where the secret came from, or only to this transaction if that conflicts.
+//!
+//! Why: the catalog replace conflicts whenever another transaction already replaced the secret and this one cannot
+//! see it (duckdb-httpfs#462). The transaction-scoped storage cannot conflict, wins every lookup in this transaction,
+//! and is gone at commit, while the other transaction's replace carries the credentials to later transactions.
+static void PublishRefreshedSecret(ClientContext &context, const SecretEntry &secret_to_refresh,
+                                   const CreateSecretInput &refresh_input, const BaseSecret &refreshed) {
+	auto &secret_manager = context.db->GetSecretManager();
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	try {
+		secret_manager.RegisterSecret(transaction, refreshed.Clone(), OnCreateConflict::REPLACE_ON_CONFLICT,
+		                              refresh_input.persist_type, refresh_input.storage_type.GetIdentifierName());
+		return;
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (error.Type() != ExceptionType::TRANSACTION ||
+		    secret_to_refresh.persist_type == SecretPersistType::TRANSACTION) {
+			throw;
+		}
+		DUCKDB_LOG_INFO(context, "Refreshed secret %s for this transaction only: %s", refreshed.GetName(),
+		                error.Message());
+	}
+	secret_manager.RegisterSecret(transaction, refreshed.Clone(), OnCreateConflict::REPLACE_ON_CONFLICT,
+	                              SecretPersistType::TRANSACTION);
+}
+
 //! Function that will automatically try to refresh a secret
-bool CreateS3SecretFunctions::TryRefreshS3Secret(ClientContext &context, const SecretEntry &secret_to_refresh) {
+S3CredentialRefresh CreateS3SecretFunctions::TryRefreshS3Secret(ClientContext &context,
+                                                                const SecretEntry &secret_to_refresh) {
 	const auto &kv_secret = secret_to_refresh.secret->Cast<KeyValueSecret>();
 
 	Value refresh_info;
 	if (!kv_secret.TryGetValue("refresh_info", refresh_info)) {
-		return false;
+		return S3CredentialRefresh::NONE;
 	}
-	auto &secret_manager = context.db->GetSecretManager();
 	auto refresh_input = GenerateRefreshSecretInfo(secret_to_refresh, refresh_info);
 
 	// TODO: change SecretManager API to avoid requiring catching this exception
 	try {
-		auto res = secret_manager.CreateSecret(context, refresh_input);
-		auto &new_secret = res->secret->Cast<KeyValueSecret>();
-		if (SecretCredentialMaterialChanged(kv_secret, new_secret)) {
-			DUCKDB_LOG_INFO(context, "Successfully refreshed secret: %s, new key_id: %s",
-			                secret_to_refresh.secret->GetName(), new_secret.TryGetValue("key_id").ToString());
+		auto lineage_ref = S3SecretRefreshState::Get(context)->GetLineage(kv_secret, refresh_info);
+		auto &lineage = *lineage_ref;
+		annotated_lock_guard<annotated_mutex> refresh_guard(lineage.refresh_lock);
+
+		// Another connection may have refreshed these credentials already: reuse its result
+		auto stale_credentials = S3SecretRefreshState::FingerprintCredentials(kv_secret);
+		auto refreshed = lineage.TryGetSuccessor(stale_credentials);
+		auto result = refreshed ? S3CredentialRefresh::REUSED : S3CredentialRefresh::REFRESHED;
+		if (!refreshed) {
+			refreshed = DeriveRefreshedSecret(context, refresh_input);
+			auto &new_secret = refreshed->Cast<KeyValueSecret>();
+			lineage.RecordSuccessor(stale_credentials, *refreshed,
+			                         S3SecretRefreshState::FingerprintCredentials(new_secret));
+			if (SecretCredentialMaterialChanged(kv_secret, new_secret)) {
+				DUCKDB_LOG_INFO(context, "Successfully refreshed secret: %s, new key_id: %s",
+				                secret_to_refresh.secret->GetName(), new_secret.TryGetValue("key_id").ToString());
+			}
 		}
-		return true;
+		PublishRefreshedSecret(context, secret_to_refresh, refresh_input, *refreshed);
+		return result;
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		string new_message = StringUtil::Format("Exception thrown while trying to refresh secret %s. To fix this, "
