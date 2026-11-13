@@ -265,14 +265,12 @@ size_t AESStateSSL::FinalizeGCM(data_ptr_t out, idx_t out_len, data_ptr_t tag, i
 }
 
 size_t AESStateSSL::Finalize(data_ptr_t out, idx_t out_len, data_ptr_t tag, idx_t tag_len) {
-
 	if (metadata->GetCipher() == EncryptionTypes::GCM) {
 		return FinalizeGCM(out, out_len, tag, tag_len);
 	}
 
 	auto text_len = out_len;
 	switch (mode) {
-
 	case EncryptionTypes::ENCRYPT: {
 		int output_length;
 		if (1 != EVP_EncryptFinal_ex(context, out + out_len, &output_length)) {

@@ -12,7 +12,6 @@ typedef struct evp_cipher_st EVP_CIPHER;
 namespace duckdb {
 
 class DUCKDB_EXTENSION_API AESStateSSL : public EncryptionState {
-
 public:
 	explicit AESStateSSL(unique_ptr<EncryptionStateMetadata> metadata);
 	~AESStateSSL() override;
