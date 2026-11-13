@@ -22,7 +22,6 @@ enum class S3GlobMatchMode : uint8_t { PREFIX, COMPLETE };
 static bool Match(vector<string>::const_iterator key, vector<string>::const_iterator key_end,
                   vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end,
                   S3GlobMatchMode mode) {
-
 	if (key == key_end && mode == S3GlobMatchMode::PREFIX) {
 		return true;
 	}
