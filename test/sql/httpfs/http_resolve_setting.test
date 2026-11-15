@@ -1,0 +1,130 @@
+# name: test/sql/httpfs/http_resolve_setting.test
+# description: http_resolve accepts curl's HOST:PORT:ADDRESS entries and rejects malformed ones
+# group: [httpfs]
+
+require httpfs
+
+statement ok
+LOAD httpfs;
+
+query I
+SELECT current_setting('http_resolve');
+----
+[]
+
+statement ok
+SET http_resolve = ['example.com:443:192.0.2.1', 'example.org:80:192.0.2.2,192.0.2.3', 'example.net:443:[2001:db8::1]'];
+
+query I
+SELECT len(current_setting('http_resolve'));
+----
+3
+
+statement error
+SET http_resolve = ['example.com:443'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:https:192.0.2.1'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = [':443:192.0.2.1'];
+----
+Invalid http_resolve entry
+
+# curl's -HOST:PORT removal form
+statement error
+SET http_resolve = ['-example.com:443:192.0.2.1'];
+----
+Invalid http_resolve entry
+
+# curl lets +HOST entries expire with the DNS cache, so they would not stay fixed
+statement error
+SET http_resolve = ['+example.com:443:192.0.2.1'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:70000:192.0.2.1'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:0:192.0.2.1'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:not-an-ip'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:192.0.2.1,256.0.0.1'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:192.0.2.1,'];
+----
+Invalid http_resolve entry
+
+# curl wants IPv6 addresses in brackets
+statement error
+SET http_resolve = ['example.com:443:2001:db8::1'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:[1::2::3]'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:[a:b:c]'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:192.0.2.01'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:[2001:db8::é]'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:192.0.2.'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:[::ffff:192.0.2.]'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = ['example.com:443:,192.0.2.1'];
+----
+Invalid http_resolve entry
+
+statement error
+SET http_resolve = NULL;
+----
+NULL is not a valid option for http_resolve
+
+statement ok
+SET http_resolve = ['example.com:443:[::ffff:192.0.2.1]', 'example.com:80:[2001:db8:0:0:0:0:0:1]', '*:443:192.0.2.1'];
+
+statement ok
+RESET http_resolve;
+
+query I
+SELECT current_setting('http_resolve');
+----
+[]

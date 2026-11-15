@@ -1,0 +1,68 @@
+# name: test/sql/httpfs/http_resolve.test
+# description: http_resolve sends requests for a host name to the given address, without DNS
+# group: [httpfs]
+
+require httpfs
+
+require-env PYTHON_HTTP_SERVER_URL
+
+require-env PYTHON_HTTP_SERVER_DIR
+
+statement ok
+LOAD httpfs;
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+statement ok
+SET http_retries=0;
+
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+COPY (SELECT 42 AS a) TO '{PYTHON_HTTP_SERVER_DIR}/http_resolve.csv';
+
+# .invalid never resolves (RFC 6761), so only the fixed entry can reach the server
+statement error
+SELECT * FROM read_csv(regexp_replace('{PYTHON_HTTP_SERVER_URL}', '//[^:/]+', '//http-resolve.invalid') || '/http_resolve.csv');
+----
+Could not resolve hostname
+
+statement ok
+SET http_resolve = ['http-resolve.invalid:' || regexp_extract('{PYTHON_HTTP_SERVER_URL}', ':(\d+)$', 1) || ':127.0.0.1'];
+
+query I
+SELECT * FROM read_csv(regexp_replace('{PYTHON_HTTP_SERVER_URL}', '//[^:/]+', '//http-resolve.invalid') || '/http_resolve.csv');
+----
+42
+
+# Names without an entry still resolve through DNS on the same connection settings
+query I
+SELECT * FROM read_csv('{PYTHON_HTTP_SERVER_URL}/http_resolve.csv');
+----
+42
+
+# A different list gets its own connection: 192.0.2.1 (TEST-NET-1) is not reachable
+statement ok
+SET http_timeout = 2;
+
+statement ok
+SET http_resolve = ['http-resolve.invalid:' || regexp_extract('{PYTHON_HTTP_SERVER_URL}', ':(\d+)$', 1) || ':192.0.2.1'];
+
+statement error
+SELECT * FROM read_csv(regexp_replace('{PYTHON_HTTP_SERVER_URL}', '//[^:/]+', '//http-resolve.invalid') || '/http_resolve.csv');
+----
+Timeout was reached
+
+statement ok
+RESET http_timeout;
+
+# Without the entry the name is unknown again: neither a cached connection nor the DNS cache keeps it
+statement ok
+RESET http_resolve;
+
+statement error
+SELECT * FROM read_csv(regexp_replace('{PYTHON_HTTP_SERVER_URL}', '//[^:/]+', '//http-resolve.invalid') || '/http_resolve.csv');
+----
+Could not resolve hostname

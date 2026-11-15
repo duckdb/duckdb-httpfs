@@ -109,6 +109,12 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks,
 		                                 info);
 		FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
+		Value resolve;
+		if (TryGetSetting("http_resolve", resolve) && !resolve.IsNull()) {
+			for (auto &entry : ListValue::GetChildren(resolve)) {
+				result->resolve.push_back(entry.ToString());
+			}
+		}
 		auto context = FileOpener::TryGetClientContext(opener);
 		Value external_cache_enabled;
 		if (context &&

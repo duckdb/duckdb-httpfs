@@ -78,6 +78,8 @@ public:
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
 	idx_t force_download_threshold = 0;
+	//! Fixed name resolution, each entry in curl's `HOST:PORT:ADDRESS[,ADDRESS]...` form (see CURLOPT_RESOLVE).
+	vector<string> resolve;
 
 private:
 	friend class HTTPFSUtil;

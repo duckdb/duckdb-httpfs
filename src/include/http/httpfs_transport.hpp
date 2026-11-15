@@ -21,6 +21,8 @@ public:
 	string ca_cert_file;
 	//! Effective server certificate verification setting.
 	bool verify_ssl = true;
+	//! Fixed name resolution: a connection made with one list must not serve requests that use another.
+	vector<string> resolve;
 };
 
 } // namespace duckdb

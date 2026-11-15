@@ -120,8 +120,10 @@ CURLHandle::CURLHandle() {
 	SetOption(CURLOPT_NOSIGNAL, 1L);
 }
 
-CURLHandle::CURLHandle(bool use_native_ca) : CURLHandle() {
-	SetOption(CURLOPT_SHARE, GetCurlDNSShare());
+CURLHandle::CURLHandle(bool use_native_ca, bool share_dns_cache) : CURLHandle() {
+	if (share_dns_cache) {
+		SetOption(CURLOPT_SHARE, GetCurlDNSShare());
+	}
 	SetOption(CURLOPT_DNS_CACHE_TIMEOUT, SHARED_DNS_CACHE_TIMEOUT_SECONDS);
 	SetOption(CURLOPT_MAXCONNECTS, 1L);
 	long ssl_options = CURLSSLOPT_AUTO_CLIENT_CERT;
@@ -207,7 +209,15 @@ private:
 				return;
 			}
 			HTTPFSCurlClient::InitCurlGlobal();
-			client.curl = make_uniq<CURLHandle>(params.ca_cert_file.empty());
+			// The handle is not set up for any domain until the setup below has completed.
+			client.transport_reuse_domain = optional_idx();
+			// CURLOPT_RESOLVE entries go into the DNS cache, so a handle with entries does not use the shared one.
+			client.curl = make_uniq<CURLHandle>(params.ca_cert_file.empty(), params.resolve.empty());
+			client.resolve_list = make_uniq<CURLStringList>();
+			for (auto &entry : params.resolve) {
+				client.resolve_list->Add(entry);
+			}
+			client.curl->SetOption(CURLOPT_RESOLVE, client.resolve_list->Get());
 			client.transport_reuse_domain = reuse_domain;
 			client.ca_cert_bundle.reset();
 			if (!params.VerifyServerCertificate()) {
@@ -822,6 +832,8 @@ private:
 	}
 
 private:
+	//! The handle's CURLOPT_RESOLVE list, declared before the handle so that it outlives it
+	unique_ptr<CURLStringList> resolve_list;
 	unique_ptr<CURLHandle> curl;
 	optional_ptr<HTTPState> state;
 	unique_ptr<RequestInfo> request_info;
