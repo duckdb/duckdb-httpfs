@@ -1,0 +1,189 @@
+# name: test/sql/s3/copy_source_access.test
+# description: S3 copy source headers must respect file access restrictions
+# group: [s3]
+
+require httpfs
+
+statement ok
+LOAD httpfs;
+
+set ignore_error_messages
+
+statement ok
+SET allow_persistent_secrets = false;
+
+statement ok
+SET http_retries = 0;
+
+# A permitted request reaches a closed local port, a refused source must fail before connecting.
+statement ok
+SET s3_access_key_id = 'k';
+
+statement ok
+SET s3_secret_access_key = 's';
+
+statement ok
+SET s3_region = 'us-east-1';
+
+statement ok
+SET s3_endpoint = '127.0.0.1:9';
+
+statement ok
+SET s3_url_style = 'path';
+
+statement ok
+SET s3_use_ssl = false;
+
+statement ok
+SET s3_enable_deprecated_url_parameters = true;
+
+statement ok
+CREATE SECRET s3_headers (TYPE s3, SCOPE 's3://allowed-bucket/s3-secret.csv', KEY_ID 'k', SECRET 's', REGION 'us-east-1', ENDPOINT '127.0.0.1:9', URL_STYLE 'path', USE_SSL false, EXTRA_HTTP_HEADERS MAP {'x-amz-copy-source': 'other-bucket/secret.txt'});
+
+statement ok
+CREATE SECRET http_headers (TYPE http, SCOPE 's3://allowed-bucket/http-secret.csv', EXTRA_HTTP_HEADERS MAP {'X-AmZ-CoPy-SoUrCe': 'other-bucket/secret.txt'});
+
+statement ok
+CREATE SECRET override_headers (TYPE http, SCOPE 's3://allowed-bucket/override.csv', EXTRA_HTTP_HEADERS MAP {'x-amz-copy-source': 'allowed-bucket/source.txt'});
+
+statement ok
+SET allowed_directories = ['s3://allowed-bucket/', 'http://127.0.0.1:9/'];
+
+statement ok
+SET allowed_paths = ['s3://other-bucket/permitted.txt', 's3://other-bucket/space key.txt', 's3://other-bucket/plus+key.txt', 's3://other-bucket/question?key.txt', 's3://other-bucket/hash#key.txt', 's3://other-bucket/not-permitted.txt?versionId=v1'];
+
+# With unrestricted access, the server remains responsible for interpreting the source.
+foreach source other-bucket/secret.txt other-bucket/secret.txt?versionId=v1
+
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': '${source}'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+<REGEX>:.*(Could not establish connection|Could not connect to server).*
+
+endloop
+
+statement ok
+SET enable_external_access = false;
+
+# Restricted requests do not support version selectors, even when the bucket is allowed.
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': 'allowed-bucket/source.txt?versionId=v1'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot check S3 copy source with query parameters
+
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': 'other-bucket/secret.txt'};
+
+# Both file handles and standalone S3 requests must check the source, even with credential refresh disabled.
+statement ok
+SET httpfs_enable_credential_refresh = false;
+
+statement error
+SELECT * FROM glob('s3://allowed-bucket/*.csv');
+----
+Permission Error: Cannot access S3 copy source
+
+foreach header x-amz-copy-source X-AmZ-CoPy-SoUrCe x-goog-copy-source X-GoOg-CoPy-SoUrCe
+
+foreach source other-bucket/secret.txt /other-bucket/secret.txt %2Fother-bucket%2Fsecret.txt other-bucket%2Fsecret.txt allowed-bucket-suffix/secret.txt other-bucket/space+key.txt other-bucket/space%2520key.txt
+
+statement ok
+SET extra_http_headers = MAP {'${header}': '${source}'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot access S3 copy source
+
+endloop
+
+endloop
+
+# Both directory and exact path grants apply to the decoded source, '+' is a literal character.
+foreach source allowed-bucket/source.txt /allowed-bucket/source.txt other-bucket/permitted.txt other-bucket/space%20key.txt other-bucket/plus+key.txt other-bucket/plus%2Bkey.txt other-bucket/hash%23key.txt allowed-bucket/key%ZZ.txt allowed-bucket/back%5Cslash.txt
+
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': '${source}'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+<REGEX>:.*(Could not establish connection|Could not connect to server).*
+
+endloop
+
+# A literal '?' key must not be checked as a URL with parameters.
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': 'other-bucket/question%3Fkey.txt'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot check S3 copy source with the current S3 URL parameter settings
+
+# Literal '?' keys have ordinary filesystem paths when URL parameter parsing is disabled.
+statement ok
+SET s3_enable_deprecated_url_parameters = false;
+
+foreach source other-bucket/question%3Fkey.txt other-bucket/not-permitted.txt%3FversionId=v1
+
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': '${source}'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+<REGEX>:.*(Could not establish connection|Could not connect to server).*
+
+endloop
+
+# References without an ordinary bucket/key representation must not be guessed.
+foreach source arn:aws:s3:us-east-1:123456789012:accesspoint/example/object/key //allowed-bucket/source.txt allowed-bucket/ allowed-bucket/key#fragment allowed-bucket/key?other=value allowed-bucket/key?versionId= allowed-bucket/key?versionId=v1 other-bucket/not-permitted.txt?versionId=v1
+
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': '${source}'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot check S3 copy source
+
+endloop
+
+# A matching secret overrides the setting before the effective source is checked.
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': 'other-bucket/secret.txt'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/override.csv' (FORMAT csv, HEADER false);
+----
+<REGEX>:.*(Could not establish connection|Could not connect to server).*
+
+# Plain HTTP requests do not interpret S3 headers.
+statement error
+SELECT * FROM read_text('http://127.0.0.1:9/allowed-bucket/out.csv');
+----
+<REGEX>:.*(Could not establish connection|Could not connect to server).*
+
+statement ok
+RESET extra_http_headers;
+
+# S3 secrets and HTTP secrets must not bypass the check.
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/s3-secret.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot access S3 copy source
+
+statement ok
+SET lock_configuration = true;
+
+statement error
+COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/http-secret.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot access S3 copy source

@@ -1,0 +1,100 @@
+# name: test/sql/s3/gcs_copy_source_access.test
+# description: Check both S3 and GCS copy source headers on S3-compatible routes
+# group: [s3]
+
+require httpfs
+
+statement ok
+LOAD httpfs;
+
+set ignore_error_messages
+
+statement ok
+SET allow_persistent_secrets = false;
+
+statement ok
+SET http_retries = 0;
+
+statement ok
+SET s3_access_key_id = 'k';
+
+statement ok
+SET s3_secret_access_key = 's';
+
+statement ok
+SET s3_region = 'us-east-1';
+
+statement ok
+SET s3_endpoint = '127.0.0.1:9';
+
+statement ok
+SET s3_url_style = 'path';
+
+statement ok
+SET s3_use_ssl = false;
+
+statement ok
+CREATE SECRET local_gcs (TYPE gcs, KEY_ID 'k', SECRET 's', ENDPOINT '127.0.0.1:9', URL_STYLE 'path', USE_SSL false);
+
+statement ok
+CREATE SECRET gcs_headers (TYPE gcs, SCOPE 'gs://allowed-bucket/secret.csv', KEY_ID 'k', SECRET 's', ENDPOINT '127.0.0.1:9', URL_STYLE 'path', USE_SSL false, EXTRA_HTTP_HEADERS MAP {'X-GoOg-CoPy-SoUrCe': '/other-bucket/secret.txt'});
+
+statement ok
+SET allowed_directories = ['gs://allowed-bucket/', 'gcs://allowed-bucket/', 's3://allowed-bucket/', 's3a://allowed-bucket/'];
+
+statement ok
+SET enable_external_access = false;
+
+foreach scheme gs:// gcs:// s3:// s3a://
+
+# Check both names regardless of route, the endpoint can select an S3-compatible service.
+foreach header x-goog-copy-source X-GoOg-CoPy-SoUrCe x-amz-copy-source X-AmZ-CoPy-SoUrCe
+
+statement ok
+SET extra_http_headers = MAP {'${header}': '/other-bucket/secret.txt'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO '${scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot access S3 copy source
+
+# A permitted source reaches the closed local port.
+statement ok
+SET extra_http_headers = MAP {'${header}': '/allowed-bucket/source.txt'};
+
+statement error
+COPY (SELECT 1 WHERE false) TO '${scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+<REGEX>:.*(Could not establish connection|Could not connect to server).*
+
+endloop
+
+# An allowed source under one header name must not hide a disallowed source under the other.
+foreach blocked_header x-amz-copy-source x-goog-copy-source
+
+statement ok
+SET extra_http_headers = MAP {'x-amz-copy-source': '/allowed-bucket/source.txt', 'x-goog-copy-source': '/allowed-bucket/source.txt'};
+
+statement ok
+SET extra_http_headers = map_concat(current_setting('extra_http_headers'), MAP {'${blocked_header}': '/other-bucket/secret.txt'});
+
+statement error
+COPY (SELECT 1 WHERE false) TO '${scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot access S3 copy source
+
+endloop
+
+endloop
+
+# A GCS secret supplies the same effective headers as the setting.
+statement ok
+RESET extra_http_headers;
+
+statement ok
+SET lock_configuration = true;
+
+statement error
+COPY (SELECT 1 WHERE false) TO 'gs://allowed-bucket/secret.csv' (FORMAT csv, HEADER false);
+----
+Permission Error: Cannot access S3 copy source "gs://other-bucket/secret.txt"
