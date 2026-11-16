@@ -115,6 +115,10 @@ public:
 
 	string GetName() const override;
 
+	optional_ptr<DatabaseInstance> TryGetDatabase() const {
+		return db;
+	}
+
 	//! The PEM bundle used to verify server certificates: the ca_cert_file setting, or else the first bundle found
 	//! at a well-known location. It is read through the database's file system, so allowed_paths applies to it.
 	//! Returns nullptr when no bundle is available, in which case the client relies on the platform's own store.
