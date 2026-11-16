@@ -7,6 +7,10 @@ require httpfs
 statement ok
 LOAD httpfs;
 
+# the entries are applied by the curl client only, so run under it whatever client the config selects
+statement ok
+SET httpfs_client_implementation='curl';
+
 query I
 SELECT current_setting('http_resolve');
 ----
