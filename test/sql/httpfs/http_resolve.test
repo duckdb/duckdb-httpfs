@@ -37,13 +37,14 @@ SELECT * FROM read_csv(regexp_replace('{PYTHON_HTTP_SERVER_URL}', '//[^:/]+', '/
 ----
 42
 
-# Names without an entry still resolve through DNS on the same connection settings
+# Host names without an entry still resolve through DNS while the setting is set
 query I
 SELECT * FROM read_csv('{PYTHON_HTTP_SERVER_URL}/http_resolve.csv');
 ----
 42
 
-# A different list gets its own connection: 192.0.2.1 (TEST-NET-1) is not reachable
+# A different list gets its own connection: 192.0.2.1 (TEST-NET-1) is not reachable, which depending on the network
+# shows as a timeout or a refused connection
 statement ok
 SET http_timeout = 2;
 
@@ -53,7 +54,7 @@ SET http_resolve = ['http-resolve.invalid:' || regexp_extract('{PYTHON_HTTP_SERV
 statement error
 SELECT * FROM read_csv(regexp_replace('{PYTHON_HTTP_SERVER_URL}', '//[^:/]+', '//http-resolve.invalid') || '/http_resolve.csv');
 ----
-Timeout was reached
+<REGEX>:.*(Timeout was reached|Couldn't connect).*
 
 statement ok
 RESET http_timeout;

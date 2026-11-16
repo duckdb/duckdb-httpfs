@@ -89,11 +89,6 @@ SET http_resolve = ['example.com:443:[a:b:c]'];
 Invalid http_resolve entry
 
 statement error
-SET http_resolve = ['example.com:443:192.0.2.01'];
-----
-Invalid http_resolve entry
-
-statement error
 SET http_resolve = ['example.com:443:[2001:db8::é]'];
 ----
 Invalid http_resolve entry

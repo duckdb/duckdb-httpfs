@@ -25,6 +25,7 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/storage/external_file_cache/external_file_cache_util.hpp"
+#include "http/http_resolve.hpp"
 #include "http/http_state.hpp"
 
 #include <map>
@@ -111,7 +112,13 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
 		Value resolve;
 		if (TryGetSetting("http_resolve", resolve) && !resolve.IsNull()) {
+			// Values set before httpfs was loaded skip the setting's callback, so check them here as well
+			if (resolve.type().id() != LogicalTypeId::LIST) {
+				throw InvalidInputException("http_resolve must be a LIST(VARCHAR), got \"%s\"",
+				                            resolve.type().ToString());
+			}
 			for (auto &entry : ListValue::GetChildren(resolve)) {
+				HTTPResolveEntry::Validate(entry.ToString());
 				result->resolve.push_back(entry.ToString());
 			}
 		}

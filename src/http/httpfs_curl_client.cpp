@@ -209,7 +209,7 @@ private:
 				return;
 			}
 			HTTPFSCurlClient::InitCurlGlobal();
-			// The handle is not set up for any domain until the setup below has completed.
+			// Untag the client first: if the setup below throws, no request may reuse a half-configured handle.
 			client.transport_reuse_domain = optional_idx();
 			// CURLOPT_RESOLVE entries go into the DNS cache, so a handle with entries does not use the shared one.
 			client.curl = make_uniq<CURLHandle>(params.ca_cert_file.empty(), params.resolve.empty());
