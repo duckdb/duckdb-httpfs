@@ -90,7 +90,7 @@ static void AddDeleteHTTPHash(hash_t &result, const S3RefreshableHTTPParams &htt
 void S3FileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener) {
 	FileOpenerInfo info = {path};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
-	auto session = S3RequestExecutor::CreateSession(opener, path, auth_params);
+	auto session = S3RequestExecutor::CreateSession(opener, info.file, auth_params);
 	auto request_result = DeleteRequest(*session, S3RequestOperation::DELETE_OBJECT, path, {});
 	auto &res = request_result.response;
 	if (res->HasRequestError()) {
@@ -291,6 +291,9 @@ S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    return RunPostRequest(request_data.http_url, request_data.headers, params, result,
 		                          const_data_ptr_cast(body.data()), body.length(), [&](BaseRequest &request) {
+			                          // S3's answer is returned rather than thrown, as for the other POSTs, so that the
+			                          // executor sees a throttle and sends the request again
+			                          request.try_request = true;
 			                          return S3RequestExecutor::SendSessionRequest(session, request_data, request);
 		                          });
 	    });
@@ -319,7 +322,7 @@ void S3FileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpe
 
 		S3DeleteBatchUrlInfo url_info = {parsed_url.GetPrefix(), parsed_url.GetBucketHTTPUrl(), auth_params};
 		auto refreshable_http_params = S3RequestExecutor::ReadRefreshableHTTPParams(
-		    HTTPFSUtil::GetHTTPUtil(opener).Cast<HTTPFSUtil>(), opener, path);
+		    HTTPFSUtil::GetHTTPUtil(opener).Cast<HTTPFSUtil>(), opener, info.file);
 		auto identity =
 		    CreateDeleteBatchIdentity(std::move(url_info), std::move(refreshable_http_params), opener, path);
 		auto entry = delete_batches.find(identity);

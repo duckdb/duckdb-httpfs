@@ -67,6 +67,9 @@ struct MockS3AuthConfig {
 	string required_region;
 	MockS3RegionRedirectForm region_redirect_form = MockS3RegionRedirectForm::HEADER;
 	MockS3RefreshTarget refresh_target = MockS3RefreshTarget::HEAD;
+	//! Buckets that answer only requests signed with one of the listed key ids; any other key gets
+	//! the auth failure above, on every request to that bucket
+	unordered_map<string, vector<string>> bucket_key_ids;
 };
 
 struct MockS3MetadataConfig {
@@ -133,6 +136,12 @@ struct MockS3FailureConfig {
 	idx_t transient_post_failures = 0;
 	//! HTTP status used for injected multipart-init failures
 	int transient_post_status = 400;
+	//! S3 error code in the body of an injected multipart-init failure whose status is not 400; empty for no error
+	//! document
+	string transient_post_code = "TooManyRequests";
+	//! Body of an injected multipart-init failure whose status is not 400 and that has no error code, as a proxy might
+	//! send; empty for no body
+	string transient_post_body;
 	//! Leading multipart-completion response fault
 	MockS3CompletionFaultConfig completion_fault;
 	//! Whether injected 400s carry S3's retryable RequestTimeout code or a generic (non-retryable) code
@@ -156,6 +165,11 @@ struct MockS3ListConfig {
 struct MockS3BulkDeleteConfig {
 	//! Reject DeleteObjects requests containing more than this many keys
 	optional_idx maximum_key_count;
+	//! Number of leading DeleteObjects requests to fail before answering normally
+	idx_t transient_failures = 0;
+	//! HTTP status and S3 error code of the injected DeleteObjects failures
+	int transient_failure_status = 503;
+	string transient_failure_code = "SlowDown";
 };
 
 struct MockS3RangeConfig {
@@ -228,6 +242,11 @@ struct MockS3ServerConfig {
 	string endpoint_base_path;
 	bool use_ssl = false;
 	MockS3ObjectConfig object;
+	//! Objects served beside `object`, so that a test can express a second location and a bucket
+	//! holding more than one key. They answer HEAD, GET and ListObjectsV2 with the same credential
+	//! and region checks as `object`, and with none of the injected failures. Their bucket must
+	//! differ from `object.bucket`, because the routes of the two would otherwise collide.
+	vector<MockS3ObjectConfig> extra_objects;
 	MockS3AuthConfig auth;
 	MockS3MetadataConfig metadata;
 	MockS3FailureConfig failures;

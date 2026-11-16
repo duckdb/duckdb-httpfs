@@ -112,6 +112,12 @@ S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpener
                                      const S3AuthResolveOptions &options) {
 	// Without a FileOpener we cannot access settings or secrets.
 	if (!opener) {
+		string secret_name;
+		if (info.file.extended_info && info.file.extended_info->TryGetSecretName(secret_name)) {
+			// rather than signing with whatever credentials the environment has
+			throw InvalidConfigurationException("The named secret for '%s' cannot be used without a file opener",
+			                                    info.file.path);
+		}
 		S3AuthConfig config;
 		config.route = S3UrlScheme::MatchRoutedUrl(info.file.path);
 		options.ApplyTo(config);
@@ -325,7 +331,8 @@ S3KeyValueReader::S3KeyValueReader(const KeyValueSecretReader &_reader) : reader
 	Value use_env_vars_for_secret_info_setting;
 	reader.TryGetSecretKeyOrSetting("enable_global_s3_configuration", "enable_global_s3_configuration",
 	                                use_env_vars_for_secret_info_setting);
-	use_env_variables_for_secret_settings = use_env_vars_for_secret_info_setting.GetValue<bool>();
+	use_env_variables_for_secret_settings =
+	    !use_env_vars_for_secret_info_setting.IsNull() && use_env_vars_for_secret_info_setting.GetValue<bool>();
 }
 
 } // namespace duckdb
