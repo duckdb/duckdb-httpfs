@@ -48,4 +48,13 @@ void HTTPResolveEntry::Validate(const string &entry) {
 	}
 }
 
+void HTTPResolveEntry::CheckClient(const string &http_util_name, idx_t entry_count) {
+	if (entry_count == 0 || http_util_name == "HTTPFS-Curl") {
+		return;
+	}
+	throw InvalidInputException("http_resolve is only applied by the curl HTTP client, but the current client is "
+	                            "'%s'; set httpfs_client_implementation = 'curl' or reset http_resolve",
+	                            http_util_name);
+}
+
 } // namespace duckdb

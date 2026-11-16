@@ -134,9 +134,11 @@ static void ValidateHTTPResolve(ClientContext &context, SetScope scope, Value &p
 	if (parameter.IsNull()) {
 		throw InvalidInputException("NULL is not a valid option for http_resolve");
 	}
-	for (auto &entry : ListValue::GetChildren(parameter)) {
+	auto &entries = ListValue::GetChildren(parameter);
+	for (auto &entry : entries) {
 		HTTPResolveEntry::Validate(entry.ToString());
 	}
+	HTTPResolveEntry::CheckClient(DBConfig::GetConfig(context).GetHTTPUtil().GetName(), entries.size());
 }
 
 void HTTPSettings::Register(DBConfig &config) {

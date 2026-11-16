@@ -123,6 +123,10 @@ private:
 			}
 		}
 		auto context = FileOpener::TryGetClientContext(opener);
+		if (context) {
+			HTTPResolveEntry::CheckClient(DBConfig::GetConfig(*context).GetHTTPUtil().GetName(),
+			                              result->resolve.size());
+		}
 		Value external_cache_enabled;
 		if (context &&
 		    context->TryGetCurrentUserSetting(EnableExternalFileCacheSetting::SettingIndex, external_cache_enabled) &&

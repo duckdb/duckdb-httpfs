@@ -123,3 +123,40 @@ query I
 SELECT current_setting('http_resolve');
 ----
 []
+
+# only the curl client applies the entries, so another client refuses them instead of ignoring them
+statement ok
+RESET http_resolve;
+
+statement ok
+SET httpfs_client_implementation = 'httplib';
+
+statement error
+SET http_resolve = ['example.com:443:192.0.2.1'];
+----
+http_resolve is only applied by the curl HTTP client
+
+# an empty list is fine with any client
+statement ok
+SET http_resolve = [];
+
+# entries set while curl was the client are refused once another client makes a request
+statement ok
+SET httpfs_client_implementation = 'curl';
+
+statement ok
+SET http_resolve = ['127.0.0.1:9:127.0.0.1'];
+
+statement ok
+SET httpfs_client_implementation = 'httplib';
+
+statement error
+SELECT * FROM read_text('http://127.0.0.1:9/missing.txt');
+----
+http_resolve is only applied by the curl HTTP client
+
+statement ok
+RESET http_resolve;
+
+statement ok
+SET httpfs_client_implementation = 'curl';
