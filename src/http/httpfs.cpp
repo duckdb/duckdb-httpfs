@@ -162,7 +162,7 @@ private:
 		}
 		auto db = FileOpener::TryGetDatabase(opener);
 		auto aliases = db ? S3UrlScheme::GetAliasPrefixes(db->config) : vector<string>();
-		return S3UrlScheme::TryMatch(info->file_path, aliases).has_value();
+		return S3UrlScheme::TryMatch(info->file.path, aliases).has_value();
 	}
 
 	unique_ptr<KeyValueSecretReader> CreateSettingsReader() {
@@ -312,7 +312,7 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
 	FileOpenerInfo info;
-	info.file_path = file.path;
+	info.file.path = file.path;
 
 	auto request_session = HTTPRequestSession::Create(opener, info);
 

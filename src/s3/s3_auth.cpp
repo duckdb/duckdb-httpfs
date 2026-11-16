@@ -113,14 +113,14 @@ S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpener
 	// Without a FileOpener we cannot access settings or secrets.
 	if (!opener) {
 		S3AuthConfig config;
-		config.route = S3UrlScheme::MatchRoutedUrl(info.file_path);
+		config.route = S3UrlScheme::MatchRoutedUrl(info.file.path);
 		options.ApplyTo(config);
-		return Resolve(std::move(config), info.file_path);
+		return Resolve(std::move(config), info.file.path);
 	}
 
 	auto secret_types = S3SecretConfig::SecretTypes();
 	S3KeyValueReader secret_reader(*opener, info, secret_types.data(), secret_types.size());
-	return Resolve(secret_reader, info.file_path, options);
+	return Resolve(secret_reader, info.file.path, options);
 }
 
 S3AuthParams S3AuthResolver::Resolve(S3KeyValueReader &secret_reader, const string &file_path,

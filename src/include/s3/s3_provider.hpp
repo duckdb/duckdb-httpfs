@@ -10,6 +10,7 @@
 namespace duckdb {
 
 class CreateSecretFunction;
+class DatabaseInstance;
 struct DBConfig;
 class KeyValueSecret;
 class NormalizedS3Endpoint;
@@ -54,6 +55,9 @@ struct S3ProviderMatch {
 };
 
 struct S3UrlScheme {
+	//! Whether the url is a plain http:// or https:// url. Such a url is an S3 url only when a secret that opted in
+	//! with SIGN_HTTP_URLS covers it (S3SecretConfig::SignsHttpUrls); the request is then signed like any S3 request
+	static bool IsHttpUrl(const string &url);
 	static optional<S3ProviderMatch> TryMatch(const string &url);
 	static optional<S3ProviderMatch> TryMatch(const string &url, const vector<string> &scheme_alias_prefixes);
 	static S3ProviderMatch Match(const string &url);
@@ -71,8 +75,14 @@ struct S3SecretConfig {
 	static constexpr const char *GCS_SECRET_TYPE = "gcs";
 	static constexpr const char *AWS_SECRET_TYPE = "aws";
 
+	//! The option that makes a secret apply to plain http(s) urls inside its scope, signing them as S3 requests. Off by
+	//! default: a scope alone never attaches credentials to a host
+	static constexpr const char *SIGN_HTTP_URLS = "sign_http_urls";
+
 	static const array<const char *, 4> &SecretTypes();
 	static const array<const char *, 14> &CredentialMaterialKeys();
+	//! Whether an S3-type secret that opted in with SIGN_HTTP_URLS covers this http(s) url
+	static bool SignsHttpUrls(DatabaseInstance &db, const string &url);
 
 	static vector<string> DefaultSecretScope(const string &secret_type);
 	static void SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function);

@@ -276,7 +276,13 @@ bool S3FileSystem::CanHandleFile(const string &fpath) {
 	if (fpath.find("://") == string::npos) {
 		return false;
 	}
-	auto &config = DBConfig::GetConfig(GetBufferManager().GetDatabase());
+	auto &db = GetBufferManager().GetDatabase();
+	if (S3UrlScheme::IsHttpUrl(fpath)) {
+		// a plain http(s) url is S3's when a secret opted in to sign it (SIGN_HTTP_URLS); the HTTP file system is
+		// registered before this one, so claiming the url here is what routes it to S3
+		return S3SecretConfig::SignsHttpUrls(db, fpath);
+	}
+	auto &config = DBConfig::GetConfig(db);
 	return S3UrlScheme::TryMatch(fpath, S3UrlScheme::GetAliasPrefixes(config)).has_value();
 }
 

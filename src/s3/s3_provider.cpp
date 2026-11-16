@@ -1,3 +1,5 @@
+#include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 #include "s3/s3_provider.hpp"
 
 #include "s3/s3_auth.hpp"
@@ -242,6 +244,10 @@ const array<const char *, 14> &S3SecretConfig::CredentialMaterialKeys() {
 	return CREDENTIAL_MATERIAL_KEYS;
 }
 
+bool S3UrlScheme::IsHttpUrl(const string &url) {
+	return StringUtil::CIStartsWith(url, "http://") || StringUtil::CIStartsWith(url, "https://");
+}
+
 optional<S3ProviderMatch> S3UrlScheme::TryMatch(const string &url) {
 	auto lower_url = StringUtil::Lower(url);
 	for (const auto &provider_match : ProviderMatches()) {
@@ -308,7 +314,32 @@ vector<string> S3SecretConfig::DefaultSecretScope(const string &secret_type) {
 	throw InternalException("Unknown secret type found in httpfs extension: '%s'", secret_type);
 }
 
+bool S3SecretConfig::SignsHttpUrls(DatabaseInstance &db, const string &url) {
+	if (!S3UrlScheme::IsHttpUrl(url)) {
+		return false;
+	}
+	auto &secret_manager = SecretManager::Get(db);
+	auto transaction = CatalogTransaction::GetSystemTransaction(db);
+	for (auto secret_type : SecretTypes()) {
+		auto match = secret_manager.LookupSecret(transaction, url, secret_type);
+		if (!match.HasMatch()) {
+			continue;
+		}
+		auto &secret = match.GetSecret();
+		if (secret.GetType() != secret_type) {
+			continue;
+		}
+		Value sign;
+		if (dynamic_cast<const KeyValueSecret &>(secret).TryGetValue(SIGN_HTTP_URLS, sign) && !sign.IsNull() &&
+		    BooleanValue::Get(sign)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void S3SecretConfig::SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function) {
+	function.named_parameters[SIGN_HTTP_URLS] = LogicalType::BOOLEAN;
 	if (secret_type == S3_SECRET_TYPE) {
 		function.named_parameters["sse_c_key"] = LogicalType::VARCHAR;
 	} else if (secret_type == R2_SECRET_TYPE) {
@@ -333,6 +364,14 @@ void S3SecretConfig::ApplySecretDefaults(const CreateSecretInput &input, KeyValu
 
 bool S3SecretConfig::TryApplySecretOption(const CreateSecretInput &input, const string &name, const Value &value,
                                           KeyValueSecret &secret) {
+	if (name == SIGN_HTTP_URLS) {
+		if (value.type() != LogicalType::BOOLEAN) {
+			throw InvalidInputException("Invalid type passed to secret option: '%s', found '%s', expected: 'BOOLEAN'",
+			                            name, value.type().ToString());
+		}
+		secret.secret_map[Identifier(name)] = value;
+		return true;
+	}
 	if (name == "sse_c_key" && input.type == S3_SECRET_TYPE) {
 		auto sse_customer_key = S3SSECustomerKey::Create(value.ToString());
 		secret.secret_map["sse_c_key"] = sse_customer_key.GetKey();
