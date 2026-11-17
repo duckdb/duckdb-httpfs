@@ -79,7 +79,7 @@ TEST_CASE("HTTPFS owns browser parameters and preserves its provider", "[httpfs]
 		HTTPTestHelper::RequireQueryOk(
 		    con, "CREATE SECRET browser_headers (TYPE HTTP, EXTRA_HTTP_HEADERS MAP {'X-Secret': 'secret'})");
 		HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-		ClientContextFileOpener opener(*con.context);
+		ClientContextFileOpener opener(con.context->GetContext());
 		FileOpenerInfo info;
 		info.file.path = server.HTTPPath();
 		auto session = HTTPRequestSession::Create(&opener, &info);

@@ -1,6 +1,7 @@
 target_sources(
   unittest_httpfs
   PRIVATE browser_adapter_test.cpp
+          cancellation_test.cpp
           connection_reuse_test.cpp
           fd_exhaustion_test.cpp
           http_cache_policy_test.cpp

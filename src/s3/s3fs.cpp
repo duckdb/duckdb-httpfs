@@ -246,7 +246,7 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 }
 
 void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
-	auto context = FileOpener::TryGetClientContext(opener);
+	auto context = Context::TryGetClientContext(FileOpener::TryGetContext(opener));
 	auto refresh_enabled = S3RequestExecutor::CredentialRefreshEnabled(opener);
 	{
 		auto captured = request_session->Capture();

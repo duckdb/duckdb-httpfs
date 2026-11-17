@@ -24,7 +24,7 @@ static constexpr const char *SET_NULL = "SET s3_enable_deprecated_url_parameters
 static constexpr const char *MIGRATION_HINT = "opt in with SET s3_enable_deprecated_url_parameters = true";
 
 static bool Enabled(Connection &con) {
-	ClientContextFileOpener opener(*con.context);
+	ClientContextFileOpener opener(con.context->GetContext());
 	return S3Settings::URLParametersEnabled(&opener);
 }
 
@@ -46,7 +46,7 @@ static void Configure(Connection &con, const MockS3Server &server, const string 
 class ChangePolicyDuringRequest : public ClientContextFileOpener {
 public:
 	ChangePolicyDuringRequest(ClientContext &context, Connection &other, string statement)
-	    : ClientContextFileOpener(context), other(other), statement(std::move(statement)) {
+	    : ClientContextFileOpener(context.GetContext()), other(other), statement(std::move(statement)) {
 	}
 
 	SettingLookupResult TryGetCurrentSetting(const Identifier &key, Value &result, FileOpenerInfo &info) override {
