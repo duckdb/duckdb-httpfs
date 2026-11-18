@@ -734,11 +734,23 @@ static void RunBulkDeleteThrottleScenario(const string &client_implementation) {
 	INFO(MockS3DescribeObservations(observations));
 	REQUIRE(CountObservationsTarget(observations, "POST", 503, "delete") == 3);
 	REQUIRE(CountObservationsTarget(observations, "POST", 200, "delete") == 1);
+	REQUIRE(observations.size() == 4);
+	const auto &first = observations.front();
+	auto content_md5 = MockS3HeaderValues(first, "Content-MD5");
+	REQUIRE(content_md5.size() == 1);
+	REQUIRE_FALSE(content_md5.front().empty());
+	REQUIRE_FALSE(first.body_digest.empty());
+	for (const auto &observation : observations) {
+		REQUIRE(observation.target == first.target);
+		REQUIRE(observation.delete_key_count == 3);
+		REQUIRE(observation.body_digest == first.body_digest);
+		REQUIRE(MockS3HeaderValues(observation, "Content-MD5") == content_md5);
+	}
 }
 
-// A 500 is a server error, not throttling: a bulk delete is not sent again after it.
-static void RunBulkDeleteServerErrorNotRetriedScenario(const string &client_implementation) {
-	MockS3Server server(BulkDeleteFailureConfig(1000, 500, "InternalError"));
+// Only throttling permits replaying the original key-only DeleteObjects request.
+static void RunBulkDeleteErrorNotRetriedScenario(const string &client_implementation, int status, const string &code) {
+	MockS3Server server(BulkDeleteFailureConfig(1000, status, code));
 
 	DuckDB db(nullptr);
 	Connection con(db);
@@ -752,7 +764,8 @@ static void RunBulkDeleteServerErrorNotRetriedScenario(const string &client_impl
 
 	auto observations = server.Observations();
 	INFO(MockS3DescribeObservations(observations));
-	REQUIRE(CountObservationsTarget(observations, "POST", 500, "delete") == 1);
+	REQUIRE(observations.size() == 1);
+	REQUIRE(CountObservationsTarget(observations, "POST", status, "delete") == 1);
 }
 
 // A completion that stays throttled gets the throttled budget too, then is aborted.
@@ -868,7 +881,10 @@ static void RunAllTransientRetryScenarios(const string &client_implementation) {
 		RunBulkDeleteThrottleScenario(client_implementation);
 	}
 	SECTION("bulk delete does not retry a received 500") {
-		RunBulkDeleteServerErrorNotRetriedScenario(client_implementation);
+		RunBulkDeleteErrorNotRetriedScenario(client_implementation, 500, "InternalError");
+	}
+	SECTION("bulk delete does not retry a received RequestTimeout") {
+		RunBulkDeleteErrorNotRetriedScenario(client_implementation, 400, "RequestTimeout");
 	}
 	SECTION("a HEAD 400 is not retried because HEAD responses carry no error body") {
 		RunHeadNotRetriedScenario(client_implementation);
