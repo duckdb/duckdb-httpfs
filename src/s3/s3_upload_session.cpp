@@ -350,17 +350,37 @@ S3UploadSession::PreparedWrite S3UploadSession::PrepareWrite(const_data_ptr_t da
 }
 
 string S3UploadSession::InitializeMultipartUpload() {
+	// CreateMultipartUpload is a POST, so the generic retry (idempotent methods only) never resends it.  It is
+	// also, for a handle opened for writing, the first request the handle makes -- an open sends nothing --
+	// and it is sent only once the first part is full, which may be long after the open.  The connection it
+	// gets is then whatever the pool holds for the host: typically one kept alive from earlier requests and
+	// idle since, and S3 drops an idle connection after a few seconds without telling the client.  The POST
+	// goes out on a dead socket and comes back with a reset instead of a response.  That failure is safe to
+	// retry once on a fresh connection: a CreateMultipartUpload that did reach S3 but whose answer was lost
+	// leaves behind an upload with no parts, which stores nothing and is swept by the bucket's incomplete-upload
+	// lifecycle rule, so nothing is lost by sending it again; the client gives up only when a fresh connection
+	// fails as well.
 	string result;
-	auto request_result = s3fs.get().PostRequest(*request_session, S3RequestOperation::CREATE_MULTIPART_UPLOAD, path,
-	                                             result, nullptr, 0, S3RequestQuery({{"uploads", ""}}));
-	auto &response = request_result.response;
-	auto &request_context = request_result.context;
-	if (response->HasRequestError()) {
+	S3RequestResult request_result;
+	for (idx_t attempt = 0;; attempt++) {
+		result.clear();
+		request_result = s3fs.get().PostRequest(*request_session, S3RequestOperation::CREATE_MULTIPART_UPLOAD, path,
+		                                        result, nullptr, 0, S3RequestQuery({{"uploads", ""}}));
+		if (!request_result.response->HasRequestError()) {
+			break;
+		}
+		if (attempt == 0) {
+			request_session->InvalidateConnections();
+			continue;
+		}
 		throw S3AmbiguousUploadException(StringUtil::Format(
 		    "S3 multipart upload initialization for \"%s\" has an unknown outcome because the response was not "
-		    "received; the request was not retried and cannot be aborted without an upload ID",
-		    request_context.display_url));
+		    "received (%s); the request was retried once on a fresh connection and cannot be aborted without an "
+		    "upload ID",
+		    request_result.context.display_url, request_result.response->GetRequestError()));
 	}
+	auto &response = request_result.response;
+	auto &request_context = request_result.context;
 	if (!IsSuccessfulStatus(response->status)) {
 		throw GetStatusError(*response, request_context);
 	}
