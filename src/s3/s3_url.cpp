@@ -1,4 +1,5 @@
 #include "s3/s3_url.hpp"
+#include "s3/s3_provider.hpp"
 
 #include "duckdb/common/string_util.hpp"
 
@@ -172,11 +173,95 @@ string S3Url::GetDisplayUrl(const string &url, const S3AuthParams &params) {
 	return query_position == string::npos ? url : url.substr(0, query_position);
 }
 
+//! A plain http(s) url that a secret signs (SIGN_HTTP_URLS) names the request target directly: the host is used as
+//! written, and bucket and key are read off it against the secret's endpoint. Path style when the host is the endpoint
+//! (http://endpoint/bucket/key), virtual-hosted style when the host is a bucket below it (http://bucket.endpoint/key);
+//! for AWS, whose endpoint may be unresolved or regional, the 's3.' label marks where the bucket ends
+ParsedS3Url S3Url::ParseHttpUrl(const string &url, const S3AuthParams &params, const string &prefix) {
+	auto &route = params.GetProvider().GetRoute();
+	auto host_start = prefix.size();
+	auto path_start = url.find('/', host_start);
+	if (path_start == string::npos) {
+		throw IOException("URL needs to contain a '/' after the host");
+	}
+	auto request_host = url.substr(host_start, path_start - host_start);
+	auto rest = url.substr(path_start);
+	string query_string;
+	auto question_pos = rest.find('?');
+	if (question_pos != string::npos) {
+		query_string = rest.substr(question_pos + 1);
+		rest = rest.substr(0, question_pos);
+	}
+	// the path arrives encoded; it is decoded here and encoded again below, the way every S3 request is
+	auto path = Decode(rest);
+
+	auto host = StringUtil::Lower(request_host);
+	auto endpoint = StringUtil::Lower(params.GetURLParams().endpoint.GetAuthority());
+	string bucket;
+	string key;
+	bool use_path;
+	auto take_bucket_from_path = [&]() {
+		auto bucket_end = path.find('/', 1);
+		bucket = path.substr(1, bucket_end == string::npos ? string::npos : bucket_end - 1);
+		key = bucket_end == string::npos ? string() : path.substr(bucket_end);
+		use_path = true;
+	};
+	if (host == endpoint) {
+		take_bucket_from_path();
+	} else if (StringUtil::EndsWith(host, "." + endpoint)) {
+		bucket = request_host.substr(0, host.size() - endpoint.size() - 1);
+		key = path;
+		use_path = false;
+	} else if (StringUtil::EndsWith(host, ".amazonaws.com") && StringUtil::StartsWith(host, "s3.")) {
+		take_bucket_from_path();
+	} else if (StringUtil::EndsWith(host, ".amazonaws.com") && host.find(".s3.") != string::npos) {
+		bucket = request_host.substr(0, host.find(".s3."));
+		key = path;
+		use_path = false;
+	} else {
+		throw IOException("Cannot sign '%s' as an S3 request: its host '%s' is neither the endpoint of the secret that "
+		                  "covers it ('%s') nor a bucket below it",
+		                  url, request_host, endpoint);
+	}
+	if (bucket.empty()) {
+		throw IOException("URL needs to contain a bucket name");
+	}
+	if (key.empty()) {
+		// a bucket without a slash after it; a bare "/" is a bucket url, which a listing asks for
+		throw IOException("URL needs to contain key");
+	}
+
+	string encoded_path;
+	if (use_path) {
+		encoded_path = "/" + Encode(bucket, S3URLEncodeMode::PATH);
+	}
+	auto encoded_bucket_path = encoded_path.empty() ? "/" : encoded_path + "/";
+	encoded_path += Encode(key, S3URLEncodeMode::PATH);
+
+	ParsedS3Url result;
+	if (!query_string.empty()) {
+		auto query_params = ParseQueryParameters(query_string);
+		result.object_version = S3Provider::ParseObjectVersion(route.type, query_params);
+	}
+	result.prefix = prefix;
+	result.bucket = std::move(bucket);
+	result.key = key.substr(1);
+	result.query_string = std::move(query_string);
+	result.host = std::move(request_host);
+	result.encoded_path = std::move(encoded_path);
+	result.encoded_bucket_path = std::move(encoded_bucket_path);
+	result.use_ssl = StringUtil::CIStartsWith(prefix, "https://");
+	return result;
+}
+
 ParsedS3Url S3Url::Parse(const string &url, const S3AuthParams &params) {
 	string prefix, host, bucket, key, encoded_path, encoded_bucket_path, query_string;
 
 	auto &route = params.GetProvider().GetRoute();
 	prefix = route.prefix;
+	if (S3UrlScheme::IsHttpUrl(prefix)) {
+		return ParseHttpUrl(url, params, prefix);
+	}
 	D_ASSERT(StringUtil::CIStartsWith(url, prefix));
 	auto prefix_end_pos = url.find("//") + 2;
 	auto slash_pos = url.find('/', prefix_end_pos);
