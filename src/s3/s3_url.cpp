@@ -48,6 +48,31 @@ unordered_map<string, string> S3Url::ParseQueryParameters(const string &url_quer
 	return result;
 }
 
+string S3Url::GetCopySourcePath(string source, const S3AuthParams &params) {
+	StringUtil::Trim(source);
+	if (source.find('#') != string::npos) {
+		throw PermissionException("Cannot check S3 copy source, '#' in an object key must be URL-encoded");
+	}
+	if (source.find('?') != string::npos) {
+		throw PermissionException("Cannot check S3 copy source with query parameters, versionId is not supported");
+	}
+	// Copy sources use path encoding, so '+' must not become a space.
+	source = StringUtil::URLDecode(source, false);
+	if (!source.empty() && source[0] == '/') {
+		source.erase(0, 1);
+	}
+	auto slash = source.find('/');
+	// Only bucket/key sources map to filesystem paths, access point ARNs need a different mapping.
+	if (slash == string::npos || slash == 0 || slash + 1 == source.size() || source.find(':') < slash) {
+		throw PermissionException("Cannot check S3 copy source, expected a bucket and object key");
+	}
+	// A literal '?' key must not be checked as a URL with parameters.
+	if (params.GetURLParams().ParseURLParameters() && source.find('?') != string::npos) {
+		throw PermissionException("Cannot check S3 copy source with the current S3 URL parameter settings");
+	}
+	return params.GetProvider().GetRoute().prefix + source;
+}
+
 void S3Url::ReadQueryParams(const string &url_query_param, S3AuthConfig &config) {
 	if (url_query_param.empty()) {
 		return;

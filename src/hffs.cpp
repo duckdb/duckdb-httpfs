@@ -251,7 +251,7 @@ vector<OpenFileInfo> HuggingFaceFileSystem::Glob(const string &path, FileOpener 
 	}
 
 	FileOpenerInfo info;
-	info.file_path = path;
+	info.file.path = path;
 	auto request_session = HTTPRequestSession::Create(opener, info);
 	auto captured = request_session->Capture();
 	auto http_params = captured.snapshot->Params();
@@ -329,7 +329,7 @@ unique_ptr<HTTPFileHandle> HuggingFaceFileSystem::CreateHandle(const OpenFileInf
 	auto parsed_url = HFUrlParse(file.path);
 
 	FileOpenerInfo info;
-	info.file_path = file.path;
+	info.file.path = file.path;
 
 	auto request_session = HTTPRequestSession::Create(opener, info);
 	auto captured = request_session->Capture();

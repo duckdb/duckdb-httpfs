@@ -551,53 +551,6 @@ static void RunDisconnectedDeleteRetryScenario(const string &client_implementati
 	REQUIRE(S3TestHelper::CountObservations(observations, "DELETE", S3TestHelper::STALE_KEY_ID, 204) == 1);
 }
 
-static void RunBulkDeleteRetryScenario(const string &client, bool caching, MockS3BulkDeleteConfig faults, idx_t retries,
-                                       idx_t expected_attempts, bool succeeds) {
-	MockS3ServerConfig config;
-	config.object.bucket = S3TestHelper::BUCKET;
-	config.auth.refresh_target = MockS3RefreshTarget::PUT;
-	config.bulk_delete = std::move(faults);
-	MockS3Server server(std::move(config));
-	DuckDB db(nullptr);
-	Connection con(db);
-	S3TestHelper::ConfigureRefresh(db, con, server, client, caching, false);
-	S3TestHelper::RequireQueryOk(con, "SET http_retries=" + to_string(retries));
-	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=1");
-	S3TestHelper::RequireQueryOk(con, "SET http_retry_backoff=2");
-	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-	auto remove = [&]() {
-		auto &fs = FileSystem::GetFileSystem(*con.context);
-		fs.RemoveFiles(S3TestHelper::CreateBulkDeletePaths("s3", 2));
-	};
-	if (succeeds) {
-		remove();
-	} else {
-		auto error = RequireError(remove);
-		REQUIRE(StringUtil::Contains(error, "bulk"));
-	}
-	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
-
-	auto observations = server.Observations();
-	INFO(MockS3DescribeObservations(observations));
-	REQUIRE(observations.size() == expected_attempts);
-	REQUIRE(observations.front().body_size > 0);
-	REQUIRE_FALSE(observations.front().body_digest.empty());
-	auto content_md5 = MockS3HeaderValues(observations.front(), "Content-MD5");
-	REQUIRE(content_md5.size() == 1);
-	for (const auto &observation : observations) {
-		REQUIRE(observation.method == "POST");
-		REQUIRE(StringUtil::Contains(observation.target, "delete="));
-		REQUIRE(observation.target == observations.front().target);
-		REQUIRE(observation.delete_key_count == 2);
-		REQUIRE(observation.body_size == observations.front().body_size);
-		REQUIRE(observation.body_digest == observations.front().body_digest);
-		REQUIRE(MockS3HeaderValues(observation, "Content-MD5") == content_md5);
-	}
-	if (succeeds) {
-		REQUIRE(observations.back().status == 200);
-	}
-}
-
 // HEAD responses carry no body, so a RequestTimeout 400 cannot be classified as transient:
 // the HEAD is not retried and the open recovers through httpfs's range-GET fallback instead.
 static void RunHeadNotRetriedScenario(const string &client_implementation) {
@@ -662,18 +615,54 @@ static void RunCompletionWithoutRetriesScenario(const string &client_implementat
 	                                 0, 1);
 }
 
-static void RunMultipartInitializationThrottleScenario(const string &client_implementation) {
+static MockS3ServerConfig MultipartInitializationFailureConfig(idx_t failures, int status, const string &code,
+                                                               const string &body = string()) {
 	MockS3ServerConfig config;
 	config.object.bucket = S3TestHelper::BUCKET;
 	config.object.key = S3TestHelper::OBJECT_KEY;
 	config.auth.refresh_target = MockS3RefreshTarget::DELETE_OBJECT;
-	config.failures.transient_post_failures = 1000;
-	config.failures.transient_post_status = 429;
-	MockS3Server server(std::move(config));
+	config.failures.transient_post_failures = failures;
+	config.failures.transient_post_status = status;
+	config.failures.transient_post_code = code;
+	config.failures.transient_post_body = body;
+	return config;
+}
+
+// S3's error document says it throttled the multipart initialization, so it refused it: the initialization is sent
+// again, with core's throttled retries, and the upload completes. There was no upload id to abort.
+static void RunMultipartInitializationThrottleScenario(const string &client_implementation, int status,
+                                                       const string &code) {
+	MockS3Server server(MultipartInitializationFailureConfig(2, status, code));
 
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureUploadTest(db, con, server, client_implementation, 3);
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto handle = OpenWriter(con);
+	auto payload = MultipartPayload();
+	handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size());
+	handle->Close();
+	handle.reset();
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(CountObservationsTarget(observations, "POST", status, "uploads") == 2);
+	REQUIRE(CountObservationsTarget(observations, "POST", 200, "uploads") == 1);
+	REQUIRE(CountObservationsTarget(observations, "POST", 200, "uploadId") == 1);
+	REQUIRE(CountObservationsTarget(observations, "DELETE", 204, "uploadId") == 0);
+	REQUIRE(server.UploadedObject() == payload);
+}
+
+// A multipart initialization that stays throttled gets the throttled budget, http_retries and the throttle extras,
+// and then fails with S3's answer.
+static void RunMultipartInitializationThrottleExhaustedScenario(const string &client_implementation) {
+	MockS3Server server(MultipartInitializationFailureConfig(1000, 503, "SlowDown"));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	// One retry keeps the throttled back-off of the seven attempts near a second
+	ConfigureUploadTest(db, con, server, client_implementation, 1);
 	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 	auto handle = OpenWriter(con);
 	auto payload = MultipartPayload();
@@ -686,9 +675,103 @@ static void RunMultipartInitializationThrottleScenario(const string &client_impl
 
 	auto observations = server.Observations();
 	INFO(MockS3DescribeObservations(observations));
-	REQUIRE(CountObservationsTarget(observations, "POST", 429, "uploads") == 1);
+	REQUIRE(CountObservationsTarget(observations, "POST", 503, "uploads") ==
+	        1 + 1 + HTTPRetryBudget::THROTTLE_EXTRA_RETRIES);
 	REQUIRE(CountObservationsTarget(observations, "POST", 200, "uploadId") == 0);
 	REQUIRE(CountObservationsTarget(observations, "DELETE", 204, "uploadId") == 0);
+}
+
+// A multipart initialization is not sent again unless S3's error document says it was throttled: a 500, a 429 or 503
+// without an S3 error document, or with another error code, does not show that the request was refused.
+static void RunMultipartInitFailureNotRetriedScenario(const string &client_implementation, int status,
+                                                      const string &code, const string &body = string()) {
+	MockS3Server server(MultipartInitializationFailureConfig(1000, status, code, body));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureUploadTest(db, con, server, client_implementation, 3);
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto handle = OpenWriter(con);
+	auto payload = MultipartPayload();
+	RequireError([&]() { handle->Write(QueryContext(*con.context), data_ptr_cast(payload.data()), payload.size()); });
+	handle.reset();
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(CountObservationsTarget(observations, "POST", status, "uploads") == 1);
+	REQUIRE(CountObservationsTarget(observations, "DELETE", 204, "uploadId") == 0);
+}
+
+static MockS3ServerConfig BulkDeleteFailureConfig(idx_t failures, int status, const string &code) {
+	MockS3ServerConfig config;
+	config.object.bucket = S3TestHelper::BUCKET;
+	config.object.key = S3TestHelper::OBJECT_KEY;
+	// A refresh target that bulk deletes never exercise, so credential refresh never triggers here
+	config.auth.refresh_target = MockS3RefreshTarget::PUT;
+	config.bulk_delete.transient_failures = failures;
+	config.bulk_delete.transient_failure_status = status;
+	config.bulk_delete.transient_failure_code = code;
+	return config;
+}
+
+// A bulk delete is safe to send again, and a throttled one is: throttled three times with http_retries=1, it completes
+// only with the throttle extras.
+static void RunBulkDeleteThrottleScenario(const string &client_implementation) {
+	MockS3Server server(BulkDeleteFailureConfig(3, 503, "SlowDown"));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::ConfigureRefresh(db, con, server, client_implementation, false);
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=1");
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=1");
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	fs.RemoveFiles(S3TestHelper::CreateBulkDeletePaths("s3", 3));
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(CountObservationsTarget(observations, "POST", 503, "delete") == 3);
+	REQUIRE(CountObservationsTarget(observations, "POST", 200, "delete") == 1);
+	REQUIRE(observations.size() == 4);
+	const auto &first = observations.front();
+	auto content_md5 = MockS3HeaderValues(first, "Content-MD5");
+	REQUIRE(content_md5.size() == 1);
+	REQUIRE_FALSE(content_md5.front().empty());
+	REQUIRE_FALSE(first.body_digest.empty());
+	for (const auto &observation : observations) {
+		REQUIRE(observation.target == first.target);
+		REQUIRE(observation.delete_key_count == 3);
+		REQUIRE(observation.body_digest == first.body_digest);
+		REQUIRE(MockS3HeaderValues(observation, "Content-MD5") == content_md5);
+	}
+}
+
+// Only throttling permits replaying the original key-only DeleteObjects request.
+static void RunBulkDeleteErrorNotRetriedScenario(const string &client_implementation, int status, const string &code) {
+	MockS3Server server(BulkDeleteFailureConfig(1000, status, code));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	S3TestHelper::ConfigureRefresh(db, con, server, client_implementation, false);
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=3");
+	S3TestHelper::RequireQueryOk(con, "SET http_retry_wait_ms=1");
+	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	RequireError([&]() { fs.RemoveFiles(S3TestHelper::CreateBulkDeletePaths("s3", 3)); });
+	S3TestHelper::RequireQueryOk(con, "ROLLBACK");
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	REQUIRE(observations.size() == 1);
+	REQUIRE(CountObservationsTarget(observations, "POST", status, "delete") == 1);
+}
+
+// A completion that stays throttled gets the throttled budget too, then is aborted.
+static void RunCompletionThrottleExhaustedScenario(const string &client_implementation) {
+	RunFailedCompletionFaultScenario(client_implementation, {1000, 503, "SlowDown", "Please reduce your request rate."},
+	                                 1, 1 + 1 + HTTPRetryBudget::THROTTLE_EXTRA_RETRIES);
 }
 
 static void RunCompletionRefreshThenRetryScenario(const string &client_implementation) {
@@ -748,8 +831,30 @@ static void RunAllTransientRetryScenarios(const string &client_implementation) {
 	SECTION("multipart initialization does not retry a received RequestTimeout") {
 		RunMultipartInitNotRetriedScenario(client_implementation);
 	}
-	SECTION("multipart initialization does not receive core throttle retries") {
-		RunMultipartInitializationThrottleScenario(client_implementation);
+	SECTION("multipart initialization retries a throttled 429 TooManyRequests and completes") {
+		RunMultipartInitializationThrottleScenario(client_implementation, 429, "TooManyRequests");
+	}
+	SECTION("multipart initialization retries a throttled 503 SlowDown and completes") {
+		RunMultipartInitializationThrottleScenario(client_implementation, 503, "SlowDown");
+	}
+	SECTION("multipart initialization that stays throttled gets the throttled retry budget") {
+		RunMultipartInitializationThrottleExhaustedScenario(client_implementation);
+	}
+	SECTION("multipart initialization does not retry a received 500") {
+		RunMultipartInitFailureNotRetriedScenario(client_implementation, 500, "InternalError");
+	}
+	SECTION("multipart initialization does not retry a 503 without an S3 error document") {
+		RunMultipartInitFailureNotRetriedScenario(client_implementation, 503, string());
+	}
+	SECTION("multipart initialization does not retry a 429 without an S3 error document") {
+		RunMultipartInitFailureNotRetriedScenario(client_implementation, 429, string());
+	}
+	SECTION("multipart initialization does not retry a 503 with an error code other than throttling") {
+		RunMultipartInitFailureNotRetriedScenario(client_implementation, 503, "InternalError");
+	}
+	SECTION("multipart initialization does not retry a proxy's 503 page") {
+		RunMultipartInitFailureNotRetriedScenario(client_implementation, 503, string(),
+		                                          "<html><body><h1>503 Service Unavailable</h1></body></html>");
 	}
 	SECTION("multipart completion retries a received RequestTimeout within the configured budget") {
 		RunMultipartCompleteRequestTimeoutRetryScenario(client_implementation);
@@ -766,8 +871,20 @@ static void RunAllTransientRetryScenarios(const string &client_implementation) {
 	SECTION("multipart completion honors http_retries=0") {
 		RunCompletionWithoutRetriesScenario(client_implementation);
 	}
+	SECTION("multipart completion that stays throttled gets the throttled retry budget") {
+		RunCompletionThrottleExhaustedScenario(client_implementation);
+	}
 	SECTION("credential refresh preserves the multipart completion retry budget") {
 		RunCompletionRefreshThenRetryScenario(client_implementation);
+	}
+	SECTION("bulk delete retries a throttled 503 SlowDown with the throttled retry budget") {
+		RunBulkDeleteThrottleScenario(client_implementation);
+	}
+	SECTION("bulk delete does not retry a received 500") {
+		RunBulkDeleteErrorNotRetriedScenario(client_implementation, 500, "InternalError");
+	}
+	SECTION("bulk delete does not retry a received RequestTimeout") {
+		RunBulkDeleteErrorNotRetriedScenario(client_implementation, 400, "RequestTimeout");
 	}
 	SECTION("a HEAD 400 is not retried because HEAD responses carry no error body") {
 		RunHeadNotRetriedScenario(client_implementation);
@@ -1039,7 +1156,7 @@ static void RunThrottledListSignalTest(const string &client_implementation, idx_
 	ClientContextFileOpener opener(*con.context);
 	FileOpenerInfo info = {S3TestHelper::S3_PATH};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
-	auto session = S3RequestExecutor::CreateSession(opener, S3TestHelper::S3_PATH, auth_params);
+	auto session = S3RequestExecutor::CreateSession(opener, info.file, auth_params);
 	::AESStateSSLFactory encryption_util;
 	auto result = AWSListObjectV2::Request(encryption_util, *session, "s3://refresh-bucket/", "", S3ListMode::FLAT);
 
@@ -1104,52 +1221,6 @@ TEST_CASE("HTTPFS retries disconnected S3 DELETE responses", "[httpfs][s3][delet
 	}
 	SECTION("curl") {
 		RunDisconnectedDeleteRetryScenario("curl");
-	}
-}
-
-TEST_CASE("S3 bulk delete retries received transient errors", "[httpfs][s3][delete][retry][bulk_delete_retry]") {
-	for (const auto &client : {"httplib", "curl"}) {
-		for (bool caching : {false, true}) {
-			DYNAMIC_SECTION(client << ", caching=" << caching) {
-				MockS3BulkDeleteConfig faults;
-				faults.failure_count = 2;
-				SECTION("received throttle and server errors recover with the same delete payload") {
-					for (auto status : {429, 500, 503}) {
-						CAPTURE(status);
-						faults.failure_status = status;
-						RunBulkDeleteRetryScenario(client, caching, faults, 2, 3, true);
-					}
-				}
-				SECTION("received RequestTimeout recovers") {
-					faults.failure_status = 400;
-					faults.failure_body = "<Error><Code>RequestTimeout</Code></Error>";
-					RunBulkDeleteRetryScenario(client, caching, faults, 2, 3, true);
-				}
-				SECTION("persistent failures exhaust the configured retry budget") {
-					faults.failure_count = 1000;
-					RunBulkDeleteRetryScenario(client, caching, faults, 2, 3, false);
-				}
-				SECTION("zero retries makes only the original request") {
-					RunBulkDeleteRetryScenario(client, caching, faults, 0, 1, false);
-				}
-				SECTION("permanent errors are not retried") {
-					faults.failure_status = 400;
-					faults.failure_body = "<Error><Code>InvalidRequest</Code></Error>";
-					RunBulkDeleteRetryScenario(client, caching, faults, 2, 1, false);
-				}
-				SECTION("per-object errors remain visible") {
-					faults.failure_status = 200;
-					faults.failure_body = "<DeleteResult><Error><Key>object-0.bin</Key>"
-					                      "<Code>AccessDenied</Code></Error></DeleteResult>";
-					RunBulkDeleteRetryScenario(client, caching, faults, 2, 1, false);
-				}
-				SECTION("disconnected responses are not retried") {
-					faults.failure_status = 200;
-					faults.disconnect = true;
-					RunBulkDeleteRetryScenario(client, caching, faults, 2, 1, false);
-				}
-			}
-		}
 	}
 }
 

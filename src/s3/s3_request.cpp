@@ -17,7 +17,9 @@
 #include "duckdb/logging/file_system_logger.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/main/settings.hpp"
 
 #include <algorithm>
 
@@ -83,25 +85,26 @@ const string &S3RequestQuery::CanonicalQuery() const {
 
 const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation operation) {
 	static const array<S3RequestOperationInfo, 10> OPERATION_INFO = {
-	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true, false, false,
-	                            true},
-	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true, false, false, true},
-	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, true,
-	                            true},
-	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "deleting", true, false, false,
-	                            false},
-	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true, false, false,
-	                            false},
-	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false, true,
-	                            false, false},
+	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, true},
+	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, true},
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true,
+	                            S3ThrottleRetry::BY_STATUS, false, true, true},
+	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "deleting", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, false},
+	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::BUCKET, "listing", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, false},
+	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::BUCKET, "bulk-deleting from", false,
+	                            S3ThrottleRetry::BY_STATUS, false, false, false},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "initializing multipart upload for",
-	                            false, false, true, true},
-	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true, false, false,
-	                            true},
+	                            false, S3ThrottleRetry::BY_ERROR_CODE, false, true, true},
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "uploading to", true,
+	                            S3ThrottleRetry::BY_STATUS, false, false, true},
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "completing multipart upload for",
-	                            false, true, false, true},
+	                            false, S3ThrottleRetry::BY_STATUS, true, false, true},
 	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "aborting multipart upload for",
-	                            true, false, false, false}};
+	                            true, S3ThrottleRetry::BY_STATUS, false, false, false}};
 	auto index = static_cast<idx_t>(operation);
 	if (index >= OPERATION_INFO.size()) {
 		throw InternalException("Unknown S3 request operation");
@@ -369,12 +372,32 @@ static HTTPHeaders CreateConfiguredS3Headers(const HTTPConfiguredHeaders &config
 	return result;
 }
 
+static void VerifyCopySourceAccess(optional_ptr<DatabaseInstance> database, const S3AuthParams &auth_params,
+                                   const HTTPHeaders &headers) {
+	if (!database || Settings::Get<EnableExternalAccessSetting>(*database)) {
+		return;
+	}
+	// The request path identifies the destination. Also check access to each copy source.
+	for (const auto header_name : {"x-amz-copy-source", "x-goog-copy-source"}) {
+		if (!headers.HasHeader(header_name)) {
+			continue;
+		}
+		auto source_path = S3Url::GetCopySourcePath(headers.GetHeaderValue(header_name), auth_params);
+		if (!database->config.CanAccessFile(source_path, FileType::FILE_TYPE_REGULAR)) {
+			throw PermissionException(
+			    "Cannot access S3 copy source \"%s\" - file system operations are disabled by configuration",
+			    source_path);
+		}
+	}
+}
+
 HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const ParsedS3Url &parsed_url,
                                          S3RequestOperation operation, const S3RequestQuery &query,
                                          const S3AuthParams &auth_params, string date_now, string datetime_now,
                                          string payload_hash, string content_type, string content_md5,
                                          const HTTPConfiguredHeaders &configured_headers,
-                                         const HTTPReadCondition &read_condition) {
+                                         const HTTPReadCondition &read_condition,
+                                         optional_ptr<DatabaseInstance> database) {
 	const auto &host = parsed_url.GetHost();
 	auto &operation_info = GetOperationInfo(operation);
 	const auto &encoded_path = operation_info.target == S3RequestTarget::BUCKET ? parsed_url.GetEncodedBucketPath()
@@ -383,6 +406,7 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	auto &credentials = auth_params.GetCredentials();
 	auto &request_options = auth_params.GetRequestOptions();
 	auto headers = CreateConfiguredS3Headers(configured_headers, provider.GetType());
+	VerifyCopySourceAccess(database, auth_params, headers);
 	auto auth_type = provider.GetAuthType(auth_params);
 	// GCS rejects x-goog-if-generation-match on AWS4-HMAC-SHA256 (HMAC key) requests with 400 ExcessHeaderValues.
 	// The response generation is still validated after the read.
@@ -450,16 +474,10 @@ static bool IsAuthRefreshStatus(const HTTPResponse &response) {
 	return response.status == HTTPStatusCode::BadRequest_400 && IsAuthRefreshErrorBody(response.body);
 }
 
-static S3AuthParams ReadS3AuthParams(optional_ptr<FileOpener> opener, const string &path,
-                                     const S3AuthURLParams &previous_url) {
-	FileOpenerInfo info = {path};
-	return S3AuthResolver::Resolve(opener, info, S3AuthResolveOptions::ForRefresh(previous_url));
-}
-
 S3RefreshableHTTPParams S3RequestExecutor::ReadRefreshableHTTPParams(HTTPFSUtil &http_util,
                                                                      optional_ptr<FileOpener> opener,
-                                                                     const string &path) {
-	FileOpenerInfo info = {path};
+                                                                     const OpenFileInfo &file) {
+	FileOpenerInfo info(file);
 	auto params = HTTPFSUtil::InitializeRawParameters(http_util, opener, info);
 	return S3RefreshableHTTPParams(*params);
 }
@@ -484,20 +502,22 @@ bool S3RequestExecutor::CredentialRefreshEnabled(optional_ptr<FileOpener> opener
 	return true;
 }
 
-static bool ReloadS3AuthMaterial(optional_ptr<FileOpener> opener, const string &path, S3AuthParams &auth_params,
+static bool ReloadS3AuthMaterial(optional_ptr<FileOpener> opener, const OpenFileInfo &file, S3AuthParams &auth_params,
                                  HTTPFSParams &http_params, bool preserve_region) {
 	if (!opener) {
 		return false;
 	}
 
 	auto previous_region = auth_params.GetCredentials().region;
-	auto reloaded_auth_params = ReadS3AuthParams(opener, path, auth_params.GetURLParams());
+	FileOpenerInfo info(file);
+	auto reloaded_auth_params =
+	    S3AuthResolver::Resolve(opener, info, S3AuthResolveOptions::ForRefresh(auth_params.GetURLParams()));
 	if (preserve_region && !previous_region.empty() &&
 	    reloaded_auth_params.GetCredentials().region != previous_region) {
 		reloaded_auth_params = reloaded_auth_params.WithRegion(std::move(previous_region));
 	}
 	auto reloaded_http_params =
-	    S3RequestExecutor::ReadRefreshableHTTPParams(http_params.http_util.Cast<HTTPFSUtil>(), opener, path);
+	    S3RequestExecutor::ReadRefreshableHTTPParams(http_params.http_util.Cast<HTTPFSUtil>(), opener, file);
 
 	if (reloaded_auth_params == auth_params && reloaded_http_params == S3RefreshableHTTPParams(http_params)) {
 		return false;
@@ -509,7 +529,7 @@ static bool ReloadS3AuthMaterial(optional_ptr<FileOpener> opener, const string &
 }
 
 static bool TryRefreshS3AuthMaterial(optional_ptr<ClientContext> context, optional_ptr<FileOpener> opener,
-                                     const string &path, S3AuthParams &auth_params, HTTPFSParams &http_params,
+                                     const OpenFileInfo &file, S3AuthParams &auth_params, HTTPFSParams &http_params,
                                      bool credential_refresh_enabled, bool preserve_region = false) {
 	if (!credential_refresh_enabled) {
 		return false;
@@ -517,19 +537,26 @@ static bool TryRefreshS3AuthMaterial(optional_ptr<ClientContext> context, option
 	if (!context) {
 		return false;
 	}
-	if (ReloadS3AuthMaterial(opener, path, auth_params, http_params, preserve_region)) {
+	if (ReloadS3AuthMaterial(opener, file, auth_params, http_params, preserve_region)) {
 		return true;
 	}
 
 	auto http_state = HTTPState::TryGetState(*context);
 	return http_state->RunCredentialRefresh([&]() {
-		if (ReloadS3AuthMaterial(opener, path, auth_params, http_params, preserve_region)) {
+		if (ReloadS3AuthMaterial(opener, file, auth_params, http_params, preserve_region)) {
 			return true;
 		}
-		if (!TryRefreshS3SecretForPath(*context, path)) {
+		string secret_name;
+		if (file.extended_info && file.extended_info->TryGetSecretName(secret_name)) {
+			auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*context);
+			auto secret = SecretManager::Get(*context).GetSecretByName(transaction, secret_name);
+			if (!secret || !CreateS3SecretFunctions::TryRefreshS3Secret(*context, *secret)) {
+				return false;
+			}
+		} else if (!TryRefreshS3SecretForPath(*context, file.path)) {
 			return false;
 		}
-		return ReloadS3AuthMaterial(opener, path, auth_params, http_params, preserve_region);
+		return ReloadS3AuthMaterial(opener, file, auth_params, http_params, preserve_region);
 	});
 }
 
@@ -563,9 +590,10 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	result.http_url = operation_info.target == S3RequestTarget::BUCKET
 	                      ? parsed_s3_url.GetBucketHTTPUrl(query.WireQuery())
 	                      : parsed_s3_url.GetHTTPUrl(query.WireQuery());
+	auto database = result.http_params->http_util.Cast<HTTPFSUtil>().TryGetDatabase();
 	result.headers = S3RequestUtil::CreateHeaders(
 	    encryption_util, parsed_s3_url, spec.operation, query, result.auth_params, "", "", spec.payload_hash,
-	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition);
+	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition, database);
 	return result;
 }
 
@@ -673,6 +701,43 @@ static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const
 	}
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
 }
+// Whether the body is an S3 error document saying that the request was throttled: SlowDown, or TooManyRequests.
+static bool HasThrottlingErrorCode(const HTTPResponse &response) {
+	if (response.body.empty()) {
+		return false;
+	}
+	S3XMLError error;
+	return S3XMLResponseParser::TryParseError(response.body, error) &&
+	       (error.code == "SlowDown" || error.code == "TooManyRequests");
+}
+
+// Whether S3 throttled the request, which then gets core's throttled retries. Narrower than
+// IsRetryableReceivedResponse on purpose: a RequestTimeout or a 500 is not throttling. An operation that is safe to
+// send again counts HTTP 429 and 503, and a throttling error document, which can also come behind HTTP 200
+// (CompleteMultipartUpload). One that is otherwise not sent again (CreateMultipartUpload) counts only the error
+// document: a bare 503, another error code or a body that is not an S3 error document does not show that the request
+// was refused, so it gets the single attempt it always had.
+static bool IsThrottledReceivedResponse(const S3RequestData &request_data, const HTTPResponse &response) {
+	if (response.HasRequestError()) {
+		return false;
+	}
+	auto &operation_info = S3RequestUtil::GetOperationInfo(request_data.operation);
+	auto status = static_cast<int>(response.status);
+	if (operation_info.retry_throttled == S3ThrottleRetry::BY_ERROR_CODE) {
+		// A successful response is the operation's result, not a refusal
+		return status >= 400 && HasThrottlingErrorCode(response);
+	}
+	if (response.status == HTTPStatusCode::TooManyRequests_429 ||
+	    response.status == HTTPStatusCode::ServiceUnavailable_503) {
+		return true;
+	}
+	// A successful response's body is only looked at for an operation whose success can carry an error document: a
+	// read's body is the object.
+	if (status < 400 && !operation_info.retry_received_response) {
+		return false;
+	}
+	return HasThrottlingErrorCode(response);
+}
 
 S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,
                                        const S3RequestSpec &spec, const RequestCallback &request,
@@ -702,7 +767,15 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 					retried_region = true;
 					continue;
 				}
-				bool should_retry = received_response && ShouldRetryReceivedResponse(request_data, *response);
+				// A throttled request gets core's throttled retries: more of them, backed off further, and counted as
+				// throttled. Checked first, as it holds for operations that are otherwise not sent again.
+				const bool throttled = received_response && IsThrottledReceivedResponse(request_data, *response);
+				string retry_after;
+				if (throttled && response->HasHeader("Retry-After")) {
+					retry_after = response->GetHeaderValue("Retry-After");
+				}
+				bool should_retry =
+				    throttled || (received_response && ShouldRetryReceivedResponse(request_data, *response));
 				if (received_response && response_callback &&
 				    response_callback(request_data, *response) == S3ReceivedResponseAction::RETRY_FRESH_CONNECTION) {
 					D_ASSERT(fresh_connection);
@@ -712,7 +785,10 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 				result = {std::move(response),
 				          S3RequestContext {request_data.operation, std::move(request_data.captured),
 				                            std::move(request_data.display_url)}};
-				return should_retry ? HTTPRetryDecision::Retry() : HTTPRetryDecision::Finish();
+				if (!should_retry) {
+					return HTTPRetryDecision::Finish();
+				}
+				return throttled ? HTTPRetryDecision::Throttled(retry_after) : HTTPRetryDecision::Retry();
 			} catch (std::exception &ex) {
 				ErrorData error(ex);
 				if (!retried_auth_refresh && IsAuthRefreshStatus(error) && refresh_auth_params(request_data)) {
@@ -751,9 +827,8 @@ bool S3RequestExecutor::TryRefreshSession(HTTPRequestSession &session, const S3R
 	ClientContextFileOpener opener(*context);
 	auto refreshed_auth_params = current_snapshot.auth_params;
 	auto refreshed_http_params = current_snapshot.Params();
-	if (!TryRefreshS3AuthMaterial(context, opener, current_snapshot.refresh_path, refreshed_auth_params,
-	                              refreshed_http_params, current_snapshot.credential_refresh_enabled,
-	                              current_snapshot.region_redirected)) {
+	if (!TryRefreshS3AuthMaterial(context, opener, current_snapshot.file, refreshed_auth_params, refreshed_http_params,
+	                              current_snapshot.credential_refresh_enabled, current_snapshot.region_redirected)) {
 		return session.Capture().snapshot->Cast<S3RequestSnapshot>().credential_generation !=
 		       failed_snapshot.credential_generation;
 	}
@@ -776,10 +851,9 @@ bool S3RequestExecutor::TryRefreshSession(HTTPRequestSession &session, const S3R
 		}
 		auto merged_http_params = latest.Params();
 		refreshed_http_material.Apply(merged_http_params);
-		auto replacement = make_shared_ptr<S3RequestSnapshot>(
-		    merged_http_params, merged_auth_params, latest.refresh_path, latest.client_context,
-		    latest.credential_refresh_enabled, latest.region_redirected, latest.credential_generation + 1,
-		    latest.multipart_upload_policy);
+		auto replacement = latest.Copy(merged_http_params);
+		replacement->auth_params = merged_auth_params;
+		replacement->credential_generation = latest.credential_generation + 1;
 		auto publication = session.TryPublish(current.snapshot, std::move(replacement));
 		if (publication.published) {
 			return true;
@@ -799,10 +873,9 @@ bool S3RequestExecutor::SetSessionRegion(HTTPRequestSession &session, const stri
 		auto auth_params = snapshot.auth_params;
 		previous_region = auth_params.GetCredentials().region;
 		auth_params = auth_params.WithRegion(correct_region);
-		auto replacement =
-		    make_shared_ptr<S3RequestSnapshot>(snapshot.Params(), auth_params, snapshot.refresh_path,
-		                                       snapshot.client_context, snapshot.credential_refresh_enabled, true,
-		                                       snapshot.credential_generation, snapshot.multipart_upload_policy);
+		auto replacement = snapshot.Copy();
+		replacement->auth_params = auth_params;
+		replacement->region_redirected = true;
 		auto publication = session.TryPublish(current.snapshot, std::move(replacement));
 		if (publication.published) {
 			return true;
@@ -888,14 +961,24 @@ HTTPException S3RequestUtil::GetRequestError(const S3RequestContext &request_con
 }
 
 S3RequestSnapshot::S3RequestSnapshot(const HTTPFSParams &http_params, const S3AuthParams &auth_params_p,
-                                     string refresh_path_p, weak_ptr<ClientContext> client_context_p,
+                                     OpenFileInfo file_p, weak_ptr<ClientContext> client_context_p,
                                      bool credential_refresh_enabled_p, bool region_redirected_p,
                                      idx_t credential_generation_p,
                                      optional<S3MultipartUploadPolicy> multipart_upload_policy_p)
-    : HTTPRequestSnapshot(http_params, TYPE), auth_params(auth_params_p), refresh_path(std::move(refresh_path_p)),
+    : HTTPRequestSnapshot(http_params, TYPE), auth_params(auth_params_p), file(std::move(file_p)),
       client_context(std::move(client_context_p)), credential_refresh_enabled(credential_refresh_enabled_p),
       region_redirected(region_redirected_p), credential_generation(credential_generation_p),
       multipart_upload_policy(std::move(multipart_upload_policy_p)) {
+}
+
+shared_ptr<S3RequestSnapshot> S3RequestSnapshot::Copy() const {
+	return Copy(Params());
+}
+
+shared_ptr<S3RequestSnapshot> S3RequestSnapshot::Copy(const HTTPFSParams &http_params) const {
+	return make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, file, client_context,
+	                                          credential_refresh_enabled, region_redirected, credential_generation,
+	                                          multipart_upload_policy);
 }
 
 string S3RequestUtil::GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len) {
@@ -1137,9 +1220,10 @@ HTTPException S3FileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse 
 	                               S3Url::GetDisplayUrl(url, auth_params));
 }
 
-shared_ptr<HTTPRequestSession> S3RequestExecutor::CreateSession(optional_ptr<FileOpener> opener, const string &path,
+shared_ptr<HTTPRequestSession> S3RequestExecutor::CreateSession(optional_ptr<FileOpener> opener,
+                                                                const OpenFileInfo &file,
                                                                 const S3AuthParams &auth_params) {
-	FileOpenerInfo info = {path};
+	FileOpenerInfo info(file);
 	auto request_session = HTTPRequestSession::Create(opener, info);
 	weak_ptr<ClientContext> weak_context;
 	auto context = FileOpener::TryGetClientContext(opener);
@@ -1149,7 +1233,7 @@ shared_ptr<HTTPRequestSession> S3RequestExecutor::CreateSession(optional_ptr<Fil
 	}
 	auto captured = request_session->Capture();
 	request_session->TryPublish(captured.snapshot,
-	                            make_shared_ptr<S3RequestSnapshot>(captured.snapshot->Params(), auth_params, path,
+	                            make_shared_ptr<S3RequestSnapshot>(captured.snapshot->Params(), auth_params, file,
 	                                                               std::move(weak_context), refresh_enabled));
 	return request_session;
 }

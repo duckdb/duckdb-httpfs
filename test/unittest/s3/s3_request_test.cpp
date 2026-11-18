@@ -1961,27 +1961,34 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 		RequestType request_type;
 		S3RequestTarget target;
 		bool retry_timeout;
+		S3ThrottleRetry retry_throttled;
 		bool retry_received_response;
 		bool uses_kms_headers;
 		bool uses_sse_customer_headers;
 	};
+	// Every operation is sent again when S3 throttles it. CreateMultipartUpload, which is otherwise never sent
+	// again, only when S3's error document says SlowDown or TooManyRequests
 	const array<ExpectedOperationInfo, 10> expected {{
-	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
-	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
-	    {S3RequestOperation::PUT_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, true, true},
-	    {S3RequestOperation::DELETE_OBJECT, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, false, false,
-	     false},
-	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true, false, false,
-	     false},
-	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false, true, false,
-	     false},
-	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, false,
-	     true, true},
-	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true, false, false, true},
-	    {S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false, true,
-	     false, true},
-	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true, false,
-	     false, false},
+	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, true},
+	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, true},
+	    {S3RequestOperation::PUT_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, true, true},
+	    {S3RequestOperation::DELETE_OBJECT, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, false},
+	    {S3RequestOperation::LIST_OBJECTS, RequestType::GET_REQUEST, S3RequestTarget::BUCKET, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, false},
+	    {S3RequestOperation::DELETE_OBJECTS, RequestType::POST_REQUEST, S3RequestTarget::BUCKET, false,
+	     S3ThrottleRetry::BY_STATUS, false, false, false},
+	    {S3RequestOperation::CREATE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false,
+	     S3ThrottleRetry::BY_ERROR_CODE, false, true, true},
+	    {S3RequestOperation::UPLOAD_PART, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, true},
+	    {S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, RequestType::POST_REQUEST, S3RequestTarget::OBJECT, false,
+	     S3ThrottleRetry::BY_STATUS, true, false, true},
+	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, false, false},
 	}};
 
 	for (const auto &entry : expected) {
@@ -1989,6 +1996,7 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 		REQUIRE(info.request_type == entry.request_type);
 		REQUIRE(info.target == entry.target);
 		REQUIRE(info.retry_timeout == entry.retry_timeout);
+		REQUIRE(info.retry_throttled == entry.retry_throttled);
 		REQUIRE(info.retry_received_response == entry.retry_received_response);
 		REQUIRE(info.uses_kms_headers == entry.uses_kms_headers);
 		REQUIRE(info.uses_sse_customer_headers == entry.uses_sse_customer_headers);
@@ -2130,7 +2138,7 @@ TEST_CASE("S3 rejects configured header conflicts before request dispatch", "[ht
 	config.credentials.access_key_id = "key";
 	config.credentials.secret_access_key = "secret";
 	auto auth_params = ResolveTestAuth(std::move(config));
-	auto snapshot = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, "s3://bucket/key",
+	auto snapshot = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, OpenFileInfo("s3://bucket/key"),
 	                                                   weak_ptr<ClientContext>(), false);
 	HTTPRequestSession session(snapshot);
 	::AESStateSSLFactory encryption_util;
@@ -2223,8 +2231,8 @@ TEST_CASE("S3 region correction retains spent retries", "[httpfs][s3][retry][sha
 		params.retry_wait_ms = 0;
 		auto config = TestAuthConfig();
 		config.credentials.region = "us-east-1";
-		auto snapshot = make_shared_ptr<S3RequestSnapshot>(params, ResolveTestAuth(config), "s3://bucket/key",
-		                                                   weak_ptr<ClientContext>(), false);
+		auto snapshot = make_shared_ptr<S3RequestSnapshot>(
+		    params, ResolveTestAuth(config), OpenFileInfo("s3://bucket/key"), weak_ptr<ClientContext>(), false);
 		HTTPRequestSession session(snapshot);
 		::AESStateSSLFactory encryption_util;
 		S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
@@ -2268,8 +2276,8 @@ TEST_CASE("S3 malformed response cleanup does not require retry admission", "[ht
 			HTTPTestHelper::Configure(db, con, retries, client, true);
 			HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
 			ClientContextFileOpener opener(*con.context);
-			auto session =
-			    S3RequestExecutor::CreateSession(opener, "s3://bucket/key", ResolveTestAuth(TestAuthConfig()));
+			auto session = S3RequestExecutor::CreateSession(opener, OpenFileInfo("s3://bucket/key"),
+			                                                ResolveTestAuth(TestAuthConfig()));
 			::AESStateSSLFactory encryption_util;
 			S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
 			idx_t attempts = 0;
@@ -2314,8 +2322,8 @@ TEST_CASE("Overlapping S3 operations have independent retry budgets", "[httpfs][
 	HTTPFSParams params(http_util);
 	params.retries = 2;
 	params.retry_wait_ms = 0;
-	auto snapshot = make_shared_ptr<S3RequestSnapshot>(params, ResolveTestAuth(TestAuthConfig()), "s3://bucket/key",
-	                                                   weak_ptr<ClientContext>(), false);
+	auto snapshot = make_shared_ptr<S3RequestSnapshot>(
+	    params, ResolveTestAuth(TestAuthConfig()), OpenFileInfo("s3://bucket/key"), weak_ptr<ClientContext>(), false);
 	HTTPRequestSession session(snapshot);
 	::AESStateSSLFactory encryption_util;
 	S3RequestSpec spec {"s3://bucket/key", S3RequestOperation::LIST_OBJECTS, {}, "", "", ""};
@@ -2346,7 +2354,7 @@ TEST_CASE("S3 request error context belongs to the final attempt", "[httpfs][s3]
 	config.credentials.region = "request-region";
 	config.endpoint = "s3.request-region.amazonaws.com";
 	auto auth_params = ResolveTestAuth(std::move(config));
-	auto snapshot = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, "s3://bucket/key",
+	auto snapshot = make_shared_ptr<S3RequestSnapshot>(http_params, auth_params, OpenFileInfo("s3://bucket/key"),
 	                                                   weak_ptr<ClientContext>(), false);
 	HTTPRequestSession session(snapshot);
 	::AESStateSSLFactory encryption_util;
