@@ -1,0 +1,82 @@
+# name: test/sql/httpfs/preload_ca_certificates.test
+# description: Explicit CA preloading uses the configured bundle and obeys filesystem restrictions
+# group: [httpfs]
+
+require httpfs
+
+require skip_reload
+
+foreach client curl httplib
+
+load
+
+statement ok another_connection
+SELECT 1;
+
+statement ok uncached_connection
+SET ca_cert_file = 'Makefile';
+
+statement ok
+SET httpfs_client_implementation = '{client}';
+
+# Preloading reads bytes without a request or parsing them as certificates.
+statement ok
+SET GLOBAL ca_cert_file = 'README.md';
+
+statement ok
+CALL httpfs_preload_ca_certificates();
+
+statement ok
+SET disabled_filesystems = 'LocalFileSystem';
+
+# The cached bundle is shared across connections and repeated calls are safe.
+statement ok another_connection
+CALL httpfs_preload_ca_certificates();
+
+statement error
+SELECT * FROM read_csv_auto('README.md');
+----
+File system LocalFileSystem has been disabled by configuration
+
+# A different, uncached path still needs filesystem access.
+statement error uncached_connection
+CALL httpfs_preload_ca_certificates();
+----
+File system LocalFileSystem has been disabled by configuration
+
+load
+
+statement ok
+SET httpfs_client_implementation = '{client}';
+
+# Missing files fail at execution, not while preparing the command.
+statement ok
+SET ca_cert_file = 'httpfs-nonexistent-ca-bundle.pem';
+
+statement ok
+PREPARE preload AS SELECT * FROM httpfs_preload_ca_certificates();
+
+statement error
+EXECUTE preload;
+----
+httpfs-nonexistent-ca-bundle.pem
+
+# Execution resolves the current setting, rather than retaining the prepared path.
+statement ok
+SET ca_cert_file = 'README.md';
+
+statement ok
+EXECUTE preload;
+
+statement ok
+SET ca_cert_file = 'Makefile';
+
+statement ok
+SET enable_external_access = false;
+
+statement error
+EXECUTE preload;
+----
+Permission Error
+
+endloop
