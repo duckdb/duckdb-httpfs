@@ -11,6 +11,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
   cancel-in-progress: true
 
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
 jobs:
   prepare:
     runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-slim' || 'ubuntu-slim' }}
@@ -32,7 +37,7 @@ jobs:
         main:
           config: extension_config.cmake
           toolchain: main
-      opt_in_archs: windows_arm64
+      opt_in_archs: windows_arm64;wasm_threads
       runners: ${{ needs.prepare.outputs.runners }}
 
   deploy:
@@ -46,7 +51,7 @@ jobs:
       duckdb_version: ${{ needs.build.outputs.duckdb_version }}
       duckdb_commit: ${{ needs.build.outputs.duckdb_commit }}
       deploy_extensions: httpfs
-      deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
+      deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
 
   code-quality:
