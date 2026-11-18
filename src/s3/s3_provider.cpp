@@ -234,11 +234,14 @@ const array<const char *, 4> &S3SecretConfig::SecretTypes() {
 	return SECRET_TYPES;
 }
 
-const array<const char *, 14> &S3SecretConfig::CredentialMaterialKeys() {
-	static constexpr array<const char *, 14> CREDENTIAL_MATERIAL_KEYS = {
-	    "key_id",     "secret",   "session_token",          "region",         "endpoint",     "kms_key_id",
-	    "url_style",  "use_ssl",  "url_compatibility_mode", "requester_pays", "bearer_token", "user_project",
-	    "account_id", "sse_c_key"};
+const array<const char *, 17> &S3SecretConfig::CredentialMaterialKeys() {
+	static constexpr array<const char *, 17> CREDENTIAL_MATERIAL_KEYS = {
+	    "key_id",         "secret",           "session_token",
+	    "region",         "endpoint",         "kms_key_id",
+	    "url_style",      "use_ssl",          "url_compatibility_mode",
+	    "requester_pays", "bearer_token",     "user_project",
+	    "account_id",     "sse_c_key",        "signer_url",
+	    "signer_headers", "signer_properties"};
 	return CREDENTIAL_MATERIAL_KEYS;
 }
 
@@ -311,6 +314,9 @@ vector<string> S3SecretConfig::DefaultSecretScope(const string &secret_type) {
 void S3SecretConfig::SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function) {
 	if (secret_type == S3_SECRET_TYPE) {
 		function.named_parameters["sse_c_key"] = LogicalType::VARCHAR;
+		function.named_parameters["signer_url"] = LogicalType::VARCHAR;
+		function.named_parameters["signer_headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
+		function.named_parameters["signer_properties"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
 	} else if (secret_type == R2_SECRET_TYPE) {
 		function.named_parameters["account_id"] = LogicalType::VARCHAR;
 	} else if (secret_type == GCS_SECRET_TYPE) {
@@ -331,8 +337,38 @@ void S3SecretConfig::ApplySecretDefaults(const CreateSecretInput &input, KeyValu
 	secret.secret_map["url_style"] = "path";
 }
 
+static void ApplySignerURL(const CreateSecretInput &input, const Value &value, KeyValueSecret &secret) {
+	for (const auto key : {"key_id", "secret", "session_token"}) {
+		if (input.options.find(key) != input.options.end()) {
+			throw InvalidInputException("SIGNER_URL cannot be combined with %s: the remote signer signs requests "
+			                            "instead of local credentials",
+			                            StringUtil::Upper(key));
+		}
+	}
+	auto url = value.ToString();
+	auto lower_url = StringUtil::Lower(url);
+	if (!StringUtil::StartsWith(lower_url, "http://") && !StringUtil::StartsWith(lower_url, "https://")) {
+		throw InvalidInputException("SIGNER_URL must be an http:// or https:// URL, found '%s'", url);
+	}
+	secret.secret_map["signer_url"] = std::move(url);
+}
+
 bool S3SecretConfig::TryApplySecretOption(const CreateSecretInput &input, const string &name, const Value &value,
                                           KeyValueSecret &secret) {
+	if (name == "signer_url" && input.type == S3_SECRET_TYPE) {
+		ApplySignerURL(input, value, secret);
+		return true;
+	}
+	if ((name == "signer_headers" || name == "signer_properties") && input.type == S3_SECRET_TYPE) {
+		if (input.options.find("signer_url") == input.options.end()) {
+			throw InvalidInputException("%s requires SIGNER_URL", StringUtil::Upper(name));
+		}
+		secret.secret_map[Identifier(name)] = value;
+		if (name == "signer_headers") {
+			secret.redact_keys.insert("signer_headers");
+		}
+		return true;
+	}
 	if (name == "sse_c_key" && input.type == S3_SECRET_TYPE) {
 		auto sse_customer_key = S3SSECustomerKey::Create(value.ToString());
 		secret.secret_map["sse_c_key"] = sse_customer_key.GetKey();
@@ -362,6 +398,9 @@ S3Provider::S3Provider(S3ProviderMatch route_p, S3CompatibilityProfile profile_p
 }
 
 S3AuthType S3Provider::GetAuthType(const S3AuthParams &auth_params) const {
+	if (auth_params.GetRemoteSigner().IsEnabled()) {
+		return S3AuthType::REMOTE_SIGNED;
+	}
 	auto &credentials = auth_params.GetCredentials();
 	if (GetType() == S3ProviderType::GCS && !credentials.oauth2_bearer_token.empty()) {
 		return S3AuthType::BEARER;

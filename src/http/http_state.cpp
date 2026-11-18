@@ -139,8 +139,38 @@ void HTTPState::Reset() {
 	total_bytes_sent = 0;
 
 	// Reset per-path state
-	annotated_lock_guard<annotated_mutex> lock(file_states_mutex);
-	file_states.clear();
+	{
+		annotated_lock_guard<annotated_mutex> lock(file_states_mutex);
+		file_states.clear();
+	}
+	annotated_lock_guard<annotated_mutex> lock(signed_requests_mutex);
+	signed_requests.clear();
+}
+
+bool HTTPState::TryGetSignedRequest(const string &key, HTTPSignedRequest &result) {
+	annotated_lock_guard<annotated_mutex> lock(signed_requests_mutex);
+	auto entry = signed_requests.find(key);
+	if (entry == signed_requests.end()) {
+		return false;
+	}
+	if (entry->second.expires_at <= Timestamp::GetCurrentTimestamp()) {
+		signed_requests.erase(entry);
+		return false;
+	}
+	result = entry->second.request;
+	return true;
+}
+
+void HTTPState::PutSignedRequest(const string &key, HTTPSignedRequest request, timestamp_t expires_at) {
+	annotated_lock_guard<annotated_mutex> lock(signed_requests_mutex);
+	// A scan signs most objects only once, so expired entries would otherwise pile up until the query ends
+	if (signed_requests.size() >= SIGNED_REQUEST_SWEEP_SIZE) {
+		auto now = Timestamp::GetCurrentTimestamp();
+		for (auto entry = signed_requests.begin(); entry != signed_requests.end();) {
+			entry = entry->second.expires_at <= now ? signed_requests.erase(entry) : std::next(entry);
+		}
+	}
+	signed_requests[key] = {std::move(request), expires_at};
 }
 
 void HTTPState::RecordRequest(RequestType request_type) {
