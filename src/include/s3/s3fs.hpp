@@ -66,6 +66,8 @@ public:
 public:
 	void Close() override;
 	void Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) override;
+	ExclusiveCreateCheck InitializeExclusiveCreate(const OpenFileInfo &file, optional_ptr<FileOpener> opener) override;
+	string GetDisplayPath() const override;
 	void FinalizeUpload();
 	void AbortUpload();
 
@@ -73,13 +75,13 @@ protected:
 	shared_ptr<const HTTPRequestSnapshot> CreateRequestSnapshot(const HTTPFSParams &params) const override;
 	HTTPReadConfig BuildReadConfig() const override;
 	HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const override;
-	string GetDisplayPath() const override;
-	string GetExclusiveCreateAccessHint() const override;
 	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
 	HTTPMetadataCacheEntry GetCacheEntry() const override;
 
 private:
 	void SetRegion(const string &region);
+	//! The client context and credential refresh for this handle's requests
+	void PrepareRequestSession(optional_ptr<FileOpener> opener);
 	UploadClaim ClaimUpload(bool write);
 	void ReleaseUpload();
 
@@ -138,6 +140,7 @@ public:
 	S3RequestResult DeleteRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
 	                              const S3RequestQuery &query);
 	unique_ptr<HTTPResponse> DeleteRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) override;
+	HTTPException GetExclusiveCreateCheckError(FileHandle &handle, const HTTPResponse &response) override;
 	HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, RequestType request_type,
 	                           const string &url) override;
 

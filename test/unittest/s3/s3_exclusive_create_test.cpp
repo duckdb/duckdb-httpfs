@@ -3,6 +3,7 @@
 // answer was lost does not take its own object for another writer's.
 #include "catch.hpp"
 
+#include "s3/mock_s3_server.hpp"
 #include "s3/s3_test_helper.hpp"
 
 #include "duckdb.hpp"
@@ -10,23 +11,18 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/string_util.hpp"
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httplib.hpp"
-
 #include <cerrno>
-#include <map>
+#include <functional>
 #include <thread>
 
 namespace duckdb {
-
-namespace httplib = duckdb_httplib_openssl;
 
 namespace {
 
 static constexpr const char *TOKEN_HEADER = "x-amz-meta-duckdb-exclusive-create";
 
-//! One key of S3 with conditional writes (If-None-Match: * on PutObject and CompleteMultipartUpload) and user
-//! metadata. Signatures are not checked.
+//! The shared mock S3 server with its conditional store (MockS3ConditionalConfig) for bucket/key.json, and the views
+//! of it that these tests use
 class ConditionalS3Server {
 public:
 	struct Request {
@@ -37,86 +33,53 @@ public:
 		int status = 0;
 	};
 
-	//! Store the object of this many successful PUTs, then drop the connection instead of answering
-	idx_t drop_put_answers = 0;
-	//! Publish this many CompleteMultipartUploads, then answer 500 InternalError
-	idx_t fail_completion_answers = 0;
-	//! Answer this many PUTs (and CompleteMultipartUploads) with 500 InternalError, after publishing whatever the
-	//! condition allows: every resend of a publish that went through fails too
-	idx_t publish_500_answers = 0;
-	//! Answer this many PUTs (and CompleteMultipartUploads) with 409 ConditionalRequestConflict, publishing nothing
-	idx_t conflict_answers = 0;
-	//! Answers for the next publishes (PutObject, CompleteMultipartUpload), in order. Each one publishes first if
-	//! `store` and the condition allows it, then answers `status` with an error document `code` (status -1: drop the
-	//! connection). When the script runs out, publishes are answered normally.
-	struct ScriptedAnswer {
-		bool store;
-		int status;
-		string code;
-	};
-	vector<ScriptedAnswer> publish_script;
-	//! Answers for the next HEADs, in order: a status, or 0 for the real answer
-	vector<int> head_statuses;
-	//! After a dropped PUT answer, another writer's object replaces the one stored (a non-exclusive overwrite)
-	bool overwrite_after_drop = false;
-
-	ConditionalS3Server() {
-		server.new_task_queue = [] {
-			return new httplib::ThreadPool(16);
-		};
-		const string route = "/bucket/(.*)";
-		server.Put(route, [this](const httplib::Request &req, httplib::Response &res) { Put(req, res); });
-		server.Post(route, [this](const httplib::Request &req, httplib::Response &res) { Post(req, res); });
-		// httplib answers HEAD with the GET handler, without the body
-		server.Get(route, [this](const httplib::Request &req, httplib::Response &res) { Get(req, res); });
-		server.Delete(route, [this](const httplib::Request &req, httplib::Response &res) { Delete(req, res); });
-		port = server.bind_to_any_port("127.0.0.1");
-		if (port <= 0) {
-			throw IOException("Failed to bind the conditional S3 server");
-		}
-		server_thread = std::thread([this]() { server.listen_after_bind(); });
-		server.wait_until_ready();
-	}
-
-	~ConditionalS3Server() {
-		server.stop();
-		if (server_thread.joinable()) {
-			server_thread.join();
-		}
+	ConditionalS3Server() : server(Config()) {
 	}
 
 	string Endpoint() const {
-		return StringUtil::Format("127.0.0.1:%d", port);
+		return server.Endpoint();
+	}
+
+	//! Change the store and its faults while the server runs
+	void Update(const std::function<void(MockS3ConditionalState &)> &update) {
+		server.UpdateConditional(update);
 	}
 
 	void SetObject(string body, string token = string()) {
-		lock_guard<mutex> guard(lock);
-		exists = true;
-		object_body = std::move(body);
-		object_token = std::move(token);
+		Update([&](MockS3ConditionalState &state) {
+			state.exists = true;
+			state.body = std::move(body);
+			state.metadata.clear();
+			if (!token.empty()) {
+				state.metadata[TOKEN_HEADER] = token;
+			}
+		});
 	}
 
-	bool Exists() {
-		lock_guard<mutex> guard(lock);
-		return exists;
+	bool Exists() const {
+		return server.ConditionalState().exists;
 	}
 
-	string Body() {
-		lock_guard<mutex> guard(lock);
-		return object_body;
+	string Body() const {
+		return server.ConditionalState().body;
 	}
 
-	idx_t OpenUploads() {
-		lock_guard<mutex> guard(lock);
-		return uploads.size();
+	idx_t OpenUploads() const {
+		return server.OpenConditionalUploads();
 	}
 
-	vector<Request> Requests() {
-		lock_guard<mutex> guard(lock);
-		return requests;
+	vector<Request> Requests() const {
+		vector<Request> result;
+		for (auto &observation : server.Observations()) {
+			auto if_none_match = MockS3HeaderValues(observation, "If-None-Match");
+			auto token = MockS3HeaderValues(observation, TOKEN_HEADER);
+			result.push_back({observation.method, observation.target, if_none_match.empty() ? "" : if_none_match[0],
+			                  token.empty() ? "" : token[0], observation.status});
+		}
+		return result;
 	}
 
-	idx_t Count(const string &method, const string &target_contains = string(), int status = 0) {
+	idx_t Count(const string &method, const string &target_contains = string(), int status = 0) const {
 		idx_t result = 0;
 		for (auto &request : Requests()) {
 			if (request.method == method && request.target.find(target_contains) != string::npos &&
@@ -128,209 +91,15 @@ public:
 	}
 
 private:
-	struct Upload {
-		string token;
-		std::map<idx_t, string> parts;
-	};
-
-	void Record(const httplib::Request &req, int status) {
-		requests.push_back({req.method, req.target, req.get_header_value("If-None-Match"),
-		                    req.get_header_value(TOKEN_HEADER), status});
+	static MockS3ServerConfig Config() {
+		MockS3ServerConfig config;
+		config.object.bucket = "bucket";
+		config.object.key = "key.json";
+		config.conditional.enabled = true;
+		return config;
 	}
 
-	void Send(const httplib::Request &req, httplib::Response &res, int status, const string &body = string()) {
-		res.status = status;
-		if (!body.empty()) {
-			res.set_content(body, "application/xml");
-		}
-		Record(req, status);
-	}
-
-	void SendScripted(const httplib::Request &req, httplib::Response &res, const ScriptedAnswer &answer) {
-		if (answer.status < 0) {
-			res.status = 200;
-			res.set_content_provider(1, "application/xml", [](size_t, size_t, httplib::DataSink &) { return false; });
-			Record(req, -1);
-			return;
-		}
-		Send(req, res, answer.status, answer.code.empty() ? string() : Error(answer.code));
-	}
-
-	static string Error(const string &code) {
-		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>" + code + "</Code><Message>" + code +
-		       "</Message></Error>";
-	}
-
-	bool Refused(const httplib::Request &req) {
-		return exists && req.get_header_value("If-None-Match") == "*";
-	}
-
-	void Get(const httplib::Request &req, httplib::Response &res) {
-		lock_guard<mutex> guard(lock);
-		if (req.method == "HEAD" && !head_statuses.empty()) {
-			auto status = head_statuses.front();
-			head_statuses.erase(head_statuses.begin());
-			if (status != 0) {
-				Send(req, res, status);
-				return;
-			}
-		}
-		if (!exists) {
-			Send(req, res, 404);
-			return;
-		}
-		res.set_header("ETag", "\"object\"");
-		res.set_header("Last-Modified", "Thu, 19 Nov 2026 12:00:00 GMT");
-		if (!object_token.empty()) {
-			res.set_header(TOKEN_HEADER, object_token);
-		}
-		res.status = 200;
-		res.set_content(object_body, "application/octet-stream");
-		Record(req, 200);
-	}
-
-	void Put(const httplib::Request &req, httplib::Response &res) {
-		lock_guard<mutex> guard(lock);
-		if (req.has_param("partNumber")) {
-			auto upload = uploads.find(req.get_param_value("uploadId"));
-			if (upload == uploads.end()) {
-				Send(req, res, 404, Error("NoSuchUpload"));
-				return;
-			}
-			auto part = std::stoull(req.get_param_value("partNumber"));
-			upload->second.parts[part] = req.body;
-			res.set_header("ETag", StringUtil::Format("\"part-%llu\"", part));
-			Send(req, res, 200);
-			return;
-		}
-		if (conflict_answers > 0) {
-			conflict_answers--;
-			Send(req, res, 409, Error("ConditionalRequestConflict"));
-			return;
-		}
-		if (!publish_script.empty()) {
-			auto answer = publish_script.front();
-			publish_script.erase(publish_script.begin());
-			if (answer.store && !Refused(req)) {
-				exists = true;
-				object_body = req.body;
-				object_token = req.get_header_value(TOKEN_HEADER);
-			}
-			SendScripted(req, res, answer);
-			return;
-		}
-		if (publish_500_answers > 0) {
-			publish_500_answers--;
-			if (!Refused(req)) {
-				exists = true;
-				object_body = req.body;
-				object_token = req.get_header_value(TOKEN_HEADER);
-			}
-			Send(req, res, 500, Error("InternalError"));
-			return;
-		}
-		if (Refused(req)) {
-			Send(req, res, 412, Error("PreconditionFailed"));
-			return;
-		}
-		exists = true;
-		object_body = req.body;
-		object_token = req.get_header_value(TOKEN_HEADER);
-		if (drop_put_answers > 0) {
-			drop_put_answers--;
-			if (overwrite_after_drop) {
-				object_body = "theirs";
-				object_token = "another-token";
-			}
-			res.status = 200;
-			res.set_content_provider(1, "application/xml", [](size_t, size_t, httplib::DataSink &) { return false; });
-			Record(req, -1);
-			return;
-		}
-		res.set_header("ETag", "\"object\"");
-		Send(req, res, 200);
-	}
-
-	void Post(const httplib::Request &req, httplib::Response &res) {
-		lock_guard<mutex> guard(lock);
-		if (req.has_param("uploads")) {
-			auto id = "upload-" + to_string(++upload_count);
-			uploads[id].token = req.get_header_value(TOKEN_HEADER);
-			Send(req, res, 200,
-			     "<?xml version=\"1.0\" encoding=\"UTF-8\"?><InitiateMultipartUploadResult><UploadId>" + id +
-			         "</UploadId></InitiateMultipartUploadResult>");
-			return;
-		}
-		auto upload = uploads.find(req.get_param_value("uploadId"));
-		if (conflict_answers > 0) {
-			conflict_answers--;
-			Send(req, res, 409, Error("ConditionalRequestConflict"));
-			return;
-		}
-		if (!publish_script.empty()) {
-			auto answer = publish_script.front();
-			publish_script.erase(publish_script.begin());
-			if (answer.store && upload != uploads.end() && !Refused(req)) {
-				Publish(upload);
-			}
-			SendScripted(req, res, answer);
-			return;
-		}
-		if (publish_500_answers > 0) {
-			publish_500_answers--;
-			if (upload != uploads.end() && !Refused(req)) {
-				Publish(upload);
-			}
-			Send(req, res, 500, Error("InternalError"));
-			return;
-		}
-		if (upload == uploads.end()) {
-			Send(req, res, 404, Error("NoSuchUpload"));
-			return;
-		}
-		if (Refused(req)) {
-			Send(req, res, 412, Error("PreconditionFailed"));
-			return;
-		}
-		Publish(upload);
-		if (fail_completion_answers > 0) {
-			fail_completion_answers--;
-			Send(req, res, 500, Error("InternalError"));
-			return;
-		}
-		Send(req, res, 200,
-		     "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><ETag>\"object\"</ETag>"
-		     "</CompleteMultipartUploadResult>");
-	}
-
-	void Publish(std::map<string, Upload>::iterator upload) {
-		exists = true;
-		object_body.clear();
-		for (auto &part : upload->second.parts) {
-			object_body += part.second;
-		}
-		object_token = upload->second.token;
-		uploads.erase(upload);
-	}
-
-	void Delete(const httplib::Request &req, httplib::Response &res) {
-		lock_guard<mutex> guard(lock);
-		uploads.erase(req.get_param_value("uploadId"));
-		Send(req, res, 204);
-	}
-
-private:
-	httplib::Server server;
-	std::thread server_thread;
-	int port = 0;
-
-	mutex lock;
-	bool exists = false;
-	string object_body;
-	string object_token;
-	std::map<string, Upload> uploads;
-	idx_t upload_count = 0;
-	vector<Request> requests;
+	MockS3Server server;
 };
 
 static constexpr const char *PATH = "s3://bucket/key.json";
@@ -508,7 +277,7 @@ TEST_CASE("S3 exclusive create whose PUT answer was lost", "[httpfs][s3][exclusi
 	// The PUT goes through, its answer is lost, and core sends it again: the retry is refused (412), and the token
 	// shows that the object is this writer's
 	ConditionalS3Server server;
-	server.drop_put_answers = 1;
+	server.Update([&](MockS3ConditionalState &state) { state.drop_put_answers = 1; });
 	ExclusiveCreateTest test(server, 2);
 	auto handle = test.Open(NullIfExists());
 	REQUIRE(handle);
@@ -558,7 +327,7 @@ TEST_CASE("S3 exclusive create when the check after a refusal fails", "[httpfs][
 		auto handle = test.Open(NullIfExists());
 		REQUIRE(handle);
 		server.SetObject("theirs", "another-token");
-		server.head_statuses = {head_status};
+		server.Update([&](MockS3ConditionalState &state) { state.head_statuses = {head_status}; });
 		auto message = RequireError([&]() { ExclusiveCreateTest::Write(*handle, "mine"); });
 		REQUIRE(StringUtil::Contains(message, "could not be checked"));
 		REQUIRE(server.Body() == "theirs");
@@ -568,7 +337,7 @@ TEST_CASE("S3 exclusive create when the check after a refusal fails", "[httpfs][
 	ExclusiveCreateTest test(server);
 	auto handle = test.Open(NullIfExists());
 	server.SetObject("theirs", "another-token");
-	server.head_statuses = {404};
+	server.Update([&](MockS3ConditionalState &state) { state.head_statuses = {404}; });
 	auto message = RequireError([&]() { ExclusiveCreateTest::Write(*handle, "mine"); });
 	REQUIRE(StringUtil::Contains(message, "412"));
 	REQUIRE_FALSE(StringUtil::Contains(message, "it already exists"));
@@ -580,7 +349,7 @@ TEST_CASE("S3 exclusive create when the HEAD at open fails", "[httpfs][s3][exclu
 	for (auto head_status : {403, 400}) {
 		INFO("HEAD status " << head_status);
 		ConditionalS3Server server;
-		server.head_statuses = {head_status};
+		server.Update([&](MockS3ConditionalState &state) { state.head_statuses = {head_status}; });
 		ExclusiveCreateTest test(server);
 		auto message = RequireError([&]() { test.Open(NullIfExists()); });
 		REQUIRE(StringUtil::Contains(message, to_string(head_status)));
@@ -598,31 +367,39 @@ TEST_CASE("S3 exclusive create answered 409 ConditionalRequestConflict", "[httpf
 		ExclusiveCreateTest test(server);
 		auto handle = test.Open(NullIfExists());
 		server.SetObject("theirs", "another-token");
-		server.conflict_answers = 1;
+		server.Update([&](MockS3ConditionalState &state) { state.conflict_answers = 1; });
 		auto content = multipart ? ExclusiveCreateTest::Multipart('c') : string("mine");
 		auto message = RequireError([&]() { ExclusiveCreateTest::Write(*handle, content); });
 		REQUIRE(StringUtil::Contains(message, "for exclusive create: it already exists"));
 		REQUIRE(server.Body() == "theirs");
 	}
-	// No object yet: a PutObject is sent once more, and publishes
-	{
+	// No object yet: the conflict is sent again, within the configured retries (none: the 409 is the error)
+	for (idx_t retries : {0, 1}) {
+		INFO("http_retries=" << retries);
 		ConditionalS3Server server;
-		ExclusiveCreateTest test(server);
+		ExclusiveCreateTest test(server, retries);
 		auto handle = test.Open(NullIfExists());
-		server.conflict_answers = 1;
-		ExclusiveCreateTest::Write(*handle, "mine");
-		REQUIRE(server.Body() == "mine");
+		server.Update([&](MockS3ConditionalState &state) { state.conflict_answers = 1; });
+		if (retries == 0) {
+			auto message = RequireError([&]() { ExclusiveCreateTest::Write(*handle, "mine"); });
+			REQUIRE(StringUtil::Contains(message, "409"));
+			REQUIRE_FALSE(server.Exists());
+		} else {
+			ExclusiveCreateTest::Write(*handle, "mine");
+			REQUIRE(server.Body() == "mine");
+		}
 		REQUIRE(server.Count("PUT", "", 409) == 1);
-		REQUIRE(server.Count("PUT", "", 200) == 1);
+		REQUIRE(server.Count("PUT", "", 200) == retries);
 	}
-	// Only once: a second 409 with no object is the error
+	// More conflicts than retries: the 409 is the error
 	{
 		ConditionalS3Server server;
-		ExclusiveCreateTest test(server);
+		ExclusiveCreateTest test(server, 1);
 		auto handle = test.Open(NullIfExists());
-		server.conflict_answers = 2;
+		server.Update([&](MockS3ConditionalState &state) { state.conflict_answers = 5; });
 		auto message = RequireError([&]() { ExclusiveCreateTest::Write(*handle, "mine"); });
 		REQUIRE(StringUtil::Contains(message, "409"));
+		REQUIRE(server.Count("PUT", "", 409) == 2);
 		REQUIRE_FALSE(server.Exists());
 	}
 }
@@ -631,8 +408,8 @@ TEST_CASE("S3 exclusive create whose resent PUT finds another writer's object", 
 	// The first PUT goes through and its answer is lost; before it is resent, a writer without EXCLUSIVE_CREATE
 	// replaces the object. The token is not ours: "exists", not success.
 	ConditionalS3Server server;
-	server.drop_put_answers = 1;
-	server.overwrite_after_drop = true;
+	server.Update([&](MockS3ConditionalState &state) { state.drop_put_answers = 1; });
+	server.Update([&](MockS3ConditionalState &state) { state.overwrite_after_drop = true; });
 	ExclusiveCreateTest test(server, 2);
 	auto handle = test.Open(NullIfExists());
 	REQUIRE(handle);
@@ -646,7 +423,7 @@ TEST_CASE("S3 exclusive create whose publish went through but every answer faile
 	for (auto multipart : {false, true}) {
 		INFO("multipart=" << multipart);
 		ConditionalS3Server server;
-		server.publish_500_answers = 100;
+		server.Update([&](MockS3ConditionalState &state) { state.publish_500_answers = 100; });
 		ExclusiveCreateTest test(server, 2);
 		auto handle = test.Open(NullIfExists());
 		REQUIRE(handle);
@@ -658,7 +435,7 @@ TEST_CASE("S3 exclusive create whose publish went through but every answer faile
 	}
 	// Another writer's object behind the 500s: the original error, not success
 	ConditionalS3Server server;
-	server.publish_500_answers = 100;
+	server.Update([&](MockS3ConditionalState &state) { state.publish_500_answers = 100; });
 	ExclusiveCreateTest test(server, 2);
 	auto handle = test.Open(NullIfExists());
 	server.SetObject("theirs", "another-token");
@@ -672,8 +449,8 @@ TEST_CASE("S3 exclusive multipart create: NoSuchUpload after a lost completion, 
 	// The completion publishes and answers 500; the resend gets NoSuchUpload; the token HEAD gets 403. Whether the
 	// object is this writer's is unknown: an unknown-outcome error, and the upload is not aborted
 	ConditionalS3Server server;
-	server.fail_completion_answers = 1;
-	server.head_statuses = {0, 403};
+	server.Update([&](MockS3ConditionalState &state) { state.fail_completion_answers = 1; });
+	server.Update([&](MockS3ConditionalState &state) { state.head_statuses = {0, 403}; });
 	ExclusiveCreateTest test(server, 2);
 	auto handle = test.Open(NullIfExists());
 	REQUIRE(handle);
@@ -746,10 +523,12 @@ TEST_CASE("S3 exclusive create: a final 400, 403 or 429 after a publish that wen
 		for (auto multipart : {false, true}) {
 			INFO("final " << final_answer.status << " multipart=" << multipart);
 			ConditionalS3Server server;
-			server.publish_script = {{true, 500, "InternalError"},
-			                         {false, final_answer.status, final_answer.code},
-			                         {false, final_answer.status, final_answer.code},
-			                         {false, final_answer.status, final_answer.code}};
+			server.Update([&](MockS3ConditionalState &state) {
+				state.publish_script = {{true, 500, "InternalError"},
+				                        {false, final_answer.status, final_answer.code},
+				                        {false, final_answer.status, final_answer.code},
+				                        {false, final_answer.status, final_answer.code}};
+			});
 			ExclusiveCreateTest test(server, 1);
 			S3TestHelper::RequireQueryOk(test.con, "SET http_retry_backoff=1");
 			auto handle = test.Open(NullIfExists());
@@ -770,7 +549,7 @@ TEST_CASE("S3 exclusive multipart create: error documents behind HTTP 200", "[ht
 		ExclusiveCreateTest test(server);
 		auto handle = test.Open(NullIfExists());
 		server.SetObject("theirs", "another-token");
-		server.publish_script = {{false, 200, code}};
+		server.Update([&](MockS3ConditionalState &state) { state.publish_script = {{false, 200, code}}; });
 		auto message =
 		    RequireError([&]() { ExclusiveCreateTest::Write(*handle, ExclusiveCreateTest::Multipart('e')); });
 		REQUIRE(StringUtil::Contains(message, "for exclusive create: it already exists"));
@@ -778,7 +557,7 @@ TEST_CASE("S3 exclusive multipart create: error documents behind HTTP 200", "[ht
 	}
 	// Another error document, after the completion went through: this writer's object
 	ConditionalS3Server server;
-	server.publish_script = {{true, 200, "InternalError"}};
+	server.Update([&](MockS3ConditionalState &state) { state.publish_script = {{true, 200, "InternalError"}}; });
 	ExclusiveCreateTest test(server);
 	auto handle = test.Open(NullIfExists());
 	auto content = ExclusiveCreateTest::Multipart('i');
@@ -791,7 +570,7 @@ TEST_CASE("S3 exclusive multipart create whose completion connection drops", "[h
 	for (auto published : {true, false}) {
 		INFO("published=" << published);
 		ConditionalS3Server server;
-		server.publish_script = {{published, -1, ""}};
+		server.Update([&](MockS3ConditionalState &state) { state.publish_script = {{published, -1, ""}}; });
 		ExclusiveCreateTest test(server);
 		auto handle = test.Open(NullIfExists());
 		auto content = ExclusiveCreateTest::Multipart('d');
@@ -814,7 +593,7 @@ TEST_CASE("S3 exclusive multipart create: a 412 with an unreadable check aborts 
 	ExclusiveCreateTest test(server);
 	auto handle = test.Open(NullIfExists());
 	server.SetObject("theirs", "another-token");
-	server.head_statuses = {503, 503, 503};
+	server.Update([&](MockS3ConditionalState &state) { state.head_statuses = {503, 503, 503}; });
 	auto message = RequireError([&]() { ExclusiveCreateTest::Write(*handle, ExclusiveCreateTest::Multipart('a')); });
 	REQUIRE(StringUtil::Contains(message, "unknown outcome"));
 	REQUIRE(server.Count("DELETE") == 1);
@@ -826,7 +605,7 @@ TEST_CASE("S3 exclusive multipart create whose completion answer was lost", "[ht
 	// CompleteMultipartUpload publishes but answers 500, and is sent again: the retry finds the upload gone (or the
 	// key taken), and the token shows that the object is this writer's
 	ConditionalS3Server server;
-	server.fail_completion_answers = 1;
+	server.Update([&](MockS3ConditionalState &state) { state.fail_completion_answers = 1; });
 	ExclusiveCreateTest test(server, 2);
 	auto handle = test.Open(NullIfExists());
 	REQUIRE(handle);

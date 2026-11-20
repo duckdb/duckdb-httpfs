@@ -5,6 +5,9 @@
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include <functional>
+#include <map>
+
 namespace duckdb {
 
 enum class MockS3RefreshTarget : uint8_t {
@@ -237,6 +240,48 @@ struct MockS3SSECustomerConfig {
 	vector<string> accepted_keys;
 };
 
+//! A scripted answer to a publish (PutObject or CompleteMultipartUpload) of the conditional store
+struct MockS3PublishAnswer {
+	//! Publish first, if the condition (If-None-Match) allows it
+	bool publish = false;
+	//! The status to answer; -1 drops the connection after the status line
+	int status = 200;
+	//! The S3 error code of the error document to answer with; empty for no body
+	string code;
+};
+
+//! The object of the conditional store, and the faults it injects. Tests read and change it with
+//! MockS3Server::ConditionalState and UpdateConditional while the server runs.
+struct MockS3ConditionalState {
+	bool exists = false;
+	string body;
+	//! The object's user metadata: x-amz-meta-* request headers, by lower-cased name; HEAD answers with them
+	std::map<string, string> metadata;
+	//! Store the object of this many successful PUTs, then drop the connection instead of answering
+	idx_t drop_put_answers = 0;
+	//! With a dropped PUT answer: another writer's object (body "theirs", other metadata) replaces the one stored
+	bool overwrite_after_drop = false;
+	//! Answer this many publishes with 409 ConditionalRequestConflict, publishing nothing
+	idx_t conflict_answers = 0;
+	//! Answer this many publishes with 500 InternalError, after publishing what the condition allows
+	idx_t publish_500_answers = 0;
+	//! Publish this many CompleteMultipartUploads, then answer 500 InternalError
+	idx_t fail_completion_answers = 0;
+	//! Answers for the next publishes, in order, before the counters above
+	vector<MockS3PublishAnswer> publish_script;
+	//! Answers for the next HEADs, in order: a status, or 0 for the real answer
+	vector<int> head_statuses;
+};
+
+//! A store with conditional writes for `object.bucket`/`object.key`, instead of the fixed object: the object exists
+//! only once written (or per `initial`); a PutObject or CompleteMultipartUpload with If-None-Match: * on an existing
+//! object answers 412; user metadata is kept; and multipart uploads get their own ids, so several run at once.
+//! Credentials, regions and the other failure settings do not apply to it.
+struct MockS3ConditionalConfig {
+	bool enabled = false;
+	MockS3ConditionalState initial;
+};
+
 struct MockS3ServerConfig {
 	//! Path prefix configured as part of the endpoint, without a trailing slash
 	string endpoint_base_path;
@@ -257,6 +302,7 @@ struct MockS3ServerConfig {
 	MockS3UploadConfig upload;
 	MockS3SSECustomerConfig sse_customer;
 	MockS3HTTPResponseConfig http_response;
+	MockS3ConditionalConfig conditional;
 };
 
 struct MockS3RequestObservation {
@@ -318,6 +364,10 @@ public:
 	void ReleaseMultipartInitialization();
 	bool WaitForFullGet();
 	void ReleaseFullGet();
+	//! The conditional store (config.conditional.enabled)
+	MockS3ConditionalState ConditionalState() const;
+	void UpdateConditional(const std::function<void(MockS3ConditionalState &)> &update);
+	idx_t OpenConditionalUploads() const;
 
 private:
 	struct Impl;

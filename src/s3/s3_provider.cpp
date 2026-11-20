@@ -136,6 +136,13 @@ void S3Provider::ApplyCreateCondition(const S3CreateCondition &condition, HTTPHe
 		// Not sent to GCS (S3FileHandle): its conditional writes are not supported yet
 		throw InternalException("Exclusive create conditions are not supported on GCS");
 	}
+	// Configured extra headers are already in `headers`; only a request that carries the condition rejects them
+	for (auto name : {"If-None-Match", CREATE_TOKEN_HEADER}) {
+		if (headers.HasHeader(name)) {
+			throw InvalidInputException("Configured S3 header \"%s\" conflicts with the exclusive create of this file",
+			                            name);
+		}
+	}
 	if (!condition.token.empty()) {
 		headers[CREATE_TOKEN_HEADER] = condition.token;
 	}

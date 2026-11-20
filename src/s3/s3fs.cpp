@@ -105,16 +105,25 @@ string S3FileHandle::GetDisplayPath() const {
 	return S3Url::GetDisplayUrl(path, captured.snapshot->Cast<S3RequestSnapshot>().auth_params);
 }
 
-string S3FileHandle::GetExclusiveCreateAccessHint() const {
-	auto captured = request_session->Capture();
+HTTPException S3FileSystem::GetExclusiveCreateCheckError(FileHandle &handle, const HTTPResponse &response) {
+	if (response.status != HTTPStatusCode::Forbidden_403) {
+		return HTTPFileSystem::GetExclusiveCreateCheckError(handle, response);
+	}
+	// AWS answers 403 for a missing key when the credentials may not list the bucket, and for any key when they may
+	// not read it: neither tells whether the file exists. The credentials did work, so no hint about them.
+	auto &s3_handle = handle.Cast<S3FileHandle>();
+	auto captured = s3_handle.request_session->Capture();
 	auto &provider = captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider();
+	string permissions;
 	if (!provider.SupportsConditionalCreate()) {
-		return "on GCS, storage.objects.get and storage.objects.list";
+		permissions = ": on GCS, storage.objects.get and storage.objects.list";
+	} else if (provider.GetCompatibilityProfile() == S3CompatibilityProfile::S3) {
+		permissions = ": on AWS S3, s3:GetObject and s3:ListBucket";
 	}
-	if (provider.GetCompatibilityProfile() == S3CompatibilityProfile::S3) {
-		return "on AWS S3, s3:GetObject and s3:ListBucket";
-	}
-	return string();
+	return HTTPException(response,
+	                     "Unable to open URL \"%s\" for exclusive create: checking whether it exists answered HTTP "
+	                     "403. An exclusive create needs read access to the file and to the bucket's listing%s",
+	                     s3_handle.GetDisplayPath(), permissions);
 }
 
 string S3FileSystem::GetVersionTag(FileHandle &handle) {
@@ -267,7 +276,7 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 	return result;
 }
 
-void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
+void S3FileHandle::PrepareRequestSession(optional_ptr<FileOpener> opener) {
 	auto context = FileOpener::TryGetClientContext(opener);
 	auto refresh_enabled = S3RequestExecutor::CredentialRefreshEnabled(opener);
 	{
@@ -282,14 +291,25 @@ void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener>
 		replacement->credential_refresh_enabled = refresh_enabled;
 		request_session->TryPublish(captured.snapshot, std::move(replacement));
 	}
+}
+
+void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
+	PrepareRequestSession(opener);
 	HTTPFileHandle::Initialize(file, opener);
-	if (unconditional_exclusive_create && !file_exists && logger) {
+}
+
+HTTPFileHandle::ExclusiveCreateCheck S3FileHandle::InitializeExclusiveCreate(const OpenFileInfo &file,
+                                                                             optional_ptr<FileOpener> opener) {
+	PrepareRequestSession(opener);
+	auto result = HTTPFileHandle::InitializeExclusiveCreate(file, opener);
+	if (result == ExclusiveCreateCheck::MISSING && unconditional_exclusive_create && logger) {
 		DUCKDB_LOG_WARNING(logger,
 		                   "Exclusive create of \"%s\" on GCS: the file did not exist when opened, but it will be "
 		                   "written without a condition, so an object that another writer creates in the meantime is "
 		                   "overwritten",
 		                   GetDisplayPath());
 	}
+	return result;
 }
 
 bool S3FileSystem::CanHandleFile(const string &fpath) {

@@ -1954,11 +1954,19 @@ TEST_CASE("Exclusive create conditions on S3 and R2, never on GCS", "[httpfs][s3
 		                                                  S3RequestOperation::PUT_OBJECT, S3RequestQuery(), auth);
 		REQUIRE_FALSE(unconditional.HasHeader("If-None-Match"));
 		REQUIRE_FALSE(unconditional.HasHeader("x-amz-meta-duckdb-exclusive-create"));
-		// HTTPFS owns the condition header
-		HTTPConfiguredHeaders overrides {"", {{"if-none-match", "*"}}};
-		REQUIRE_THROWS(S3RequestUtil::CreateHeaders(encryption_util, S3Url::Parse(path, auth),
-		                                            S3RequestOperation::PUT_OBJECT, S3RequestQuery(), auth, "", "", "",
-		                                            "", "", overrides));
+		// A configured If-None-Match (or token header) conflicts only with a request that carries the condition
+		for (auto name : {"if-none-match", "X-Amz-Meta-Duckdb-Exclusive-Create"}) {
+			HTTPConfiguredHeaders overrides {"", {{name, "*"}}};
+			REQUIRE_THROWS_AS(S3RequestUtil::CreateHeaders(encryption_util, S3Url::Parse(path, auth),
+			                                               S3RequestOperation::PUT_OBJECT, S3RequestQuery(), auth, "",
+			                                               "", "", "", "", overrides, {}, nullptr, condition),
+			                  InvalidInputException);
+			for (auto operation : {S3RequestOperation::PUT_OBJECT, S3RequestOperation::GET_OBJECT}) {
+				auto plain = S3RequestUtil::CreateHeaders(encryption_util, S3Url::Parse(path, auth), operation,
+				                                          S3RequestQuery(), auth, "", "", "", "", "", overrides);
+				REQUIRE(plain.GetHeaderValue(name) == "*");
+			}
+		}
 	}
 	// GCS: S3FileHandle sends no condition; one that reaches the request anyway is an internal error
 	auto hmac_config = TestAuthConfig(S3ProviderType::GCS);

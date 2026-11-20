@@ -9,7 +9,7 @@
 #include "duckdb/storage/buffer/buffer_handle.hpp"
 
 #include <condition_variable>
-#include <functional>
+#include <exception>
 
 namespace duckdb {
 
@@ -166,8 +166,12 @@ private:
 	//! write (409, ConditionalRequestConflict)
 	enum class Refusal : uint8_t { NONE, PRECONDITION_FAILED, CONFLICT };
 	static Refusal GetRefusal(const HTTPResponse &response, const string &error_code = string());
-	bool ResolvePublishFailure(Refusal refusal, const std::function<void()> &throw_original,
-	                           bool resend_if_missing = false);
+	//! What a failed exclusive publish did, decided by the token in the object
+	enum class PublishResolution : uint8_t { PUBLISHED, ALREADY_EXISTS, ORIGINAL_ERROR, UNKNOWN_OUTCOME };
+	PublishResolution ResolveFailedPublish(Refusal refusal);
+	//! After a failed publish: returns if it published after all (exclusive create), else throws `error`, "already
+	//! exists" or an unknown outcome
+	void FinishFailedPublish(Refusal refusal, std::exception_ptr error);
 
 	//! Request diagnostics.
 	string GetDisplayPath() const;

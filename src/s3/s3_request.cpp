@@ -148,7 +148,6 @@ private:
 		    {"Content-MD5", "Content-MD5"},
 		    {"Range", "Range"},
 		    {"If-Match", "If-Match"},
-		    {"If-None-Match", "If-None-Match"},
 		    {"x-amz-date", "x-amz-date"},
 		    {"x-amz-content-sha256", "x-amz-content-sha256"},
 		    {"x-amz-security-token", "x-amz-security-token"},
@@ -695,12 +694,26 @@ static bool IsS3RequestTimeoutError(const ErrorData &error) {
 	return S3XMLResponseParser::TryParseError(body_entry->second, s3_error) && s3_error.code == "RequestTimeout";
 }
 
+// AWS answers overlapping conditional writes of one key with 409 ConditionalRequestConflict and asks to send the
+// request again: a conditional publish (If-None-Match, an exclusive create) is safe to send again, because the
+// condition still holds it back if another writer has published in the meantime
+static bool IsConditionalWriteConflict(const S3RequestData &request_data, const HTTPResponse &response) {
+	if (response.status != HTTPStatusCode::Conflict_409 || !request_data.headers.HasHeader("If-None-Match")) {
+		return false;
+	}
+	S3XMLError error;
+	return S3XMLResponseParser::TryParseError(response.body, error) && error.code == "ConditionalRequestConflict";
+}
+
 static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const HTTPResponse &response) {
 	if (response.HasRequestError()) {
 		return false;
 	}
 	auto &operation_info = S3RequestUtil::GetOperationInfo(request_data.operation);
 	if (operation_info.retry_timeout && S3RequestUtil::IsRequestTimeout(response)) {
+		return true;
+	}
+	if (IsConditionalWriteConflict(request_data, response)) {
 		return true;
 	}
 	return operation_info.retry_received_response && S3RequestUtil::IsRetryableReceivedResponse(response);
