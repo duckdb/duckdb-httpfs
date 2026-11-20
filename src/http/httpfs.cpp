@@ -27,6 +27,7 @@
 #include "duckdb/storage/external_file_cache/external_file_cache_util.hpp"
 #include "http/http_state.hpp"
 
+#include <cerrno>
 #include <map>
 #include <string>
 
@@ -305,6 +306,14 @@ const HTTPObjectVersion &HTTPFileHandle::GetObjectVersion() const {
 	return object_version;
 }
 
+string HTTPFileHandle::GetDisplayPath() const {
+	return path;
+}
+
+string HTTPFileHandle::GetExclusiveCreateAccessHint() const {
+	return string();
+}
+
 HTTPObjectVersion HTTPFileHandle::ReadObjectVersion(const HTTPHeaders &headers) const {
 	return {};
 }
@@ -340,12 +349,14 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 
 	auto handle = CreateHandle(file, flags, opener);
 
-	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
+	// An exclusive create checks at open whether the file exists (RequestFileInfo); on S3 and R2 the write itself is
+	// conditional too
+	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading() && !flags.ExclusiveCreate()) {
 		handle->write_overwrite_mode = true;
 	}
 
 	handle->Initialize(file, opener);
-	if (handle->file_not_found) {
+	if (handle->file_not_found || handle->file_exists) {
 		return nullptr;
 	}
 
@@ -975,6 +986,10 @@ private:
 
 bool HTTPFileHandle::TryLoadFileInfoWithoutRequest() {
 	D_ASSERT(file_state);
+	if (flags.OpenForWriting() && flags.ExclusiveCreate()) {
+		// whether the file exists now, not what this query has seen of it
+		return false;
+	}
 	if (auto cached_file = file_state->TryGetCachedFileHandle()) {
 		if (!initialized) {
 			InitializeFromCacheEntry(cached_file->GetMetadata());
@@ -997,6 +1012,9 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RequestFileInfo(HTTPFileSystem &hfs, ti
 	request_time = Timestamp::GetCurrentTimestamp();
 	auto response = hfs.HeadRequest(*this, path, {});
 	response_time = Timestamp::GetCurrentTimestamp();
+	if (flags.OpenForWriting() && flags.ExclusiveCreate()) {
+		return CheckExclusiveCreate(hfs, *response);
+	}
 	if (response->status == HTTPStatusCode::OK_200) {
 		return response;
 	}
@@ -1017,6 +1035,36 @@ unique_ptr<HTTPResponse> HTTPFileHandle::RequestFileInfo(HTTPFileSystem &hfs, ti
 		return RetryFileInfoWithRange(hfs, request_time, response_time);
 	}
 	throw hfs.GetHTTPError(*this, *response, RequestType::HEAD_REQUEST, path);
+}
+
+// FILE_FLAGS_EXCLUSIVE_CREATE, as O_CREAT | O_EXCL: an existing file gives nullptr (FILE_FLAGS_NULL_IF_EXISTS) or an
+// error. On S3 and R2 this HEAD is the early answer only: the write is conditional too (If-None-Match), and a writer
+// that creates the file after this check makes this one fail when it is written. On GCS it is the only check.
+unique_ptr<HTTPResponse> HTTPFileHandle::CheckExclusiveCreate(HTTPFileSystem &hfs, const HTTPResponse &response) {
+	if (response.status == HTTPStatusCode::OK_200) {
+		if (flags.ReturnNullIfExists()) {
+			file_exists = true;
+			return nullptr;
+		}
+		// errno as the local file system reports it for O_EXCL, so that callers can match it by value
+		throw IOException({{"errno", std::to_string(EEXIST)}},
+		                  "Unable to open URL \"%s\" for exclusive create: it already exists", GetDisplayPath());
+	}
+	if (response.status == HTTPStatusCode::NotFound_404) {
+		length = 0;
+		initialized = true;
+		return nullptr;
+	}
+	if (response.status == HTTPStatusCode::Forbidden_403) {
+		// AWS answers 403 for a missing key when the credentials may not list the bucket, and for any key when they
+		// may not read it: neither tells whether the file exists. The credentials did work, so no auth hint.
+		auto hint = GetExclusiveCreateAccessHint();
+		throw HTTPException(response,
+		                    "Unable to open URL \"%s\" for exclusive create: checking whether it exists answered HTTP "
+		                    "403. An exclusive create needs read access to the file and to the bucket's listing%s%s",
+		                    GetDisplayPath(), hint.empty() ? "" : ": ", hint);
+	}
+	throw hfs.GetHTTPError(*this, response, RequestType::HEAD_REQUEST, path);
 }
 
 unique_ptr<HTTPResponse> HTTPFileHandle::RetryFileInfoWithRange(HTTPFileSystem &hfs, timestamp_t &request_time,
@@ -1210,7 +1258,7 @@ bool HTTPFileHandle::TryInitializeRead(HTTPFileSystem &hfs, optional_ptr<HTTPMet
 void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMetadataCache> cache,
                                         bool should_write_cache) {
 	LoadFileInfo();
-	if (file_not_found) {
+	if (file_not_found || file_exists) {
 		return;
 	}
 	FinalizeReadConfig();

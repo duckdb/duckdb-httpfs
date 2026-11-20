@@ -1931,6 +1931,75 @@ TEST_CASE("GCS generation conditions are owned and omitted from HMAC requests", 
 	}
 }
 
+TEST_CASE("Exclusive create conditions on S3 and R2, never on GCS", "[httpfs][s3][exclusive-create]") {
+	::AESStateSSLFactory encryption_util;
+	S3CreateCondition condition {true, "token-1"};
+	auto headers_for = [&](S3AuthParams &auth, const string &path) {
+		return S3RequestUtil::CreateHeaders(encryption_util, S3Url::Parse(path, auth), S3RequestOperation::PUT_OBJECT,
+		                                    S3RequestQuery(), auth, "", "", "", "", "", {}, {}, nullptr, condition);
+	};
+	for (auto type : {S3ProviderType::S3, S3ProviderType::R2}) {
+		INFO("provider " << static_cast<int>(type));
+		auto config = TestAuthConfig(type);
+		config.credentials.access_key_id = "key";
+		config.credentials.secret_access_key = "secret";
+		auto auth = ResolveTestAuth(config);
+		auto path = auth.GetProvider().GetRoute().prefix + "bucket/key";
+		auto headers = headers_for(auth, path);
+		REQUIRE(headers.GetHeaderValue("If-None-Match") == "*");
+		REQUIRE(headers.GetHeaderValue("x-amz-meta-duckdb-exclusive-create") == "token-1");
+		// The token is signed with the request
+		REQUIRE(StringUtil::Contains(headers.GetHeaderValue("Authorization"), "x-amz-meta-duckdb-exclusive-create"));
+		auto unconditional = S3RequestUtil::CreateHeaders(encryption_util, S3Url::Parse(path, auth),
+		                                                  S3RequestOperation::PUT_OBJECT, S3RequestQuery(), auth);
+		REQUIRE_FALSE(unconditional.HasHeader("If-None-Match"));
+		REQUIRE_FALSE(unconditional.HasHeader("x-amz-meta-duckdb-exclusive-create"));
+		// HTTPFS owns the condition header
+		HTTPConfiguredHeaders overrides {"", {{"if-none-match", "*"}}};
+		REQUIRE_THROWS(S3RequestUtil::CreateHeaders(encryption_util, S3Url::Parse(path, auth),
+		                                            S3RequestOperation::PUT_OBJECT, S3RequestQuery(), auth, "", "", "",
+		                                            "", "", overrides));
+	}
+	// GCS: S3FileHandle sends no condition; one that reaches the request anyway is an internal error
+	auto hmac_config = TestAuthConfig(S3ProviderType::GCS);
+	hmac_config.credentials.access_key_id = "key";
+	hmac_config.credentials.secret_access_key = "secret";
+	auto hmac = ResolveTestAuth(hmac_config);
+	auto bearer_config = TestAuthConfig(S3ProviderType::GCS);
+	bearer_config.credentials.oauth2_bearer_token = "gcs-token";
+	auto bearer = ResolveTestAuth(bearer_config);
+	for (auto *auth : {&hmac, &bearer}) {
+		REQUIRE_THROWS_AS(headers_for(*auth, "gcs://bucket/key"), InternalException);
+		auto unconditional = S3RequestUtil::CreateHeaders(encryption_util, S3Url::Parse("gcs://bucket/key", *auth),
+		                                                  S3RequestOperation::PUT_OBJECT, S3RequestQuery(), *auth);
+		REQUIRE_FALSE(unconditional.HasHeader("If-None-Match"));
+		REQUIRE_FALSE(unconditional.HasHeader("x-goog-if-generation-match"));
+	}
+
+	// s3:// or an alias with a GCS endpoint counts as GCS
+	for (auto alias : {false, true}) {
+		for (auto endpoint : {"storage.googleapis.com", "storage.europe-west3.rep.googleapis.com"}) {
+			INFO("alias=" << alias << " endpoint=" << endpoint);
+			auto config = TestAuthConfig(S3ProviderType::S3, alias);
+			config.endpoint = endpoint;
+			config.endpoint_mode = S3EndpointMode::EXPLICIT;
+			config.credentials.access_key_id = "key";
+			config.credentials.secret_access_key = "secret";
+			auto auth = ResolveTestAuth(config);
+			REQUIRE_FALSE(auth.GetProvider().SupportsConditionalCreate());
+			REQUIRE_THROWS_AS(headers_for(auth, config.route.prefix + "bucket/key"), InternalException);
+		}
+	}
+	REQUIRE(ResolveTestAuth(TestAuthConfig(S3ProviderType::S3)).GetProvider().SupportsConditionalCreate());
+	REQUIRE(ResolveTestAuth(TestAuthConfig(S3ProviderType::R2)).GetProvider().SupportsConditionalCreate());
+
+	HTTPHeaders object;
+	object.Insert("X-Amz-Meta-Duckdb-Exclusive-Create", "token-1");
+	REQUIRE(S3Provider::HasCreateToken(object, "token-1"));
+	REQUIRE_FALSE(S3Provider::HasCreateToken(object, "token-2"));
+	REQUIRE_FALSE(S3Provider::HasCreateToken(HTTPHeaders(), "token-1"));
+}
+
 TEST_CASE("S3 provider version policy preserves version semantics", "[httpfs][s3][gcs-generation]") {
 	for (auto type : {S3ProviderType::S3, S3ProviderType::GCS, S3ProviderType::R2}) {
 		auto provider = ResolveTestAuth(TestAuthConfig(type)).GetProvider();

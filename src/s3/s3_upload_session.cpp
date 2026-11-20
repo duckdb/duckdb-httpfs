@@ -1,5 +1,6 @@
 #include "s3/s3_upload_session.hpp"
 
+#include "s3/s3_provider.hpp"
 #include "s3/s3_request.hpp"
 #include "s3/s3_url.hpp"
 #include "s3/s3_xml_response.hpp"
@@ -8,7 +9,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
+#include <cerrno>
 #include <cstring>
 
 namespace duckdb {
@@ -57,8 +60,10 @@ void S3UploadSession::WriteClaim::Fail(ErrorData error, FailureDisposition dispo
 }
 
 S3UploadSession::S3UploadSession(S3FileSystem &s3fs_p, shared_ptr<HTTPRequestSession> request_session_p, string path_p,
-                                 S3UploadConfig config_p)
-    : s3fs(s3fs_p), request_session(std::move(request_session_p)), path(std::move(path_p)), config(config_p) {
+                                 S3UploadConfig config_p, bool exclusive_create_p)
+    : s3fs(s3fs_p), request_session(std::move(request_session_p)), path(std::move(path_p)), config(config_p),
+      exclusive_create(exclusive_create_p),
+      create_token(exclusive_create_p ? UUID::ToString(UUID::GenerateRandomUUID()) : string()) {
 }
 
 S3UploadSession::~S3UploadSession() noexcept = default;
@@ -351,8 +356,10 @@ S3UploadSession::PreparedWrite S3UploadSession::PrepareWrite(const_data_ptr_t da
 
 string S3UploadSession::InitializeMultipartUpload() {
 	string result;
-	auto request_result = s3fs.get().PostRequest(*request_session, S3RequestOperation::CREATE_MULTIPART_UPLOAD, path,
-	                                             result, nullptr, 0, S3RequestQuery({{"uploads", ""}}));
+	// The token goes with the upload's metadata into the object that CompleteMultipartUpload publishes
+	auto request_result =
+	    s3fs.get().PostRequest(*request_session, S3RequestOperation::CREATE_MULTIPART_UPLOAD, path, result, nullptr, 0,
+	                           S3RequestQuery({{"uploads", ""}}), GetCreateCondition(CreateRequest::INITIATE));
 	auto &response = request_result.response;
 	auto &request_context = request_result.context;
 	if (response->HasRequestError()) {
@@ -466,12 +473,140 @@ S3RequestResult S3UploadSession::RunUploadRequest(S3RequestOperation operation, 
 	return result;
 }
 
-void S3UploadSession::UploadObject(const_data_ptr_t data, idx_t size) {
-	auto request_result = RunUploadRequest(S3RequestOperation::PUT_OBJECT, data, size, S3RequestQuery());
-	auto &response = request_result.response;
-	if (response->status != HTTPStatusCode::OK_200 && response->status != HTTPStatusCode::Created_201) {
-		throw GetStatusError(*response, request_result.context);
+// The headers of an exclusive create: PutObject carries both the condition and the token; CreateMultipartUpload the
+// token, which the upload's metadata takes into the published object; CompleteMultipartUpload the condition
+S3CreateCondition S3UploadSession::GetCreateCondition(CreateRequest request) const {
+	S3CreateCondition result;
+	if (exclusive_create) {
+		result.if_absent = request != CreateRequest::INITIATE;
+		if (request != CreateRequest::COMPLETE) {
+			result.token = create_token;
+		}
 	}
+	return result;
+}
+
+// Core sends a PUT again after a dropped connection or a 5xx, and S3RequestExecutor sends CompleteMultipartUpload
+// again after a 5xx. If the first attempt published the object, the next one is refused (412, or NoSuchUpload for a
+// multipart upload), or fails again. The object then carries this session's token.
+S3UploadSession::CreateOutcome S3UploadSession::CheckCreateOutcome() {
+	D_ASSERT(exclusive_create);
+	try {
+		auto request_result = s3fs.get().HeadRequest(*request_session, path);
+		auto &response = *request_result.response;
+		if (response.HasRequestError()) {
+			return CreateOutcome::UNKNOWN;
+		}
+		if (response.status == HTTPStatusCode::NotFound_404) {
+			return CreateOutcome::MISSING;
+		}
+		if (response.status != HTTPStatusCode::OK_200) {
+			return CreateOutcome::UNKNOWN;
+		}
+		return S3Provider::HasCreateToken(response.headers, create_token) ? CreateOutcome::OURS : CreateOutcome::OTHER;
+	} catch (std::exception &) {
+		return CreateOutcome::UNKNOWN;
+	}
+}
+
+void S3UploadSession::ThrowAlreadyExists() {
+	throw IOException({{"errno", std::to_string(EEXIST)}},
+	                  "Unable to write URL \"%s\" for exclusive create: it already exists", GetDisplayPath());
+}
+
+void S3UploadSession::UploadObject(const_data_ptr_t data, idx_t size) {
+	for (idx_t attempt = 0;; attempt++) {
+		unique_ptr<S3RequestResult> request_result;
+		std::function<void()> throw_original;
+		Refusal refusal = Refusal::NONE;
+		try {
+			request_result = make_uniq<S3RequestResult>(
+			    s3fs.get().PutRequest(*request_session, S3RequestOperation::PUT_OBJECT, path, data, size,
+			                          S3RequestQuery(), GetCreateCondition(CreateRequest::PUT)));
+		} catch (std::exception &) {
+			// Thrown during the request (a credential refresh, an interrupt in a back-off): an earlier attempt may
+			// have published
+			throw_original = [error = std::current_exception()]() {
+				std::rethrow_exception(error);
+			};
+		}
+		if (request_result) {
+			auto &response = *request_result->response;
+			if (!response.HasRequestError() &&
+			    (response.status == HTTPStatusCode::OK_200 || response.status == HTTPStatusCode::Created_201)) {
+				return;
+			}
+			refusal = GetRefusal(response);
+			throw_original = [&]() {
+				if (response.HasRequestError()) {
+					throw IOException("S3 upload request for \"%s\" could not be completed: %s",
+					                  request_result->context.display_url, response.GetRequestError());
+				}
+				throw GetStatusError(response, request_result->context);
+			};
+		}
+		if (!exclusive_create) {
+			throw_original();
+		}
+		// AWS answers 409 ConditionalRequestConflict when conditional writes of one key overlap; with no object,
+		// nobody has published yet, and AWS asks to send the request again
+		const bool resend_if_missing = attempt == 0 && refusal == Refusal::CONFLICT;
+		if (ResolvePublishFailure(refusal, throw_original, resend_if_missing)) {
+			return;
+		}
+	}
+}
+
+S3UploadSession::Refusal S3UploadSession::GetRefusal(const HTTPResponse &response, const string &error_code) {
+	if (response.HasRequestError()) {
+		return Refusal::NONE;
+	}
+	if (response.status == HTTPStatusCode::PreconditionFailed_412 || error_code == "PreconditionFailed") {
+		return Refusal::PRECONDITION_FAILED;
+	}
+	if (response.status == HTTPStatusCode::Conflict_409 || error_code == "ConditionalRequestConflict") {
+		return Refusal::CONFLICT;
+	}
+	return Refusal::NONE;
+}
+
+// An exclusive create whose publish did not succeed. Whatever the last answer was, an earlier attempt may have
+// published: core and S3RequestExecutor send a request again after a dropped connection, a 5xx, a throttling answer
+// or a RequestTimeout, and the last attempt then fails in its own way. The token decides:
+// - this upload's object: success (true);
+// - another writer's object: "already exists" after a refusal (412, or 409 for overlapping conditional writes), else
+//   the original error;
+// - no object: the original error, or false (send again) with resend_if_missing;
+// - the check failed: an unknown outcome. After a 412 the server has answered that this request did not publish,
+//   so a multipart upload is aborted then (a plain IOException); otherwise it is left (S3AmbiguousUploadException).
+bool S3UploadSession::ResolvePublishFailure(Refusal refusal, const std::function<void()> &throw_original,
+                                            bool resend_if_missing) {
+	D_ASSERT(exclusive_create);
+	switch (CheckCreateOutcome()) {
+	case CreateOutcome::OURS:
+		return true;
+	case CreateOutcome::OTHER:
+		if (refusal != Refusal::NONE) {
+			ThrowAlreadyExists();
+		}
+		break;
+	case CreateOutcome::MISSING:
+		if (resend_if_missing) {
+			return false;
+		}
+		break;
+	case CreateOutcome::UNKNOWN: {
+		auto message = StringUtil::Format("S3 exclusive create of \"%s\" has an unknown outcome: the publish was not "
+		                                  "confirmed, and whether the object is this upload's could not be checked",
+		                                  GetDisplayPath());
+		if (refusal == Refusal::PRECONDITION_FAILED) {
+			throw IOException(message);
+		}
+		throw S3AmbiguousUploadException(message);
+	}
+	}
+	throw_original();
+	throw InternalException("S3 publish failure was not rethrown");
 }
 
 void S3UploadSession::UploadPart(PreparedPart &part) {
@@ -530,40 +665,69 @@ void S3UploadSession::CompleteMultipartUpload() {
 
 	S3RequestQuery query {{"uploadId", *snapshot.upload_id}};
 	string result;
-	auto request_result =
-	    s3fs.get().PostRequest(*request_session, S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, path, result,
-	                           const_data_ptr_cast(completion_body.data()), completion_body.size(), query);
-	auto &response = request_result.response;
-	auto &request_context = request_result.context;
-	if (response->HasRequestError()) {
-		throw S3AmbiguousUploadException(
-		    StringUtil::Format("S3 multipart upload completion for \"%s\" has an unknown outcome because the "
-		                       "response was not received; "
-		                       "the request was not retried or aborted",
-		                       request_context.display_url));
-	}
-	if (!IsSuccessfulStatus(response->status)) {
-		throw GetStatusError(*response, request_context);
-	}
-
+	unique_ptr<S3RequestResult> request_result;
+	// Every failure sets throw_original; an exclusive create checks it with ResolvePublishFailure first
+	std::function<void()> throw_original;
+	Refusal refusal = Refusal::NONE;
 	S3XMLResponse parsed_response;
-	if (!S3XMLResponseParser::TryParse(result, parsed_response)) {
-		throw S3AmbiguousUploadException(StringUtil::Format(
-		    "S3 multipart upload completion for \"%s\" returned malformed XML; the request was not retried or aborted",
-		    request_context.display_url));
+	try {
+		request_result = make_uniq<S3RequestResult>(
+		    s3fs.get().PostRequest(*request_session, S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, path, result,
+		                           const_data_ptr_cast(completion_body.data()), completion_body.size(), query,
+		                           GetCreateCondition(CreateRequest::COMPLETE)));
+	} catch (std::exception &) {
+		throw_original = [error = std::current_exception()]() {
+			std::rethrow_exception(error);
+		};
 	}
-	if (parsed_response.type == S3XMLResponseType::ERROR) {
-		throw HTTPException(
-		    *response, "S3 multipart upload completion for \"%s\" failed: %s%s%s", request_context.display_url,
-		    parsed_response.error_code.empty() ? "S3 returned an embedded error" : parsed_response.error_code,
-		    parsed_response.error_message.empty() ? "" : ": ", parsed_response.error_message);
+	if (request_result) {
+		auto &response = *request_result->response;
+		auto &display_url = request_result->context.display_url;
+		if (response.HasRequestError()) {
+			throw_original = [&]() {
+				throw S3AmbiguousUploadException(StringUtil::Format(
+				    "S3 multipart upload completion for \"%s\" has an unknown outcome because the response was not "
+				    "received; the request was not retried or aborted",
+				    display_url));
+			};
+		} else if (!IsSuccessfulStatus(response.status)) {
+			refusal = GetRefusal(response);
+			throw_original = [&]() {
+				throw GetStatusError(response, request_result->context);
+			};
+		} else if (!S3XMLResponseParser::TryParse(result, parsed_response)) {
+			throw_original = [&]() {
+				throw S3AmbiguousUploadException(StringUtil::Format("S3 multipart upload completion for \"%s\" "
+				                                                    "returned malformed XML; the request was not "
+				                                                    "retried or aborted",
+				                                                    display_url));
+			};
+		} else if (parsed_response.type == S3XMLResponseType::ERROR) {
+			// CompleteMultipartUpload can answer HTTP 200 with an error document (AWS S3 API reference), the
+			// refusal of the condition included
+			refusal = GetRefusal(response, parsed_response.error_code);
+			throw_original = [&]() {
+				throw HTTPException(response, "S3 multipart upload completion for \"%s\" failed: %s%s%s", display_url,
+				                    parsed_response.error_code.empty() ? "S3 returned an embedded error"
+				                                                       : parsed_response.error_code,
+				                    parsed_response.error_message.empty() ? "" : ": ", parsed_response.error_message);
+			};
+		} else if (parsed_response.type != S3XMLResponseType::MULTIPART_COMPLETION) {
+			throw_original = [&]() {
+				throw S3AmbiguousUploadException(StringUtil::Format("S3 multipart upload completion for \"%s\" "
+				                                                    "returned an unrecognized response; the request "
+				                                                    "was not retried or aborted",
+				                                                    display_url));
+			};
+		} else {
+			return;
+		}
 	}
-	if (parsed_response.type != S3XMLResponseType::MULTIPART_COMPLETION) {
-		throw S3AmbiguousUploadException(StringUtil::Format("S3 multipart upload completion for \"%s\" returned an "
-		                                                    "unrecognized response; the request was not retried or "
-		                                                    "aborted",
-		                                                    request_context.display_url));
+	if (exclusive_create) {
+		ResolvePublishFailure(refusal, throw_original);
+		return;
 	}
+	throw_original();
 }
 
 string S3UploadSession::GetDisplayPath() const {

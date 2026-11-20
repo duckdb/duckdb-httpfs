@@ -59,7 +59,12 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 		}
 	}
 	if (flags.OpenForWriting()) {
-		upload_session = make_uniq<S3UploadSession>(fs.Cast<S3FileSystem>(), request_session, file.path, upload_config);
+		// On GCS an exclusive create gets the check at open (RequestFileInfo) only, and publishes without a
+		// condition (warned in Initialize)
+		unconditional_exclusive_create =
+		    flags.ExclusiveCreate() && !auth_params_p.GetProvider().SupportsConditionalCreate();
+		upload_session = make_uniq<S3UploadSession>(fs.Cast<S3FileSystem>(), request_session, file.path, upload_config,
+		                                            flags.ExclusiveCreate() && !unconditional_exclusive_create);
 	}
 }
 
@@ -93,6 +98,23 @@ HTTPObjectVersion S3FileHandle::ReadObjectVersion(const HTTPHeaders &headers) co
 		return {};
 	}
 	return version;
+}
+
+string S3FileHandle::GetDisplayPath() const {
+	auto captured = request_session->Capture();
+	return S3Url::GetDisplayUrl(path, captured.snapshot->Cast<S3RequestSnapshot>().auth_params);
+}
+
+string S3FileHandle::GetExclusiveCreateAccessHint() const {
+	auto captured = request_session->Capture();
+	auto &provider = captured.snapshot->Cast<S3RequestSnapshot>().auth_params.GetProvider();
+	if (!provider.SupportsConditionalCreate()) {
+		return "on GCS, storage.objects.get and storage.objects.list";
+	}
+	if (provider.GetCompatibilityProfile() == S3CompatibilityProfile::S3) {
+		return "on AWS S3, s3:GetObject and s3:ListBucket";
+	}
+	return string();
 }
 
 string S3FileSystem::GetVersionTag(FileHandle &handle) {
@@ -261,6 +283,13 @@ void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener>
 		request_session->TryPublish(captured.snapshot, std::move(replacement));
 	}
 	HTTPFileHandle::Initialize(file, opener);
+	if (unconditional_exclusive_create && !file_exists && logger) {
+		DUCKDB_LOG_WARNING(logger,
+		                   "Exclusive create of \"%s\" on GCS: the file did not exist when opened, but it will be "
+		                   "written without a condition, so an object that another writer creates in the meantime is "
+		                   "overwritten",
+		                   GetDisplayPath());
+	}
 }
 
 bool S3FileSystem::CanHandleFile(const string &fpath) {

@@ -9,6 +9,7 @@
 #include "duckdb/storage/buffer/buffer_handle.hpp"
 
 #include <condition_variable>
+#include <functional>
 
 namespace duckdb {
 
@@ -19,6 +20,7 @@ struct HTTPResponse;
 struct S3RequestContext;
 struct S3RequestQuery;
 struct S3RequestResult;
+struct S3CreateCondition;
 enum class S3RequestOperation : uint8_t;
 enum class RequestType : uint8_t;
 
@@ -103,8 +105,9 @@ public:
 
 public:
 	//! Session lifecycle.
+	//! exclusive_create: publish the object only if none exists at the key (FILE_FLAGS_EXCLUSIVE_CREATE)
 	S3UploadSession(S3FileSystem &s3fs, shared_ptr<HTTPRequestSession> request_session, string path,
-	                S3UploadConfig config);
+	                S3UploadConfig config, bool exclusive_create = false);
 	~S3UploadSession() noexcept;
 
 	//! Upload operations.
@@ -152,6 +155,20 @@ private:
 	void UploadPart(PreparedPart &part);
 	shared_ptr<const ErrorData> AbortMultipartUpload(const string &upload_id);
 
+	//! Exclusive create: the condition a request carries, and what a publish that the server refused, or whose answer
+	//! was lost, did.
+	enum class CreateRequest : uint8_t { PUT, INITIATE, COMPLETE };
+	enum class CreateOutcome : uint8_t { OURS, OTHER, MISSING, UNKNOWN };
+	S3CreateCondition GetCreateCondition(CreateRequest request) const;
+	CreateOutcome CheckCreateOutcome();
+	[[noreturn]] void ThrowAlreadyExists();
+	//! How the server refused a publish: the condition (412, PreconditionFailed), or an overlapping conditional
+	//! write (409, ConditionalRequestConflict)
+	enum class Refusal : uint8_t { NONE, PRECONDITION_FAILED, CONFLICT };
+	static Refusal GetRefusal(const HTTPResponse &response, const string &error_code = string());
+	bool ResolvePublishFailure(Refusal refusal, const std::function<void()> &throw_original,
+	                           bool resend_if_missing = false);
+
 	//! Request diagnostics.
 	string GetDisplayPath() const;
 	static HTTPException GetStatusError(const HTTPResponse &response, const S3RequestContext &request_context);
@@ -162,6 +179,9 @@ private:
 	shared_ptr<HTTPRequestSession> request_session;
 	const string path;
 	const S3UploadConfig config;
+	const bool exclusive_create;
+	//! Stored in the object's metadata by an exclusive create; empty otherwise
+	const string create_token;
 
 	//! Operation and lifecycle synchronization.
 	annotated_mutex state_lock;

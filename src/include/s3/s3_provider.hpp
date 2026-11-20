@@ -20,6 +20,7 @@ class S3KeyValueReader;
 struct HTTPHeaders;
 struct ExtendedOpenFileInfo;
 struct HTTPReadCondition;
+struct S3CreateCondition;
 
 enum class S3ProviderType : uint8_t { S3, GCS, R2 };
 
@@ -112,12 +113,22 @@ public:
 	void ApplyReadCondition(const HTTPReadCondition &condition, HTTPHeaders &headers) const;
 	string GetVersionTag(const HTTPObjectVersion &version, const string &etag) const;
 
+	//! Exclusive create (FILE_FLAGS_EXCLUSIVE_CREATE): the request headers of a conditional write, and whether the
+	//! metadata of an object (the headers of a HEAD) carry the given token
+	void ApplyCreateCondition(const S3CreateCondition &condition, HTTPHeaders &headers) const;
+	//! False for GCS, by scheme or by endpoint (an s3:// or alias URL with ENDPOINT storage.googleapis.com): GCS
+	//! documents If-None-Match for reads only, and no preconditions on XML API multipart uploads
+	bool SupportsConditionalCreate() const {
+		return profile != S3CompatibilityProfile::GCS && !gcs_endpoint;
+	}
+	static bool HasCreateToken(const HTTPHeaders &headers, const string &token);
+
 	bool operator==(const S3Provider &other) const;
 
 private:
 	friend class S3AuthParams;
 	S3Provider();
-	S3Provider(S3ProviderMatch route_p, S3CompatibilityProfile profile_p);
+	S3Provider(S3ProviderMatch route_p, S3CompatibilityProfile profile_p, bool gcs_endpoint_p = false);
 
 private:
 	static HTTPObjectVersion ParseVersionValue(HTTPObjectVersionType type, const string &value);
@@ -126,6 +137,8 @@ private:
 	//! Finalized route and compatibility policy
 	S3ProviderMatch route;
 	S3CompatibilityProfile profile;
+	//! The endpoint is GCS's, whatever the URL scheme
+	bool gcs_endpoint = false;
 };
 
 } // namespace duckdb

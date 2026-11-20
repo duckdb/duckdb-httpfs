@@ -80,6 +80,10 @@ protected:
 	virtual shared_ptr<const HTTPRequestSnapshot> CreateRequestSnapshot(const HTTPFSParams &params) const;
 	virtual HTTPReadConfig BuildReadConfig() const;
 	virtual HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const;
+	//! The path as error messages show it (without credentials in the URL)
+	virtual string GetDisplayPath() const;
+	//! The permissions an exclusive create needs to check whether the file exists, for the error on a 403
+	virtual string GetExclusiveCreateAccessHint() const;
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
 	void InitializeLogger(FileOpener &opener);
@@ -92,6 +96,7 @@ private:
 	bool TryLoadFileInfoWithoutRequest();
 	unique_ptr<HTTPResponse> RequestFileInfo(HTTPFileSystem &file_system, timestamp_t &request_time,
 	                                         timestamp_t &response_time);
+	unique_ptr<HTTPResponse> CheckExclusiveCreate(HTTPFileSystem &file_system, const HTTPResponse &response);
 	unique_ptr<HTTPResponse> RetryFileInfoWithRange(HTTPFileSystem &file_system, timestamp_t &request_time,
 	                                                timestamp_t &response_time);
 	HTTPMetadataCacheEntry ReadFileInfo(const HTTPResponse &response, timestamp_t request_time,
@@ -122,6 +127,8 @@ public:
 	bool write_overwrite_mode = false;
 	//! Set when opened with FILE_FLAGS_NULL_IF_NOT_EXISTS and the server answered 404
 	bool file_not_found = false;
+	//! Set when opened with FILE_FLAGS_EXCLUSIVE_CREATE | FILE_FLAGS_NULL_IF_EXISTS and the file exists
+	bool file_exists = false;
 
 	//! Per-path state shared by all handles in this query
 	shared_ptr<HTTPFileState> file_state;
