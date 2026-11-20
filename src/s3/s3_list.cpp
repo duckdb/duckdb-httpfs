@@ -321,7 +321,12 @@ void S3GlobResult::ScanPrefix() const {
 		PrefetchPrefixes(1);
 	}
 	if (prefix.result->error) {
-		std::rethrow_exception(prefix.result->error);
+		// Forget the failure so that reading the glob again lists the prefix again.
+		auto error = prefix.result->error;
+		prefix.result.reset();
+		D_ASSERT(prefetched_count > 0);
+		--prefetched_count;
+		std::rethrow_exception(error);
 	}
 	auto entry = std::move(entries.back());
 	entries.pop_back();

@@ -9,6 +9,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/http/http_retry_budget.hpp"
@@ -1537,6 +1538,36 @@ static void RunParallelGlobReissuesThrottledPrefixTest(const string &client_impl
 	REQUIRE(CountShrinkWarnings(con) >= 1);
 }
 
+static void RunParallelGlobListsFailedPrefixAgainTest(const string &client_implementation) {
+	auto config = MakeTreeListConfig();
+	config.failures.internal_error_list_prefix = "tree/d05/";
+	config.failures.internal_error_prefix_lists = 1;
+	MockS3Server server(std::move(config));
+
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureParallelGlobTest(db, con, server, client_implementation, 1);
+	// a 500 must not be retried by the client
+	S3TestHelper::RequireQueryOk(con, "SET http_retries=0");
+
+	con.BeginTransaction();
+	auto files = FileSystem::GetFileSystem(*con.context).GlobFileList("s3://refresh-bucket/tree/*/*.bin");
+	REQUIRE_THROWS_WITH(files->GetAllFiles(), Catch::Matchers::Contains("500"));
+	// the same glob read again requests the prefix again
+	REQUIRE(files->GetAllFiles().size() == TREE_DIRECTORIES * TREE_FILES_PER_DIRECTORY);
+	con.Rollback();
+
+	auto observations = server.Observations();
+	INFO(MockS3DescribeObservations(observations));
+	auto failed_lists = GetPrefixListObservations(observations, "tree/d05/");
+	REQUIRE(failed_lists.size() == 2);
+	REQUIRE(failed_lists.front().status == 500);
+	REQUIRE(failed_lists.back().status == 200);
+	// only the failed prefix is listed again
+	REQUIRE(CountListObservations(observations, 500) == 1);
+	REQUIRE(CountListObservations(observations, 200) == 2 + TREE_DIRECTORIES);
+}
+
 static void RunParallelGlobExhaustedThrottlingTest(const string &client_implementation) {
 	auto config = MakeTreeListConfig();
 	config.failures.transient_503_list_prefix = "tree/d";
@@ -1621,6 +1652,14 @@ TEST_CASE("S3 parallel glob re-issues a throttled prefix listing before failing"
 	for (const auto &client : {"httplib", "curl"}) {
 		DYNAMIC_SECTION(client) {
 			RunParallelGlobReissuesThrottledPrefixTest(client);
+		}
+	}
+}
+
+TEST_CASE("S3 parallel glob lists a failed prefix again when it is read again", "[httpfs][s3][retry]") {
+	for (const auto &client : {"httplib", "curl"}) {
+		DYNAMIC_SECTION(client) {
+			RunParallelGlobListsFailedPrefixAgainTest(client);
 		}
 	}
 }
