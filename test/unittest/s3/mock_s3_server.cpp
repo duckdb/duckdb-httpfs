@@ -641,6 +641,14 @@ public:
 		Record(request, response.status);
 	}
 
+	void SendInternalError(const httplib::Request &request, httplib::Response &response) const {
+		response.status = 500;
+		response.set_content(
+		    "<Error><Code>InternalError</Code><Message>We encountered an internal error.</Message></Error>",
+		    "application/xml");
+		Record(request, response.status);
+	}
+
 	void SendDisconnectedResponse(const httplib::Request &request, httplib::Response &response,
 	                              int status = 200) const {
 		response.status = status;
@@ -1584,6 +1592,12 @@ public:
 				SendSlowDown(request, response);
 				return;
 			}
+			if (config.failures.internal_error_prefix_lists > 0 &&
+			    StringUtil::StartsWith(GetParameter(request, "prefix"), config.failures.internal_error_list_prefix) &&
+			    internal_error_prefix_lists_sent.fetch_add(1) < config.failures.internal_error_prefix_lists) {
+				SendInternalError(request, response);
+				return;
+			}
 			if (config.failures.max_concurrent_lists > 0 && in_flight.count > config.failures.max_concurrent_lists) {
 				SendSlowDown(request, response);
 				return;
@@ -1674,6 +1688,7 @@ public:
 	//! Injected request failures
 	mutable atomic<idx_t> transient_503_lists_sent {0};
 	mutable atomic<idx_t> transient_503_prefix_lists_sent {0};
+	mutable atomic<idx_t> internal_error_prefix_lists_sent {0};
 	mutable atomic<idx_t> transient_400_lists_sent {0};
 	mutable atomic<idx_t> malformed_success_lists_sent {0};
 	mutable atomic<idx_t> remaining_put_failures {0};
