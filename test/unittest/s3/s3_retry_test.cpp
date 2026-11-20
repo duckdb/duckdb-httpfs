@@ -1547,7 +1547,7 @@ static void RunParallelGlobListsFailedPrefixAgainTest(const string &client_imple
 	DuckDB db(nullptr);
 	Connection con(db);
 	ConfigureParallelGlobTest(db, con, server, client_implementation, 1);
-	// one failed request is a failure
+	// a 500 must not be retried by the client
 	S3TestHelper::RequireQueryOk(con, "SET http_retries=0");
 
 	con.BeginTransaction();
@@ -1563,6 +1563,9 @@ static void RunParallelGlobListsFailedPrefixAgainTest(const string &client_imple
 	REQUIRE(failed_lists.size() == 2);
 	REQUIRE(failed_lists.front().status == 500);
 	REQUIRE(failed_lists.back().status == 200);
+	// only the failed prefix is listed again
+	REQUIRE(CountListObservations(observations, 500) == 1);
+	REQUIRE(CountListObservations(observations, 200) == 2 + TREE_DIRECTORIES);
 }
 
 static void RunParallelGlobExhaustedThrottlingTest(const string &client_implementation) {

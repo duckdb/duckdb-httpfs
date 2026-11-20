@@ -321,7 +321,7 @@ void S3GlobResult::ScanPrefix() const {
 		PrefetchPrefixes(1);
 	}
 	if (prefix.result->error) {
-		// forget the failure once reported, so that reading the glob again lists the prefix again
+		// Forget the failure so that reading the glob again lists the prefix again.
 		auto error = prefix.result->error;
 		prefix.result.reset();
 		D_ASSERT(prefetched_count > 0);
