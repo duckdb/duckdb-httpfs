@@ -1,6 +1,7 @@
 #include "s3/s3_provider.hpp"
 
 #include "s3/s3_auth.hpp"
+#include "s3/s3_request.hpp"
 #include "http/httpfs.hpp"
 
 #include "duckdb/common/string_util.hpp"
@@ -121,6 +122,38 @@ void S3Provider::ApplyReadCondition(const HTTPReadCondition &condition, HTTPHead
 		throw InvalidInputException("GCS generation checks require a GCS provider");
 	}
 	headers["x-goog-if-generation-match"] = condition.value;
+}
+
+// The user-metadata header of the token. A hyphen, not an underscore: some proxies (nginx without
+// underscores_in_headers) drop header names with underscores.
+static constexpr const char *CREATE_TOKEN_HEADER = "x-amz-meta-duckdb-exclusive-create";
+
+void S3Provider::ApplyCreateCondition(const S3CreateCondition &condition, HTTPHeaders &headers) const {
+	if (condition.token.empty() && !condition.if_absent) {
+		return;
+	}
+	if (!SupportsConditionalCreate()) {
+		// Not sent to GCS (S3FileHandle): its conditional writes are not supported yet
+		throw InternalException("Exclusive create conditions are not supported on GCS");
+	}
+	// Configured extra headers are already in `headers`; only a request that carries the condition rejects them
+	for (auto name : {"If-None-Match", CREATE_TOKEN_HEADER}) {
+		if (headers.HasHeader(name)) {
+			throw InvalidInputException("Configured S3 header \"%s\" conflicts with the exclusive create of this file",
+			                            name);
+		}
+	}
+	if (!condition.token.empty()) {
+		headers[CREATE_TOKEN_HEADER] = condition.token;
+	}
+	if (condition.if_absent) {
+		headers["If-None-Match"] = "*";
+	}
+}
+
+bool S3Provider::HasCreateToken(const HTTPHeaders &headers, const string &token) {
+	D_ASSERT(!token.empty());
+	return headers.HasHeader(CREATE_TOKEN_HEADER) && headers.GetHeaderValue(CREATE_TOKEN_HEADER) == token;
 }
 
 string S3Provider::GetVersionTag(const HTTPObjectVersion &version, const string &etag) const {
@@ -357,8 +390,8 @@ bool S3SecretConfig::TryApplySecretOption(const CreateSecretInput &input, const 
 S3Provider::S3Provider() : S3Provider(S3ProviderMatch {S3ProviderType::S3, "s3://"}, S3CompatibilityProfile::S3) {
 }
 
-S3Provider::S3Provider(S3ProviderMatch route_p, S3CompatibilityProfile profile_p)
-    : route(std::move(route_p)), profile(profile_p) {
+S3Provider::S3Provider(S3ProviderMatch route_p, S3CompatibilityProfile profile_p, bool gcs_endpoint_p)
+    : route(std::move(route_p)), profile(profile_p), gcs_endpoint(gcs_endpoint_p) {
 }
 
 S3AuthType S3Provider::GetAuthType(const S3AuthParams &auth_params) const {
@@ -390,6 +423,12 @@ static bool EndpointIsR2(const NormalizedS3Endpoint &endpoint) {
 	return jurisdiction == "eu" || jurisdiction == "us" || jurisdiction == "fedramp";
 }
 
+// storage.googleapis.com, or a regional storage.<region>.rep.googleapis.com
+static bool EndpointIsGCS(const NormalizedS3Endpoint &endpoint) {
+	auto &host = endpoint.GetHost();
+	return StringUtil::StartsWith(host, "storage.") && StringUtil::EndsWith(host, ".googleapis.com");
+}
+
 S3Provider S3Provider::Resolve(S3ProviderMatch route, const NormalizedS3Endpoint &endpoint) {
 	auto profile = S3CompatibilityProfile::S3;
 	if (route.type == S3ProviderType::GCS) {
@@ -397,7 +436,7 @@ S3Provider S3Provider::Resolve(S3ProviderMatch route, const NormalizedS3Endpoint
 	} else if (route.type == S3ProviderType::R2 || EndpointIsR2(endpoint)) {
 		profile = S3CompatibilityProfile::R2;
 	}
-	return S3Provider(std::move(route), profile);
+	return S3Provider(std::move(route), profile, EndpointIsGCS(endpoint));
 }
 
 static S3MultipartUploadPolicy DefaultMultipartUploadPolicy() {
@@ -487,7 +526,7 @@ string S3Provider::GetAuthError(const S3AuthParams &auth_params) const {
 
 bool S3Provider::operator==(const S3Provider &other) const {
 	return route.type == other.route.type && route.prefix == other.route.prefix && route.origin == other.route.origin &&
-	       profile == other.profile;
+	       profile == other.profile && gcs_endpoint == other.gcs_endpoint;
 }
 
 } // namespace duckdb

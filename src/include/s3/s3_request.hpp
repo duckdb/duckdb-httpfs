@@ -133,6 +133,15 @@ struct S3RequestResult {
 	S3RequestContext context;
 };
 
+//! What a write sends for FILE_FLAGS_EXCLUSIVE_CREATE (S3Provider::ApplyCreateCondition writes the headers)
+struct S3CreateCondition {
+	//! Write only if no object exists at the key: If-None-Match: *. Answered with 412 if one does. Not sent on GCS.
+	bool if_absent = false;
+	//! A random token stored in the object's metadata, so that a resent request whose first attempt went through can
+	//! tell its own object from another writer's
+	string token;
+};
+
 struct S3RequestSpec {
 	using CreateQueryCallback = std::function<S3RequestQuery(const ParsedS3Url &)>;
 
@@ -144,6 +153,7 @@ struct S3RequestSpec {
 	string content_md5;
 	HTTPObjectVersion object_version;
 	HTTPReadCondition read_condition;
+	S3CreateCondition create_condition;
 };
 
 struct S3RequestData {
@@ -171,13 +181,12 @@ private:
 
 struct S3RequestUtil {
 	static const S3RequestOperationInfo &GetOperationInfo(S3RequestOperation operation);
-	static HTTPHeaders CreateHeaders(EncryptionUtil &encryption_util, const ParsedS3Url &parsed_url,
-	                                 S3RequestOperation operation, const S3RequestQuery &query,
-	                                 const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
-	                                 string payload_hash = "", string content_type = "", string content_md5 = "",
-	                                 const HTTPConfiguredHeaders &configured_headers = {},
-	                                 const HTTPReadCondition &read_condition = {},
-	                                 optional_ptr<DatabaseInstance> database = nullptr);
+	static HTTPHeaders
+	CreateHeaders(EncryptionUtil &encryption_util, const ParsedS3Url &parsed_url, S3RequestOperation operation,
+	              const S3RequestQuery &query, const S3AuthParams &auth_params, string date_now = "",
+	              string datetime_now = "", string payload_hash = "", string content_type = "", string content_md5 = "",
+	              const HTTPConfiguredHeaders &configured_headers = {}, const HTTPReadCondition &read_condition = {},
+	              optional_ptr<DatabaseInstance> database = nullptr, const S3CreateCondition &create_condition = {});
 	static string GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len);
 	static bool IsRequestTimeout(const HTTPResponse &response);
 	static bool IsRetryableReceivedResponse(const HTTPResponse &response);
