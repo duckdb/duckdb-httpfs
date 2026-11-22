@@ -14,6 +14,7 @@
 #include "duckdb/parallel/task_executor.hpp"
 
 #include <exception>
+#include <iterator>
 
 namespace duckdb {
 
@@ -92,7 +93,6 @@ private:
 	S3ListObjectsV2Result Request(const string &path, const string &continuation_token, S3ListMode mode,
 	                              optional_ptr<const string> prefix = nullptr) const;
 	vector<Entry> ConvertPage(const S3ListObjectsV2Result &response) const;
-	void AppendEntries(vector<Entry> &page) const;
 	void ScanTopLevel() const;
 	bool ShouldInvestigateRecursiveGlob() const;
 	void SelectGlobType(S3ListObjectsV2Result &response, string &continuation_token) const;
@@ -243,13 +243,6 @@ vector<S3GlobResult::Entry> S3GlobResult::ConvertPage(const S3ListObjectsV2Resul
 	return page;
 }
 
-//! Moves a converted page onto the stack, whose capacity the caller has reserved
-void S3GlobResult::AppendEntries(vector<Entry> &page) const {
-	for (auto &entry : page) {
-		entries.push_back(std::move(entry));
-	}
-}
-
 idx_t S3GlobResult::GetConcurrency() const {
 	auto client_context = context;
 	const auto threads = client_context ? TaskScheduler::GetScheduler(*client_context).NumberOfAsyncThreads() + 1 : 1;
@@ -336,28 +329,28 @@ void S3GlobResult::ScanPrefix() const {
 	if (prefix.result->error) {
 		std::rethrow_exception(prefix.result->error);
 	}
-	// Converted before the prefix moves on to its next page: a page that cannot be converted is requested again.
-	vector<Entry> page;
+	// The page is converted and on the stack, above the prefix, before the prefix moves on to its next page: a page
+	// that cannot be converted is requested again.
+	const auto prefix_index = entries.size() - 1;
 	try {
-		page = ConvertPage(prefix.result->response);
-		entries.reserve(entries.size() + page.size());
+		auto page = ConvertPage(prefix.result->response);
+		entries.insert(entries.end(), std::make_move_iterator(page.begin()), std::make_move_iterator(page.end()));
 	} catch (...) {
 		prefix.result.reset();
 		D_ASSERT(prefetched_count > 0);
 		--prefetched_count;
 		throw;
 	}
-	auto entry = std::move(entries.back());
-	entries.pop_back();
 	D_ASSERT(prefetched_count > 0);
 	--prefetched_count;
+	auto &entry = entries[prefix_index];
 	auto continuation_token = std::move(entry.prefix->result->response.continuation_token);
-	if (!continuation_token.empty()) {
+	if (continuation_token.empty()) {
+		entries.erase(entries.begin() + NumericCast<int64_t>(prefix_index));
+	} else {
 		entry.prefix->continuation_token = std::move(continuation_token);
 		entry.prefix->result.reset();
-		entries.push_back(std::move(entry));
 	}
-	AppendEntries(page);
 }
 
 void S3GlobResult::ScanTopLevel() const {
@@ -370,11 +363,11 @@ void S3GlobResult::ScanTopLevel() const {
 	if (ShouldInvestigateRecursiveGlob() && !continuation_token.empty()) {
 		SelectGlobType(response, continuation_token);
 	}
-	// Converted before the listing moves past the page: a page that cannot be converted is requested again.
+	// The page is converted and on the stack before the listing moves past it: a page that cannot be converted is
+	// requested again.
 	auto page = ConvertPage(response);
-	entries.reserve(page.size());
+	entries.insert(entries.end(), std::make_move_iterator(page.begin()), std::make_move_iterator(page.end()));
 	main_continuation_token = std::move(continuation_token);
-	AppendEntries(page);
 }
 
 bool S3GlobResult::ShouldInvestigateRecursiveGlob() const {
@@ -437,10 +430,8 @@ void S3GlobResult::AppendMatchingFiles(idx_t count) const {
 			matched.push_back(std::move(file));
 		}
 	}
-	expanded_files.reserve(expanded_files.size() + matched.size());
-	for (auto &file : matched) {
-		expanded_files.push_back(std::move(file));
-	}
+	expanded_files.insert(expanded_files.end(), std::make_move_iterator(matched.begin()),
+	                      std::make_move_iterator(matched.end()));
 }
 
 unique_ptr<MultiFileList> S3FileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
