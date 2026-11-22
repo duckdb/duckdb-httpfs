@@ -91,12 +91,13 @@ private:
 	S3ListObjectsV2Result ListPrefix(const Entry &entry) const;
 	S3ListObjectsV2Result Request(const string &path, const string &continuation_token, S3ListMode mode,
 	                              optional_ptr<const string> prefix = nullptr) const;
-	void AppendPage(const S3ListObjectsV2Result &response) const;
+	vector<Entry> ConvertPage(const S3ListObjectsV2Result &response) const;
+	void AppendEntries(vector<Entry> &page) const;
 	void ScanTopLevel() const;
 	bool ShouldInvestigateRecursiveGlob() const;
 	void SelectGlobType(S3ListObjectsV2Result &response, string &continuation_token) const;
 	bool ContainsDenseDirectories(const vector<OpenFileInfo> &s3_keys) const;
-	void AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const;
+	void AppendMatchingFiles(idx_t count) const;
 
 private:
 	S3FileSystem &fs;
@@ -190,15 +191,16 @@ bool S3GlobResult::ExpandNextPath() const {
 		ScanPrefix();
 	}
 
-	vector<OpenFileInfo> s3_keys;
-	while (!entries.empty() && !entries.back().prefix) {
-		s3_keys.push_back(std::move(entries.back().file));
-		entries.pop_back();
+	// The files on top of the stack are taken off only once they are added, so a failure leaves them in place
+	idx_t count = 0;
+	while (count < entries.size() && !entries[entries.size() - 1 - count].prefix) {
+		count++;
 	}
+	AppendMatchingFiles(count);
+	entries.erase(entries.end() - NumericCast<int64_t>(count), entries.end());
 	if (main_continuation_token.empty() && entries.empty()) {
 		finished = true;
 	}
-	AppendMatchingFiles(s3_keys);
 	return true;
 }
 
@@ -216,12 +218,15 @@ S3ListObjectsV2Result S3GlobResult::ListPrefix(const Entry &entry) const {
 	return Request(path, entry.prefix->continuation_token, S3ListMode::HIERARCHICAL, &entry.file.path);
 }
 
-void S3GlobResult::AppendPage(const S3ListObjectsV2Result &response) const {
-	const auto start = entries.size();
+//! A page's files and the prefixes to descend into, in the order they are taken off the stack. It changes nothing of
+//! the listing, so a page that cannot be converted leaves the listing at that page, to be requested again.
+vector<S3GlobResult::Entry> S3GlobResult::ConvertPage(const S3ListObjectsV2Result &response) const {
 	vector<OpenFileInfo> files;
 	AWSListObjectV2::AppendFileList(response, files);
+	vector<Entry> page;
+	page.reserve(files.size() + response.common_prefixes.size());
 	for (auto &file : files) {
-		entries.push_back({std::move(file), nullptr});
+		page.push_back({std::move(file), nullptr});
 	}
 	auto pattern_splits = StringUtil::Split(parsed_s3_url->GetKey(), "/");
 	for (const auto &prefix : response.common_prefixes) {
@@ -229,12 +234,20 @@ void S3GlobResult::AppendPage(const S3ListObjectsV2Result &response) const {
 		auto key_splits = StringUtil::Split(path, "/");
 		if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
 		          S3GlobMatchMode::PREFIX)) {
-			entries.push_back({OpenFileInfo(std::move(path)), make_uniq<Prefix>()});
+			page.push_back({OpenFileInfo(std::move(path)), make_uniq<Prefix>()});
 		}
 	}
 	// Merge files and prefixes by decoded key before descending into subdirectories.
-	std::sort(entries.begin() + NumericCast<int64_t>(start), entries.end(),
+	std::sort(page.begin(), page.end(),
 	          [](const Entry &left, const Entry &right) { return left.file.path > right.file.path; });
+	return page;
+}
+
+//! Moves a converted page onto the stack, whose capacity the caller has reserved
+void S3GlobResult::AppendEntries(vector<Entry> &page) const {
+	for (auto &entry : page) {
+		entries.push_back(std::move(entry));
+	}
 }
 
 idx_t S3GlobResult::GetConcurrency() const {
@@ -323,17 +336,28 @@ void S3GlobResult::ScanPrefix() const {
 	if (prefix.result->error) {
 		std::rethrow_exception(prefix.result->error);
 	}
+	// Converted before the prefix moves on to its next page: a page that cannot be converted is requested again.
+	vector<Entry> page;
+	try {
+		page = ConvertPage(prefix.result->response);
+		entries.reserve(entries.size() + page.size());
+	} catch (...) {
+		prefix.result.reset();
+		D_ASSERT(prefetched_count > 0);
+		--prefetched_count;
+		throw;
+	}
 	auto entry = std::move(entries.back());
 	entries.pop_back();
 	D_ASSERT(prefetched_count > 0);
 	--prefetched_count;
-	auto response = std::move(entry.prefix->result->response);
-	if (!response.continuation_token.empty()) {
-		entry.prefix->continuation_token = std::move(response.continuation_token);
+	auto continuation_token = std::move(entry.prefix->result->response.continuation_token);
+	if (!continuation_token.empty()) {
+		entry.prefix->continuation_token = std::move(continuation_token);
 		entry.prefix->result.reset();
 		entries.push_back(std::move(entry));
 	}
-	AppendPage(response);
+	AppendEntries(page);
 }
 
 void S3GlobResult::ScanTopLevel() const {
@@ -346,8 +370,11 @@ void S3GlobResult::ScanTopLevel() const {
 	if (ShouldInvestigateRecursiveGlob() && !continuation_token.empty()) {
 		SelectGlobType(response, continuation_token);
 	}
-	main_continuation_token = continuation_token;
-	AppendPage(response);
+	// Converted before the listing moves past the page: a page that cannot be converted is requested again.
+	auto page = ConvertPage(response);
+	entries.reserve(page.size());
+	main_continuation_token = std::move(continuation_token);
+	AppendEntries(page);
 }
 
 bool S3GlobResult::ShouldInvestigateRecursiveGlob() const {
@@ -385,9 +412,13 @@ bool S3GlobResult::ContainsDenseDirectories(const vector<OpenFileInfo> &s3_keys)
 	return !s3_keys.empty() && directories.size() * 1000 <= s3_keys.size() * GetConcurrency();
 }
 
-void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
+//! Adds the files among the top `count` entries of the stack that match the glob, all at once, so that a failure adds
+//! none of them
+void S3GlobResult::AppendMatchingFiles(idx_t count) const {
 	auto pattern_splits = StringUtil::Split(parsed_s3_url->GetKey(), "/");
-	for (auto &s3_key : s3_keys) {
+	vector<OpenFileInfo> matched;
+	for (idx_t i = 0; i < count; i++) {
+		auto &s3_key = entries[entries.size() - 1 - i].file;
 		auto key_splits = StringUtil::Split(s3_key.path, "/");
 		if (Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
 		          S3GlobMatchMode::COMPLETE)) {
@@ -395,15 +426,20 @@ void S3GlobResult::AppendMatchingFiles(vector<OpenFileInfo> &s3_keys) const {
 			if (!parsed_s3_url->GetQueryString().empty()) {
 				result_full_url += '?' + parsed_s3_url->GetQueryString();
 			}
-			s3_key.path = std::move(result_full_url);
+			OpenFileInfo file(std::move(result_full_url));
+			file.extended_info = s3_key.extended_info;
 			auto captured = request_session->Capture();
 			auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
 			if (snapshot.region_redirected) {
 				D_ASSERT(!snapshot.auth_params.GetCredentials().region.empty());
-				s3_key.extended_info->options["s3_region"] = snapshot.auth_params.GetCredentials().region;
+				file.extended_info->options["s3_region"] = snapshot.auth_params.GetCredentials().region;
 			}
-			expanded_files.push_back(std::move(s3_key));
+			matched.push_back(std::move(file));
 		}
+	}
+	expanded_files.reserve(expanded_files.size() + matched.size());
+	for (auto &file : matched) {
+		expanded_files.push_back(std::move(file));
 	}
 }
 

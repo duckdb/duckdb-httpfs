@@ -160,6 +160,9 @@ struct MockS3ListConfig {
 	idx_t tree_files_per_directory = 0;
 	//! Keys (objects plus common prefixes) per generated tree page
 	idx_t tree_page_size = 1000;
+	//! Give the first object of this many leading generated tree pages that carry a continuation token a Size that is
+	//! not a number, which the client cannot convert
+	idx_t tree_unconvertible_later_pages = 0;
 };
 
 struct MockS3BulkDeleteConfig {
