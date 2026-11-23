@@ -385,6 +385,32 @@ TEST_CASE("Curl request headers preserve empty field values", "[httpfs][curl][he
 	RunCurlRequestHeaderScenario();
 }
 
+TEST_CASE("HTTP clients send session headers once", "[httpfs][headers]") {
+	for (const auto &backend : {"curl", "httplib"}) {
+		DYNAMIC_SECTION(backend) {
+			MockS3Server server {MockS3ServerConfig()};
+			DuckDB db(nullptr);
+			Connection con(db);
+			HTTPTestHelper::Configure(db, con, 0, backend);
+			HTTPTestHelper::RequireQueryOk(con,
+			                               "SET extra_http_headers=MAP {'X-Session': 'session', 'X-Both': 'session'}");
+			HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+			auto session = db.instance->config.GetHTTPTransportManager().CreateSession(*con.context, server.HTTPPath());
+			auto &params = session.Parameters();
+			HTTPHeaders headers;
+			headers.Insert("X-Both", "request");
+			HeadRequestInfo request(server.HTTPPath(), headers, params);
+			REQUIRE(session.Request(request)->Success());
+			auto observations = server.Observations();
+			REQUIRE(observations.size() == 1);
+			REQUIRE(MockS3HeaderValues(observations[0], "X-Session") == vector<string> {"session"});
+			// A header of the request takes precedence over a session header with the same name
+			REQUIRE(MockS3HeaderValues(observations[0], "X-Both") == vector<string> {"request"});
+			HTTPTestHelper::RequireQueryOk(con, "ROLLBACK");
+		}
+	}
+}
+
 TEST_CASE("HTTP PUT respects explicit Content-Type and retains the fallback", "[httpfs][headers][content-type]") {
 	HTTPFSUtil httplib_util;
 	HTTPFSCurlUtil curl_util;
