@@ -954,6 +954,8 @@ public:
 		}
 		const auto end = MinValue<idx_t>(offset + config.list.tree_page_size, entries.size());
 		const bool truncated = end < entries.size();
+		bool unconvertible = !continuation_token.empty() && config.list.tree_unconvertible_later_pages > 0 &&
+		                     tree_unconvertible_pages_sent.fetch_add(1) < config.list.tree_unconvertible_later_pages;
 		string body = StringUtil::Format(
 		    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 		    "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
@@ -969,8 +971,10 @@ public:
 			if (entries[i].second) {
 				body += StringUtil::Format("<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>", entries[i].first);
 			} else {
-				body += StringUtil::Format(
-				    "<Contents><Key>%s</Key><ETag>&quot;tree&quot;</ETag><Size>1</Size></Contents>", entries[i].first);
+				body +=
+				    StringUtil::Format("<Contents><Key>%s</Key><ETag>&quot;tree&quot;</ETag><Size>%s</Size></Contents>",
+				                       entries[i].first, unconvertible ? "not-a-size" : "1");
+				unconvertible = false;
 			}
 		}
 		body += "</ListBucketResult>";
@@ -1676,6 +1680,7 @@ public:
 	mutable atomic<idx_t> transient_503_prefix_lists_sent {0};
 	mutable atomic<idx_t> transient_400_lists_sent {0};
 	mutable atomic<idx_t> malformed_success_lists_sent {0};
+	mutable atomic<idx_t> tree_unconvertible_pages_sent {0};
 	mutable atomic<idx_t> remaining_put_failures {0};
 	mutable atomic<idx_t> remaining_get_failures {0};
 	mutable atomic<idx_t> remaining_range_behavior_requests {0};

@@ -9,6 +9,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
 #include "duckdb/main/http/http_retry_budget.hpp"
@@ -1630,6 +1631,90 @@ TEST_CASE("S3 parallel glob fails in bounded time when listing stays throttled",
 		DYNAMIC_SECTION(client) {
 			RunParallelGlobExhaustedThrottlingTest(client);
 		}
+	}
+}
+
+//===--------------------------------------------------------------------===//
+// A listing page that cannot be converted
+//===--------------------------------------------------------------------===//
+
+//! The files of one file list, expanded a second time after its first expansion failed on a page that cannot be
+//! converted, as a caller does that catches the error and reads the list again
+static vector<string> ExpandAgainAfterUnconvertiblePage(Connection &con, const string &glob) {
+	S3TestHelper::RequireQueryOk(con, "BEGIN");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	auto list = fs.GlobFileList(glob, FileGlobOptions::ALLOW_EMPTY);
+	REQUIRE_THROWS_WITH(list->GetAllFiles(), Catch::Contains("Malformed S3 list response"));
+	vector<string> paths;
+	for (auto &file : list->GetAllFiles()) {
+		paths.push_back(file.path);
+	}
+	S3TestHelper::RequireQueryOk(con, "COMMIT");
+	return paths;
+}
+
+//! Every file of the generated tree, in listing order
+static vector<string> TreeFiles(idx_t directories, idx_t files_per_directory) {
+	vector<string> paths;
+	for (idx_t directory = 0; directory < directories; directory++) {
+		for (idx_t file = 0; file < files_per_directory; file++) {
+			paths.push_back(StringUtil::Format("s3://refresh-bucket/tree/d%02llu/f%03llu.bin",
+			                                   static_cast<unsigned long long>(directory),
+			                                   static_cast<unsigned long long>(file)));
+		}
+	}
+	return paths;
+}
+
+static idx_t CountListRequestsWithToken(MockS3Server &server, const string &continuation_token) {
+	idx_t count = 0;
+	for (auto &observation : GetListObservations(server.Observations())) {
+		if (observation.target.find("continuation-token=" + continuation_token) != string::npos) {
+			count++;
+		}
+	}
+	return count;
+}
+
+static MockS3ServerConfig MakeUnconvertibleTreeConfig(idx_t directories, idx_t files_per_directory, idx_t page_size) {
+	MockS3ServerConfig config;
+	config.list.tree_prefix = "tree/";
+	config.list.tree_directories = directories;
+	config.list.tree_files_per_directory = files_per_directory;
+	config.list.tree_page_size = page_size;
+	config.list.tree_unconvertible_later_pages = 1;
+	return config;
+}
+
+TEST_CASE("S3 glob requests a listing page that it failed to convert again", "[httpfs][s3][retry]") {
+	SECTION("a page of a flat listing before its last: not skipped") {
+		MockS3Server server(MakeUnconvertibleTreeConfig(1, 10, 4));
+		DuckDB db(nullptr);
+		Connection con(db);
+		ConfigureListRetryTest(db, con, server, "httplib", 0);
+		// a first page of one directory, listed flat
+		S3TestHelper::RequireQueryOk(con, "SET async_threads=4");
+		REQUIRE(ExpandAgainAfterUnconvertiblePage(con, "s3://refresh-bucket/tree/**") == TreeFiles(1, 10));
+		REQUIRE(CountListRequestsWithToken(server, "offset-4") == 2);
+	}
+	SECTION("the last page of a flat listing: the listing does not start over") {
+		MockS3Server server(MakeUnconvertibleTreeConfig(1, 6, 4));
+		DuckDB db(nullptr);
+		Connection con(db);
+		ConfigureListRetryTest(db, con, server, "httplib", 0);
+		S3TestHelper::RequireQueryOk(con, "SET async_threads=4");
+		REQUIRE(ExpandAgainAfterUnconvertiblePage(con, "s3://refresh-bucket/tree/**") == TreeFiles(1, 6));
+		REQUIRE(CountListRequestsWithToken(server, "offset-4") == 2);
+	}
+	SECTION("a page of a directory listed as a prefix of its own: not skipped") {
+		// the first page's 1,000 keys are all in one directory, so each directory is listed as a prefix of its own
+		MockS3Server server(MakeUnconvertibleTreeConfig(2, 1500, 1000));
+		DuckDB db(nullptr);
+		Connection con(db);
+		ConfigureListRetryTest(db, con, server, "httplib", 0);
+		REQUIRE(ExpandAgainAfterUnconvertiblePage(con, "s3://refresh-bucket/tree/**") == TreeFiles(2, 1500));
+		// d00/'s second page twice, d01/'s once
+		REQUIRE(CountListRequestsWithToken(server, "offset-1000") == 3);
 	}
 }
 
