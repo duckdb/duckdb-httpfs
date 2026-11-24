@@ -626,7 +626,7 @@ WHERE name = 'persistent_sse' AND contains(secret_string, '%s') AND contains(sec
 		auto secret_entry = secret_manager.GetSecretByName(transaction, "persistent_sse");
 		REQUIRE(secret_entry);
 		auto &secret = secret_entry->secret->Cast<KeyValueSecret>();
-		ClientContextFileOpener opener(*con.context);
+		ClientContextFileOpener opener(con.context->GetContext());
 		S3KeyValueReader reader {KeyValueSecretReader(secret, opener)};
 		auto auth_params = S3AuthResolver::Resolve(reader, "s3://persistent/object.bin");
 		REQUIRE(auth_params.GetRequestOptions().sse_customer_key);
