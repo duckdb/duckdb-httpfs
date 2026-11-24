@@ -158,7 +158,7 @@ public:
 		if (state) {
 			state->RecordRequest(RequestType::GET_REQUEST);
 		}
-		auto headers = TransformHeaders(info.headers, info.params);
+		auto headers = TransformHeaders(info.headers);
 		if (!info.response_handler && !info.content_handler) {
 			return TransformBufferedResult(client->Get(info.path, headers));
 		}
@@ -175,7 +175,7 @@ public:
 			state->RecordRequest(RequestType::PUT_REQUEST);
 			state->RecordBytesSent(info.buffer_in_len);
 		}
-		auto headers = TransformHeaders(info.headers, info.params);
+		auto headers = TransformHeaders(info.headers);
 		auto body_size = NumericCast<size_t>(info.buffer_in_len);
 		auto body = info.buffer_in;
 		auto content_provider = [body, body_size](size_t offset, size_t length,
@@ -196,7 +196,7 @@ public:
 		if (state) {
 			state->RecordRequest(RequestType::HEAD_REQUEST);
 		}
-		auto headers = TransformHeaders(info.headers, info.params);
+		auto headers = TransformHeaders(info.headers);
 		return TransformBufferedResult(client->Head(info.path, headers));
 	}
 
@@ -205,7 +205,7 @@ public:
 		if (state) {
 			state->RecordRequest(RequestType::DELETE_REQUEST);
 		}
-		auto headers = TransformHeaders(info.headers, info.params);
+		auto headers = TransformHeaders(info.headers);
 		return TransformBufferedResult(client->Delete(info.path, headers));
 	}
 
@@ -213,7 +213,7 @@ public:
 		if (state) {
 			state->RecordRequest(RequestType::OPTIONS_REQUEST);
 		}
-		auto headers = TransformHeaders(info.headers, info.params);
+		auto headers = TransformHeaders(info.headers);
 		return TransformBufferedResult(client->Options(info.path, headers));
 	}
 
@@ -231,7 +231,7 @@ public:
 			req.method = "POST";
 		}
 		req.path = info.path;
-		req.headers = TransformHeaders(info.headers, info.params);
+		req.headers = TransformHeaders(info.headers);
 		if (req.headers.find("Content-Type") == req.headers.end()) {
 			req.headers.emplace("Content-Type", "application/octet-stream");
 		}
@@ -251,12 +251,9 @@ public:
 	}
 
 private:
-	static duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
+	static duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map) {
 		duckdb_httplib_openssl::Headers headers;
 		for (auto &entry : header_map) {
-			headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
-		}
-		for (auto &entry : params.extra_headers) {
 			headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
 		}
 		// every request is sent right after its headers: a failed one then reads only its own errno
