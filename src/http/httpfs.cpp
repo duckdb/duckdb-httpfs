@@ -666,7 +666,7 @@ static optional_ptr<HTTPMetadataCache> TryGetMetadataCache(optional_ptr<FileOpen
 		return httpfs.GetGlobalCache();
 	} else if (context && context->IsClient()) {
 		return context->GetRegisteredState().GetOrCreate<HTTPMetadataCache>("http_cache",
-		                                                                     HTTPMetadataCacheMode::QUERY_LOCAL);
+		                                                                    HTTPMetadataCacheMode::QUERY_LOCAL);
 	}
 	return nullptr;
 }

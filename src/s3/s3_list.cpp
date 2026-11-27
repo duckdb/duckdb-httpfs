@@ -141,8 +141,8 @@ private:
 S3GlobResult::S3GlobResult(S3FileSystem &fs_p, const string &glob_pattern_p, optional_ptr<FileOpener> opener,
                            const S3AuthResolveOptions &options)
     : LazyMultiFileList(FileOpener::TryGetContext(opener)),
-      context(Context::TryGetClientContext(FileOpener::TryGetContext(opener))), fs(fs_p),
-      glob_pattern(glob_pattern_p), opener(opener) {
+      context(Context::TryGetClientContext(FileOpener::TryGetContext(opener))), fs(fs_p), glob_pattern(glob_pattern_p),
+      opener(opener) {
 	if (!opener) {
 		throw InternalException("Cannot S3 Glob without FileOpener");
 	}
