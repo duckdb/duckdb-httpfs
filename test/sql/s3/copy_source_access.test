@@ -56,7 +56,7 @@ SET allowed_paths = ['s3://other-bucket/permitted.txt', 's3://other-bucket/space
 foreach source other-bucket/secret.txt other-bucket/secret.txt?versionId=v1
 
 statement ok
-SET extra_http_headers = MAP {'x-amz-copy-source': '${source}'};
+SET extra_http_headers = MAP {'x-amz-copy-source': '{source}'};
 
 statement error
 COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
@@ -94,7 +94,7 @@ foreach header x-amz-copy-source X-AmZ-CoPy-SoUrCe x-goog-copy-source X-GoOg-CoP
 foreach source other-bucket/secret.txt /other-bucket/secret.txt %2Fother-bucket%2Fsecret.txt other-bucket%2Fsecret.txt allowed-bucket-suffix/secret.txt other-bucket/space+key.txt other-bucket/space%2520key.txt
 
 statement ok
-SET extra_http_headers = MAP {'${header}': '${source}'};
+SET extra_http_headers = MAP {'{header}': '{source}'};
 
 statement error
 COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
@@ -109,7 +109,7 @@ endloop
 foreach source allowed-bucket/source.txt /allowed-bucket/source.txt other-bucket/permitted.txt other-bucket/space%20key.txt other-bucket/plus+key.txt other-bucket/plus%2Bkey.txt other-bucket/hash%23key.txt allowed-bucket/key%ZZ.txt allowed-bucket/back%5Cslash.txt
 
 statement ok
-SET extra_http_headers = MAP {'x-amz-copy-source': '${source}'};
+SET extra_http_headers = MAP {'x-amz-copy-source': '{source}'};
 
 statement error
 COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
@@ -134,7 +134,7 @@ SET s3_enable_deprecated_url_parameters = false;
 foreach source other-bucket/question%3Fkey.txt other-bucket/not-permitted.txt%3FversionId=v1
 
 statement ok
-SET extra_http_headers = MAP {'x-amz-copy-source': '${source}'};
+SET extra_http_headers = MAP {'x-amz-copy-source': '{source}'};
 
 statement error
 COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);
@@ -147,7 +147,7 @@ endloop
 foreach source arn:aws:s3:us-east-1:123456789012:accesspoint/example/object/key //allowed-bucket/source.txt allowed-bucket/ allowed-bucket/key#fragment allowed-bucket/key?other=value allowed-bucket/key?versionId= allowed-bucket/key?versionId=v1 other-bucket/not-permitted.txt?versionId=v1
 
 statement ok
-SET extra_http_headers = MAP {'x-amz-copy-source': '${source}'};
+SET extra_http_headers = MAP {'x-amz-copy-source': '{source}'};
 
 statement error
 COPY (SELECT 1 WHERE false) TO 's3://allowed-bucket/out.csv' (FORMAT csv, HEADER false);

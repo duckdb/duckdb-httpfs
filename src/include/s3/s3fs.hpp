@@ -58,7 +58,7 @@ private:
 	};
 
 public:
-	S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+	S3FileHandle(BaseFileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
 	             shared_ptr<HTTPRequestSession> request_session, const S3AuthParams &auth_params_p,
 	             const S3UploadConfig &upload_config, optional<S3MultipartUploadPolicy> multipart_upload_policy);
 	~S3FileHandle() override;

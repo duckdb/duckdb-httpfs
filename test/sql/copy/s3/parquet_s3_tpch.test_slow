@@ -72,11 +72,11 @@ CREATE VIEW customer as SELECT * FROM 's3://test-bucket/tpch-sf0_01/customer.par
 CREATE VIEW orders as SELECT * FROM 's3://test-bucket/tpch-sf0_01/orders.parquet';
 
 
-# Run TPCH SF1
+# Run TPCH SF0.01
 loop i 1 9
 
 query I
-PRAGMA tpch({i})
+PRAGMA tpch({i}, sf=0.01)
 ----
 <FILE>:duckdb/extension/tpch/dbgen/answers/sf0.01/q0{i}.csv
 
@@ -85,7 +85,7 @@ endloop
 loop i 10 23
 
 query I
-PRAGMA tpch({i})
+PRAGMA tpch({i}, sf=0.01)
 ----
 <FILE>:duckdb/extension/tpch/dbgen/answers/sf0.01/q{i}.csv
 

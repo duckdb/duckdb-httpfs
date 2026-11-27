@@ -188,15 +188,16 @@ public:
 
 public:
 	void Create() {
-		headers["Host"] = host;
+		headers.Set("Host", host);
 		InitializeDefaults();
 		AddRequestHeaders();
 		auto canonical_headers = BuildCanonicalHeaders();
 		auto signed_headers = BuildSignedHeaders(canonical_headers);
 		auto canonical_request = BuildCanonicalRequest(canonical_headers, signed_headers);
 		auto signature = CreateSignature(canonical_request);
-		headers["Authorization"] = "AWS4-HMAC-SHA256 Credential=" + auth_params.GetCredentials().access_key_id + "/" +
-		                           CredentialScope() + ", SignedHeaders=" + signed_headers + ", Signature=" + signature;
+		headers.Set("Authorization", "AWS4-HMAC-SHA256 Credential=" + auth_params.GetCredentials().access_key_id + "/" +
+		                                 CredentialScope() + ", SignedHeaders=" + signed_headers +
+		                                 ", Signature=" + signature);
 	}
 
 private:
@@ -212,31 +213,31 @@ private:
 	}
 
 	void AddRequestHeaders() {
-		headers["x-amz-date"] = datetime_now;
-		headers["x-amz-content-sha256"] = payload_hash;
+		headers.Set("x-amz-date", datetime_now);
+		headers.Set("x-amz-content-sha256", payload_hash);
 		auto &credentials = auth_params.GetCredentials();
 		auto &request_options = auth_params.GetRequestOptions();
 		if (!credentials.session_token.empty()) {
-			headers["x-amz-security-token"] = credentials.session_token;
+			headers.Set("x-amz-security-token", credentials.session_token);
 		}
 		if (use_sse_kms) {
-			headers["x-amz-server-side-encryption"] = "aws:kms";
-			headers["x-amz-server-side-encryption-aws-kms-key-id"] = request_options.kms_key_id;
+			headers.Set("x-amz-server-side-encryption", "aws:kms");
+			headers.Set("x-amz-server-side-encryption-aws-kms-key-id", request_options.kms_key_id);
 		}
 		if (use_sse_customer) {
 			auto &sse_customer_key = *request_options.sse_customer_key;
-			headers["x-amz-server-side-encryption-customer-algorithm"] = "AES256";
-			headers["x-amz-server-side-encryption-customer-key"] = sse_customer_key.GetKey();
-			headers["x-amz-server-side-encryption-customer-key-md5"] = sse_customer_key.GetKeyMD5();
+			headers.Set("x-amz-server-side-encryption-customer-algorithm", "AES256");
+			headers.Set("x-amz-server-side-encryption-customer-key", sse_customer_key.GetKey());
+			headers.Set("x-amz-server-side-encryption-customer-key-md5", sse_customer_key.GetKeyMD5());
 		}
 		if (request_options.requester_pays && auth_params.GetProvider().GetType() != S3ProviderType::GCS) {
-			headers["x-amz-request-payer"] = "requester";
+			headers.Set("x-amz-request-payer", "requester");
 		}
 		if (!content_md5.empty()) {
-			headers["content-md5"] = content_md5;
+			headers.Set("content-md5", content_md5);
 		}
 		if (!content_type.empty()) {
-			headers["content-type"] = content_type;
+			headers.Set("content-type", content_type);
 		}
 	}
 
@@ -364,10 +365,10 @@ static HTTPHeaders CreateConfiguredS3Headers(const HTTPConfiguredHeaders &config
 
 	HTTPHeaders result;
 	for (auto &header : sorted_headers) {
-		result[header.first] = header.second;
+		result.InsertIfAbsent(header.first, header.second);
 	}
 	if (!configured_headers.user_agent.empty()) {
-		result.Insert("User-Agent", configured_headers.user_agent);
+		result.InsertIfAbsent("User-Agent", configured_headers.user_agent);
 	}
 	return result;
 }
@@ -414,11 +415,11 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 		provider.ApplyReadCondition(read_condition, headers);
 	}
 	if (provider.GetType() == S3ProviderType::GCS && !request_options.user_project.empty()) {
-		headers["x-goog-user-project"] = request_options.user_project;
+		headers.Set("x-goog-user-project", request_options.user_project);
 	}
 	switch (auth_type) {
 	case S3AuthType::ANONYMOUS: {
-		headers["Host"] = host;
+		headers.Set("Host", host);
 		return headers;
 	}
 	case S3AuthType::SIGV4: {
@@ -429,13 +430,13 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 		return headers;
 	}
 	case S3AuthType::BEARER: {
-		headers["Authorization"] = "Bearer " + credentials.oauth2_bearer_token;
-		headers["Host"] = host;
+		headers.Set("Authorization", "Bearer " + credentials.oauth2_bearer_token);
+		headers.Set("Host", host);
 		if (!content_type.empty()) {
-			headers["Content-Type"] = content_type;
+			headers.Set("Content-Type", content_type);
 		}
 		if (!content_md5.empty()) {
-			headers["Content-MD5"] = content_md5;
+			headers.Set("Content-MD5", content_md5);
 		}
 		return headers;
 	}
@@ -824,7 +825,7 @@ bool S3RequestExecutor::TryRefreshSession(HTTPRequestSession &session, const S3R
 	if (!context) {
 		return false;
 	}
-	ClientContextFileOpener opener(*context);
+	ClientContextFileOpener opener(context->GetContext());
 	auto refreshed_auth_params = current_snapshot.auth_params;
 	auto refreshed_http_params = current_snapshot.Params();
 	if (!TryRefreshS3AuthMaterial(context, opener, current_snapshot.file, refreshed_auth_params, refreshed_http_params,
@@ -1226,7 +1227,7 @@ shared_ptr<HTTPRequestSession> S3RequestExecutor::CreateSession(optional_ptr<Fil
 	FileOpenerInfo info(file);
 	auto request_session = HTTPRequestSession::Create(opener, info);
 	weak_ptr<ClientContext> weak_context;
-	auto context = FileOpener::TryGetClientContext(opener);
+	auto context = Context::TryGetClientContext(FileOpener::TryGetContext(opener));
 	auto refresh_enabled = CredentialRefreshEnabled(opener);
 	if (context && refresh_enabled) {
 		weak_context = context->shared_from_this();

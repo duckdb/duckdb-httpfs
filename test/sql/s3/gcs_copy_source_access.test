@@ -51,19 +51,19 @@ foreach scheme gs:// gcs:// s3:// s3a://
 foreach header x-goog-copy-source X-GoOg-CoPy-SoUrCe x-amz-copy-source X-AmZ-CoPy-SoUrCe
 
 statement ok
-SET extra_http_headers = MAP {'${header}': '/other-bucket/secret.txt'};
+SET extra_http_headers = MAP {'{header}': '/other-bucket/secret.txt'};
 
 statement error
-COPY (SELECT 1 WHERE false) TO '${scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+COPY (SELECT 1 WHERE false) TO '{scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
 ----
 Permission Error: Cannot access S3 copy source
 
 # A permitted source reaches the closed local port.
 statement ok
-SET extra_http_headers = MAP {'${header}': '/allowed-bucket/source.txt'};
+SET extra_http_headers = MAP {'{header}': '/allowed-bucket/source.txt'};
 
 statement error
-COPY (SELECT 1 WHERE false) TO '${scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+COPY (SELECT 1 WHERE false) TO '{scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
 ----
 <REGEX>:.*(Could not establish connection|Could not connect to server).*
 
@@ -76,10 +76,10 @@ statement ok
 SET extra_http_headers = MAP {'x-amz-copy-source': '/allowed-bucket/source.txt', 'x-goog-copy-source': '/allowed-bucket/source.txt'};
 
 statement ok
-SET extra_http_headers = map_concat(current_setting('extra_http_headers'), MAP {'${blocked_header}': '/other-bucket/secret.txt'});
+SET extra_http_headers = map_concat(current_setting('extra_http_headers'), MAP {'{blocked_header}': '/other-bucket/secret.txt'});
 
 statement error
-COPY (SELECT 1 WHERE false) TO '${scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
+COPY (SELECT 1 WHERE false) TO '{scheme}allowed-bucket/out.csv' (FORMAT csv, HEADER false);
 ----
 Permission Error: Cannot access S3 copy source
 

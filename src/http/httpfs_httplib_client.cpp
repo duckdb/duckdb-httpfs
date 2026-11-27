@@ -37,7 +37,12 @@ private:
 				client.state->RecordBytesReceived(chunk_size);
 			}
 			if (deferred_response) {
-				deferred_response->body.append(data, data_length);
+				// an error body is buffered for the message, not streamed: cap it, the content handler's own limit does
+				// not apply to it
+				auto &body = deferred_response->body;
+				if (body.size() < HTTPFSParams::MAX_BUFFERED_ERROR_BODY) {
+					body.append(data, MinValue<idx_t>(chunk_size, HTTPFSParams::MAX_BUFFERED_ERROR_BODY - body.size()));
+				}
 				return true;
 			}
 			return !request.content_handler || request.content_handler(const_data_ptr_cast(data), chunk_size);
@@ -149,7 +154,7 @@ public:
 
 	static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &header_map) {
 		if (!http_params.user_agent.empty()) {
-			header_map.Insert("User-Agent", http_params.user_agent);
+			header_map.InsertIfAbsent("User-Agent", http_params.user_agent);
 		}
 	}
 

@@ -17,7 +17,7 @@ namespace duckdb {
 
 struct HTTPFSExtensionLoader {
 	static void RegisterFileSystems(DatabaseInstance &instance) {
-		auto &fs = instance.GetFileSystem();
+		auto &fs = VirtualFileSystem::Get(instance);
 		fs.RegisterSubSystem(make_uniq<HTTPFileSystem>());
 		fs.RegisterSubSystem(make_uniq<HuggingFaceFileSystem>());
 		fs.RegisterSubSystem(make_uniq<S3FileSystem>(BufferManager::GetBufferManager(instance)));

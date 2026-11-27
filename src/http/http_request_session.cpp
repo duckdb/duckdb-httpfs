@@ -25,10 +25,12 @@ HTTPSessionRequest HTTPRequestSnapshot::CreateRequest(HTTPHeaders headers) const
 	request_params->user_agent.clear();
 	request_params->extra_headers.clear();
 	if (!configured_headers.user_agent.empty()) {
-		headers.Insert("User-Agent", configured_headers.user_agent);
+		// Use the configured User-Agent only if the request has none.
+		// An entry in extra_headers takes precedence over both.
+		headers.InsertIfAbsent("User-Agent", configured_headers.user_agent);
 	}
 	for (const auto &header : configured_headers.extra_headers) {
-		headers[header.first] = header.second;
+		headers.Set(header.first, header.second);
 	}
 	return {std::move(headers), std::move(request_params), std::move(configured_headers)};
 }

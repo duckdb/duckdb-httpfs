@@ -61,6 +61,10 @@ public:
 	static constexpr bool DEFAULT_ENABLE_SERVER_CERT_VERIFICATION = false;
 	static constexpr uint64_t DEFAULT_HF_MAX_PER_PAGE = 0;
 	static constexpr bool DEFAULT_FORCE_DOWNLOAD = false;
+	//! When a GET streams its content through a content handler, the body of an error response (status 400 and up) is
+	//! not streamed but buffered for the error message. It is buffered up to this size and cut there: an error body
+	//! is read for what it says, which is at its start, and the content handler's own size limit cannot see it
+	static constexpr idx_t MAX_BUFFERED_ERROR_BODY = 65536;
 	static constexpr bool AUTO_FALLBACK_TO_FULL_DOWNLOAD = true;
 
 	//! Runtime parameters owned by HTTPFS; browser clients consume only the HTTPParams base.

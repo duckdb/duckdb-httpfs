@@ -120,7 +120,7 @@ void S3Provider::ApplyReadCondition(const HTTPReadCondition &condition, HTTPHead
 	if (GetType() != S3ProviderType::GCS) {
 		throw InvalidInputException("GCS generation checks require a GCS provider");
 	}
-	headers["x-goog-if-generation-match"] = condition.value;
+	headers.Set("x-goog-if-generation-match", condition.value);
 }
 
 string S3Provider::GetVersionTag(const HTTPObjectVersion &version, const string &etag) const {

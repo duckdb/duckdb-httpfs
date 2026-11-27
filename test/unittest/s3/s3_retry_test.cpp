@@ -51,14 +51,14 @@ TEST_CASE("HTTP retry driver owns admission and callback execution", "[httpfs][r
 		REQUIRE(inner_attempts == 3);
 	}
 	SECTION("Attempt exceptions propagate without another retry") {
-		REQUIRE_THROWS_AS(budget.Run([&]() -> HTTPRetryDecision {
+		REQUIRE_THROWS_WITH(budget.Run([&]() -> HTTPRetryDecision {
 			attempts++;
 			if (attempts == 1) {
 				return HTTPRetryDecision::Retry();
 			}
 			throw IOException("attempt failure");
 		}),
-		                  IOException);
+		                    Catch::Contains("attempt failure"));
 		REQUIRE(attempts == 2);
 		attempts = 0;
 		budget.Run([&]() {
@@ -72,17 +72,17 @@ TEST_CASE("HTTP retry driver owns admission and callback execution", "[httpfs][r
 		GetRequestInfo request("http://localhost/object", headers, params, nullptr, nullptr);
 		request.retry_budget = budget;
 		idx_t hooks = 0;
-		REQUIRE_THROWS_AS(HTTPUtil::RunRequestWithRetry(
-		                      [&]() {
-			                      attempts++;
-			                      return make_uniq<HTTPResponse>(HTTPStatusCode::InternalServerError_500);
-		                      },
-		                      request,
-		                      [&]() {
-			                      hooks++;
-			                      throw IOException("hook failure");
-		                      }),
-		                  IOException);
+		REQUIRE_THROWS_WITH(HTTPUtil::RunRequestWithRetry(
+		                        [&]() {
+			                        attempts++;
+			                        return make_uniq<HTTPResponse>(HTTPStatusCode::InternalServerError_500);
+		                        },
+		                        request,
+		                        [&]() {
+			                        hooks++;
+			                        throw IOException("hook failure");
+		                        }),
+		                    Catch::Contains("hook failure"));
 		REQUIRE(attempts == 1);
 		REQUIRE(hooks == 1);
 		attempts = 0;
@@ -94,7 +94,7 @@ TEST_CASE("HTTP retry driver owns admission and callback execution", "[httpfs][r
 	}
 #ifndef DUCKDB_CRASH_ON_ASSERT
 	SECTION("Missing callback is a contract error") {
-		REQUIRE_THROWS_AS(budget.Run({}), InternalException);
+		REQUIRE_THROWS_WITH(budget.Run({}), Catch::Contains("requires an attempt callback"));
 	}
 #endif
 }
@@ -1138,7 +1138,7 @@ static void RunThrottledListSignalTest(const string &client_implementation, idx_
 	ConfigureListRetryTest(db, con, server, client_implementation, 2);
 
 	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-	ClientContextFileOpener opener(*con.context);
+	ClientContextFileOpener opener(con.context->GetContext());
 	FileOpenerInfo info = {S3TestHelper::S3_PATH};
 	auto auth_params = S3AuthResolver::Resolve(opener, info);
 	auto session = S3RequestExecutor::CreateSession(opener, info.file, auth_params);

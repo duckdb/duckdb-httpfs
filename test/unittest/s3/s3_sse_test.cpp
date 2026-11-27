@@ -212,7 +212,7 @@ static void RunSSECustomerMatrix(const string &client_implementation) {
 	WriteObject(con, S3TestHelper::S3_PATH, 32);
 	S3TestHelper::RequireQueryOk(con, "SET s3_uploader_max_filesize='50GB'");
 	WriteObject(con, S3TestHelper::S3_PATH, 10ULL * 1024ULL * 1024ULL + 1);
-	auto glob_result = fs.Glob("s3://refresh-bucket/*.bin", FileGlobOptions::ALLOW_EMPTY, nullptr);
+	auto glob_result = fs.Glob("s3://refresh-bucket/*.bin", FileGlobOptions::ALLOW_EMPTY);
 	REQUIRE(glob_result->GetAllFiles().size() == 1);
 	fs.RemoveFile(S3TestHelper::S3_PATH);
 	fs.RemoveFiles({S3TestHelper::S3_PATH, "s3://refresh-bucket/another.bin"});
@@ -626,7 +626,7 @@ WHERE name = 'persistent_sse' AND contains(secret_string, '%s') AND contains(sec
 		auto secret_entry = secret_manager.GetSecretByName(transaction, "persistent_sse");
 		REQUIRE(secret_entry);
 		auto &secret = secret_entry->secret->Cast<KeyValueSecret>();
-		ClientContextFileOpener opener(*con.context);
+		ClientContextFileOpener opener(con.context->GetContext());
 		S3KeyValueReader reader {KeyValueSecretReader(secret, opener)};
 		auto auth_params = S3AuthResolver::Resolve(reader, "s3://persistent/object.bin");
 		REQUIRE(auth_params.GetRequestOptions().sse_customer_key);

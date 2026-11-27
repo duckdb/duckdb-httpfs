@@ -194,13 +194,17 @@ bool HTTPState::IsEmpty() const {
 }
 
 shared_ptr<HTTPState> HTTPState::TryGetState(ClientContext &context) {
-	return context.registered_state->GetOrCreate<HTTPState>("http_state");
+	return TryGetState(context.GetContext());
+}
+
+shared_ptr<HTTPState> HTTPState::TryGetState(Context &context) {
+	return context.GetRegisteredState().GetOrCreate<HTTPState>("http_state");
 }
 
 shared_ptr<HTTPState> HTTPState::TryGetState(optional_ptr<FileOpener> opener) {
-	auto client_context = FileOpener::TryGetClientContext(opener);
-	if (client_context) {
-		return TryGetState(*client_context);
+	auto context = FileOpener::TryGetContext(opener);
+	if (context && context->IsClient()) {
+		return TryGetState(*context);
 	}
 	return nullptr;
 }

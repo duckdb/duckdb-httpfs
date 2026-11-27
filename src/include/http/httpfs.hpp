@@ -55,7 +55,7 @@ class HTTPFileHandle : public FileHandle {
 	friend class S3FileSystem;
 
 public:
-	HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+	HTTPFileHandle(BaseFileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
 	               shared_ptr<HTTPRequestSession> request_session, HTTPObjectVersion object_version = {});
 	~HTTPFileHandle() override;
 
@@ -145,7 +145,7 @@ private:
 	static constexpr idx_t MIN_BANDWIDTH_SAMPLE_BYTES = 1 << 16;
 };
 
-class HTTPFileSystem : public FileSystem {
+class HTTPFileSystem : public BaseFileSystem {
 public:
 	static bool TryParseLastModifiedTime(const string &timestamp, timestamp_t &result);
 	//! Compute the freshness deadline (exclusive) from HTTP caching headers (RFC 9111): Cache-Control max-age,
@@ -155,7 +155,7 @@ public:
 	                                                    timestamp_t response_time);
 
 	//! FileSystem overrides.
-	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener) override;
 
 	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
 	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;

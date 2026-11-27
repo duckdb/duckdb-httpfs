@@ -541,6 +541,31 @@ TEST_CASE("HTTP reads select only usable ETag conditions", "[httpfs][positional-
 	RunETagConditionCase("\"strong\"", "", true);
 }
 
+TEST_CASE("HTTP HEAD removes Range but preserves other repeated headers", "[httpfs][positional-read][headers]") {
+	MockS3Server server {MockS3ServerConfig()};
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureHTTPReadTest(db, con, "curl");
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	auto url = server.HTTPPath();
+	auto handle = fs.OpenFile(url, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+
+	HTTPHeaders headers;
+	headers.Append("Range", "bytes=0-1");
+	headers.Append("range", "bytes=2-3");
+	headers.Append("X-Repeated", "first");
+	headers.Append("x-repeated", "second");
+	auto response = handle->file_system.Cast<HTTPFileSystem>().HeadRequest(*handle, url, std::move(headers));
+	REQUIRE(response->Success());
+	auto observations = server.Observations();
+	REQUIRE_FALSE(observations.empty());
+	REQUIRE(observations.back().method == "HEAD");
+	REQUIRE(MockS3HeaderValues(observations.back(), "Range").empty());
+	REQUIRE(MockS3HeaderValues(observations.back(), "X-Repeated") == vector<string> {"first", "second"});
+	RequireQueryOk(con, "COMMIT");
+}
+
 TEST_CASE("configured headers do not override positional read headers", "[httpfs][positional-read][headers]") {
 	RunConfiguredReadHeaderCollision();
 	RunConfiguredIfMatchCollision();
@@ -595,11 +620,10 @@ TEST_CASE("explicit S3 versions reject writes deletes and wildcard globs before 
 	REQUIRE_THROWS_WITH(fs.RemoveFile(path), Catch::Contains("s3_version_id is only supported for reading"));
 	REQUIRE_THROWS_WITH(fs.RemoveFiles({server.S3Path(), path}),
 	                    Catch::Contains("s3_version_id is only supported for reading"));
-	REQUIRE_THROWS_WITH(
-	    fs.Glob("s3://refresh-bucket/*.bin?s3_version_id=user-version", FileGlobOptions::ALLOW_EMPTY, nullptr),
-	    Catch::Contains("s3_version_id parameter cannot be used with glob patterns"));
+	REQUIRE_THROWS_WITH(fs.Glob("s3://refresh-bucket/*.bin?s3_version_id=user-version", FileGlobOptions::ALLOW_EMPTY),
+	                    Catch::Contains("s3_version_id parameter cannot be used with glob patterns"));
 	REQUIRE(server.Observations().empty());
-	auto files = fs.Glob(path, FileGlobOptions::ALLOW_EMPTY, nullptr)->GetAllFiles();
+	auto files = fs.Glob(path, FileGlobOptions::ALLOW_EMPTY)->GetAllFiles();
 	REQUIRE(files.size() == 1);
 	REQUIRE(files[0].path == path);
 	REQUIRE(server.Observations().empty());

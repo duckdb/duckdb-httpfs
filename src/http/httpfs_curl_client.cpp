@@ -39,7 +39,7 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	// so we push back a new header_collection and store headers from the redirect there.
 	if (header.rfind("HTTP/", 0) == 0) {
 		header_collection.emplace_back();
-		header_collection.back().Insert("__RESPONSE_STATUS__", header);
+		header_collection.back().InsertIfAbsent("__RESPONSE_STATUS__", header);
 	}
 
 	idx_t colon_pos = header.find(':');
@@ -382,8 +382,16 @@ private:
 			if (!response_started && !StartResponse()) {
 				return stopped ? 0 : size;
 			}
-			if (!stream_content || client.request_info->response_code >= 400) {
+			if (!stream_content) {
 				client.request_info->body.append(char_ptr_cast(contents), size);
+			} else if (client.request_info->response_code >= 400) {
+				// an error body is buffered for the message, not streamed: cap it, the content handler's own limit does
+				// not apply to it
+				auto &body = client.request_info->body;
+				if (body.size() < HTTPFSParams::MAX_BUFFERED_ERROR_BODY) {
+					body.append(char_ptr_cast(contents),
+					            MinValue<idx_t>(size, HTTPFSParams::MAX_BUFFERED_ERROR_BODY - body.size()));
+				}
 			} else if (!request.content_handler(const_data_ptr_cast(contents), size)) {
 				stopped = true;
 				return 0;
@@ -470,7 +478,7 @@ public:
 	}
 	static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &header_map) {
 		if (!http_params.user_agent.empty()) {
-			header_map.Insert("User-Agent", http_params.user_agent);
+			header_map.InsertIfAbsent("User-Agent", http_params.user_agent);
 		}
 	}
 
@@ -771,16 +779,9 @@ private:
 		response->url = request_info->url;
 		response->reason = HTTPUtil::GetStatusMessage(status_code);
 		if (!request_info->header_collection.empty()) {
-			auto &response_headers = request_info->header_collection.back();
-			for (auto &header : response_headers) {
-				// We should not return __RESPONSE_STATUS__ to the user. It's only there for debugging.
-				if (header.first == "__RESPONSE_STATUS__") {
-					continue;
-				}
-				for (auto &value : response_headers.GetHeaderValues(header.first)) {
-					response->headers.Append(header.first, std::move(value));
-				}
-			}
+			response->headers = request_info->header_collection.back();
+			// We should not return __RESPONSE_STATUS__ to the user. It's only there for debugging.
+			response->headers.RemoveAll("__RESPONSE_STATUS__");
 		}
 		// ResetRequestInfo();
 		return response;

@@ -24,7 +24,7 @@ static constexpr const char *SET_NULL = "SET s3_enable_deprecated_url_parameters
 static constexpr const char *MIGRATION_HINT = "opt in with SET s3_enable_deprecated_url_parameters = true";
 
 static bool Enabled(Connection &con) {
-	ClientContextFileOpener opener(*con.context);
+	ClientContextFileOpener opener(con.context->GetContext());
 	return S3Settings::URLParametersEnabled(&opener);
 }
 
@@ -46,7 +46,7 @@ static void Configure(Connection &con, const MockS3Server &server, const string 
 class ChangePolicyDuringRequest : public ClientContextFileOpener {
 public:
 	ChangePolicyDuringRequest(ClientContext &context, Connection &other, string statement)
-	    : ClientContextFileOpener(context), other(other), statement(std::move(statement)) {
+	    : ClientContextFileOpener(context.GetContext()), other(other), statement(std::move(statement)) {
 	}
 
 	SettingLookupResult TryGetCurrentSetting(const Identifier &key, Value &result, FileOpenerInfo &info) override {
@@ -410,7 +410,7 @@ TEST_CASE("S3 URL policy preserves the configured HTTP redirect setting", "[http
 			S3RequestExecutor::RunSession(encryption_util, session, spec, [&](S3RequestData &request) {
 				REQUIRE(request.http_params->follow_location == follow_location);
 				HTTPResponse redirect(HTTPStatusCode(307));
-				redirect.headers.Insert("Location", "https://storage.example/redirected");
+				redirect.headers.InsertIfAbsent("Location", "https://storage.example/redirected");
 				redirect.body = "redirect response";
 				auto error = ErrorData(S3RequestUtil::GetRequestError(request, redirect));
 				REQUIRE_FALSE(StringUtil::Contains(error.RawMessage(), MIGRATION_HINT));
