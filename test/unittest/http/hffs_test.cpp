@@ -38,7 +38,8 @@ TEST_CASE("Hugging Face list results reject incomplete entries", "[httpfs][hffs]
 	vector<string> files;
 	vector<string> directories;
 
-	REQUIRE_THROWS_AS(HuggingFaceFileSystem::ParseListResult(input, files, directories), IOException);
+	REQUIRE_THROWS_WITH(HuggingFaceFileSystem::ParseListResult(input, files, directories),
+	                    Catch::Contains("Failed to parse list result"));
 }
 
 TEST_CASE("Hugging Face list status errors preserve HTTP metadata", "[httpfs][hffs][error]") {

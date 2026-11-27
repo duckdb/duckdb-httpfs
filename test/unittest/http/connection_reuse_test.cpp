@@ -50,7 +50,7 @@ static void RunCurlTerminalTransportErrorIsNotReused() {
 	auto session = db.instance->config.GetHTTPTransportManager().CreateSession(*con.context, server.HTTPPath());
 	auto &params = session.Parameters();
 	HTTPHeaders headers;
-	headers.Insert("Range", "bytes=0-3");
+	headers.InsertIfAbsent("Range", "bytes=0-3");
 	GetRequestInfo failed_request(server.HTTPPath(), headers, params, nullptr, nullptr);
 	failed_request.try_request = true;
 	auto failed_response = session.Request(failed_request);
@@ -124,9 +124,9 @@ static void RunCurlRequestHeaderScenario() {
 	HTTPFSParams params(http_util);
 	auto client = http_util.InitializeClient(params, "http://" + server.Endpoint());
 	HTTPHeaders headers;
-	headers["X-Empty"] = "";
-	headers["X-Whitespace"] = " \t ";
-	headers["X-Value"] = "value";
+	headers.InsertIfAbsent("X-Empty", "");
+	headers.InsertIfAbsent("X-Whitespace", " \t ");
+	headers.InsertIfAbsent("X-Value", "value");
 	HeadRequestInfo request(server.HTTPPath(), headers, params);
 	auto response = http_util.Request(request, client);
 	REQUIRE(response);
@@ -230,7 +230,7 @@ static void RunConnectionCompatibilityScenario(HTTPFSUtil &http_util) {
 		auto changed = params;
 		modify(changed);
 		REQUIRE_FALSE(client->CanReuse(changed));
-		REQUIRE_THROWS_AS(client->Initialize(changed), InvalidInputException);
+		REQUIRE_THROWS_WITH(client->Initialize(changed), Catch::Contains("transport parameters changed"));
 	};
 	require_incompatible([](HTTPFSParams &changed) { changed.http_proxy = "other-proxy.test"; });
 	require_incompatible([](HTTPFSParams &changed) { changed.http_proxy_port = 8123; });
@@ -296,7 +296,8 @@ static void RunTransportReuseDomainBoundScenario() {
 	REQUIRE(overflow.GetTransportReuseDomain() != 0);
 	REQUIRE_FALSE(overflow.CanReuseTransport());
 	overflow.http_proxy = "changed-overflow-proxy.test";
-	REQUIRE_THROWS_AS(http_util.InitializeClient(overflow, "http://localhost"), InvalidInputException);
+	REQUIRE_THROWS_WITH(http_util.InitializeClient(overflow, "http://localhost"),
+	                    Catch::Contains("transport parameters changed"));
 }
 
 static void RunRawParametersScenario() {
@@ -398,14 +399,22 @@ TEST_CASE("HTTP clients send session headers once", "[httpfs][headers]") {
 			auto session = db.instance->config.GetHTTPTransportManager().CreateSession(*con.context, server.HTTPPath());
 			auto &params = session.Parameters();
 			HTTPHeaders headers;
-			headers.Insert("X-Both", "request");
+			headers.Append("X-Both", "first");
+			headers.Append("x-both", "second");
 			HeadRequestInfo request(server.HTTPPath(), headers, params);
 			REQUIRE(session.Request(request)->Success());
+
+			headers.Set("X-Both", "replacement");
+			HeadRequestInfo replacement(server.HTTPPath(), headers, params);
+			REQUIRE(session.Request(replacement)->Success());
+
 			auto observations = server.Observations();
-			REQUIRE(observations.size() == 1);
-			REQUIRE(MockS3HeaderValues(observations[0], "X-Session") == vector<string> {"session"});
-			// A header of the request takes precedence over a session header with the same name
-			REQUIRE(MockS3HeaderValues(observations[0], "X-Both") == vector<string> {"request"});
+			REQUIRE(observations.size() == 2);
+			for (const auto &observation : observations) {
+				REQUIRE(MockS3HeaderValues(observation, "X-Session") == vector<string> {"session"});
+			}
+			REQUIRE(MockS3HeaderValues(observations[0], "X-Both") == vector<string> {"first", "second"});
+			REQUIRE(MockS3HeaderValues(observations[1], "X-Both") == vector<string> {"replacement"});
 			HTTPTestHelper::RequireQueryOk(con, "ROLLBACK");
 		}
 	}
@@ -423,7 +432,7 @@ TEST_CASE("HTTP PUT respects explicit Content-Type and retains the fallback", "[
 				const string fallback_type = "application/octet-stream";
 				HTTPHeaders headers;
 				if (explicit_header) {
-					headers.Insert("cOnTeNt-TyPe", "application/xml");
+					headers.InsertIfAbsent("cOnTeNt-TyPe", "application/xml");
 				}
 				const string body = "payload";
 				PutRequestInfo request(server.HTTPPath(), headers, params, const_data_ptr_cast(body.data()),

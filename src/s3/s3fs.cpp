@@ -29,7 +29,7 @@ S3FileHandle::UploadClaim::~UploadClaim() {
 	}
 }
 
-S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
+S3FileHandle::S3FileHandle(BaseFileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
                            shared_ptr<HTTPRequestSession> request_session_p, const S3AuthParams &auth_params_p,
                            const S3UploadConfig &upload_config,
                            optional<S3MultipartUploadPolicy> multipart_upload_policy)
@@ -246,7 +246,7 @@ HTTPMetadataCacheEntry S3FileHandle::GetCacheEntry() const {
 }
 
 void S3FileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {
-	auto context = FileOpener::TryGetClientContext(opener);
+	auto context = Context::TryGetClientContext(FileOpener::TryGetContext(opener));
 	auto refresh_enabled = S3RequestExecutor::CredentialRefreshEnabled(opener);
 	{
 		auto captured = request_session->Capture();

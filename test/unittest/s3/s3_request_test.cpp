@@ -947,7 +947,7 @@ static void RunDirectDeleteErrorScenario(const string &client_implementation) {
 
 static S3AuthParams ReadSecretAuthParams(Connection &con, KeyValueSecret &secret,
                                          const string &path = "s3://bucket/key") {
-	ClientContextFileOpener opener(*con.context);
+	ClientContextFileOpener opener(con.context->GetContext());
 	S3KeyValueReader secret_reader {KeyValueSecretReader(secret, opener)};
 	S3AuthResolveOptions options;
 	options.enable_deprecated_url_parameters = true;
@@ -1945,10 +1945,10 @@ TEST_CASE("S3 provider version policy preserves version semantics", "[httpfs][s3
 
 		HTTPHeaders headers;
 		REQUIRE_FALSE(provider.ReadObjectVersion(headers).IsSet());
-		headers.Insert("x-amz-version-id", "");
+		headers.InsertIfAbsent("x-amz-version-id", "");
 		REQUIRE_FALSE(provider.ReadObjectVersion(headers).IsSet());
 		HTTPHeaders version_headers;
-		version_headers.Insert("x-amz-version-id", "null");
+		version_headers.InsertIfAbsent("x-amz-version-id", "null");
 		auto metadata_version = provider.ReadObjectVersion(version_headers);
 		REQUIRE(metadata_version.GetType() == HTTPObjectVersionType::S3_VERSION_ID);
 		REQUIRE(metadata_version.GetValue() == "null");
@@ -2162,7 +2162,7 @@ TEST_CASE("S3 HTTP errors preserve metadata and provider-specific context", "[ht
 	response.reason = "Forbidden by test";
 	response.body = "<Error><Code>InvalidAccessKeyId</Code><Message>bad credentials</Message>"
 	                "<AWSAccessKeyId>test-key</AWSAccessKeyId></Error>";
-	response.headers.Insert("x-test-request-id", "request-42");
+	response.headers.InsertIfAbsent("x-test-request-id", "request-42");
 
 	auto config = TestAuthConfig();
 	config.credentials.region = "eu-west-1";
@@ -2241,7 +2241,7 @@ TEST_CASE("S3 region correction retains spent retries", "[httpfs][s3][retry][sha
 			attempts++;
 			if (attempts == 2) {
 				auto response = make_uniq<HTTPResponse>(HTTPStatusCode::MovedPermanently_301);
-				response->headers.Insert("x-amz-bucket-region", "eu-west-1");
+				response->headers.InsertIfAbsent("x-amz-bucket-region", "eu-west-1");
 				if (throw_redirect) {
 					throw HTTPException(*response, "region correction");
 				}
@@ -2275,7 +2275,7 @@ TEST_CASE("S3 malformed response cleanup does not require retry admission", "[ht
 			Connection con(db);
 			HTTPTestHelper::Configure(db, con, retries, client, true);
 			HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-			ClientContextFileOpener opener(*con.context);
+			ClientContextFileOpener opener(con.context->GetContext());
 			auto session = S3RequestExecutor::CreateSession(opener, OpenFileInfo("s3://bucket/key"),
 			                                                ResolveTestAuth(TestAuthConfig()));
 			::AESStateSSLFactory encryption_util;

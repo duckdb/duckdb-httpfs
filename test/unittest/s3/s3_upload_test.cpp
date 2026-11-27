@@ -758,7 +758,7 @@ CREATE SECRET refresh_upload_policy (
 		auto payload = CreatePayload(8ULL * 1024ULL * 1024ULL);
 		auto &fs = FileSystem::GetFileSystem(*con.context);
 		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-		AsyncFileWriter writer(*con.context, fs, S3TestHelper::S3_PATH,
+		AsyncFileWriter writer(con.context->GetContext(), fs, S3TestHelper::S3_PATH,
 		                       FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
 		writer.WriteData(const_data_ptr_cast(payload.data()), payload.size());
 		writer.Close();
@@ -790,7 +790,7 @@ CREATE SECRET refresh_upload_policy (
 		auto payload = CreatePayload(2 * write_size);
 		auto &fs = FileSystem::GetFileSystem(*con.context);
 		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-		AsyncFileWriter writer(*con.context, fs, S3TestHelper::S3_PATH,
+		AsyncFileWriter writer(con.context->GetContext(), fs, S3TestHelper::S3_PATH,
 		                       FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
 		{
 			auto batch = writer.StartBatch();
@@ -912,7 +912,7 @@ CREATE SECRET refresh_upload_policy (
 		auto payload = CreatePayload(2 * write_size);
 		auto &fs = FileSystem::GetFileSystem(*con.context);
 		S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-		AsyncFileWriter writer(*con.context, fs, S3TestHelper::S3_PATH,
+		AsyncFileWriter writer(con.context->GetContext(), fs, S3TestHelper::S3_PATH,
 		                       FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
 		writer.WriteData(const_data_ptr_cast(payload.data()), write_size);
 		auto part_1_started = server.WaitForPartUpload(1);

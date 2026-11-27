@@ -26,7 +26,7 @@ public:
 
 public:
 	//! FileSystem overrides
-	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener) override;
 	bool CanHandleFile(const string &fpath) override {
 		return fpath.rfind("hf://", 0) == 0;
 	}
@@ -63,7 +63,7 @@ class HFFileHandle : public HTTPFileHandle {
 	friend class HuggingFaceFileSystem;
 
 public:
-	HFFileHandle(FileSystem &fs, ParsedHFUrl hf_url, const OpenFileInfo &file, FileOpenFlags flags,
+	HFFileHandle(BaseFileSystem &fs, ParsedHFUrl hf_url, const OpenFileInfo &file, FileOpenFlags flags,
 	             shared_ptr<HTTPRequestSession> request_session)
 	    : HTTPFileHandle(fs, file, flags, std::move(request_session)), parsed_url(std::move(hf_url)) {
 	}

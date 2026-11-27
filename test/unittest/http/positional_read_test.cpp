@@ -541,6 +541,31 @@ TEST_CASE("HTTP reads select only usable ETag conditions", "[httpfs][positional-
 	RunETagConditionCase("\"strong\"", "", true);
 }
 
+TEST_CASE("HTTP HEAD removes Range but preserves other repeated headers", "[httpfs][positional-read][headers]") {
+	MockS3Server server {MockS3ServerConfig()};
+	DuckDB db(nullptr);
+	Connection con(db);
+	ConfigureHTTPReadTest(db, con, "curl");
+	RequireQueryOk(con, "BEGIN TRANSACTION");
+	auto &fs = FileSystem::GetFileSystem(*con.context);
+	auto url = server.HTTPPath();
+	auto handle = fs.OpenFile(url, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_DIRECT_IO);
+
+	HTTPHeaders headers;
+	headers.Append("Range", "bytes=0-1");
+	headers.Append("range", "bytes=2-3");
+	headers.Append("X-Repeated", "first");
+	headers.Append("x-repeated", "second");
+	auto response = handle->file_system.Cast<HTTPFileSystem>().HeadRequest(*handle, url, std::move(headers));
+	REQUIRE(response->Success());
+	auto observations = server.Observations();
+	REQUIRE_FALSE(observations.empty());
+	REQUIRE(observations.back().method == "HEAD");
+	REQUIRE(MockS3HeaderValues(observations.back(), "Range").empty());
+	REQUIRE(MockS3HeaderValues(observations.back(), "X-Repeated") == vector<string> {"first", "second"});
+	RequireQueryOk(con, "COMMIT");
+}
+
 TEST_CASE("configured headers do not override positional read headers", "[httpfs][positional-read][headers]") {
 	RunConfiguredReadHeaderCollision();
 	RunConfiguredIfMatchCollision();

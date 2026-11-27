@@ -15,17 +15,13 @@ static string StripETagQuotes(const string &etag) {
 
 static void ApplyReadCondition(HTTPHeaders &headers, const HTTPReadConfig &read_config) {
 	if (read_config.condition.type == HTTPReadConditionType::ETAG) {
-		headers["If-Match"] = read_config.condition.value;
+		headers.Set("If-Match", read_config.condition.value);
 	}
 }
 
 static HTTPHeaders RemoveRangeHeader(const HTTPHeaders &headers) {
-	HTTPHeaders result;
-	for (const auto &header : headers) {
-		if (!StringUtil::CIEquals(header.first, "Range")) {
-			result[header.first] = header.second;
-		}
-	}
+	auto result = headers;
+	result.RemoveAll("Range");
 	return result;
 }
 
@@ -255,7 +251,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
                                                             const HTTPSendCallback &send_request) {
 	auto range_expr = "bytes=" + to_string(file_offset) + "-" + to_string(file_offset + buffer_out_len - 1);
 	auto request_headers = header_map;
-	request_headers["Range"] = range_expr;
+	request_headers.Set("Range", range_expr);
 	ApplyReadCondition(request_headers, read_config);
 
 	D_ASSERT(hfh.file_state);

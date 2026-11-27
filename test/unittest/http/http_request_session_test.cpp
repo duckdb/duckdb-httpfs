@@ -146,16 +146,17 @@ TEST_CASE("HTTP request snapshots are immutable and checked", "[httpfs][request-
 	REQUIRE(initial_request.params->extra_headers.empty());
 
 	HTTPHeaders caller_headers;
-	caller_headers["User-Agent"] = "caller-agent";
-	caller_headers["X-Test"] = "caller";
+	caller_headers.InsertIfAbsent("User-Agent", "caller-agent");
+	caller_headers.Append("X-Test", "caller");
+	caller_headers.Append("x-test", "another caller value");
 	auto current_request = current.snapshot->CreateRequest(std::move(caller_headers));
 	REQUIRE(current_request.headers.GetHeaderValue("User-Agent") == "caller-agent");
-	REQUIRE(current_request.headers.GetHeaderValue("X-Test") == "second");
+	REQUIRE(current_request.headers.GetHeaderValues("X-Test") == vector<string> {"second"});
 
 	params.extra_headers["uSeR-aGeNt"] = "extra-agent";
 	auto override_snapshot = make_shared_ptr<HTTPRequestSnapshot>(params);
 	HTTPHeaders overridden_headers;
-	overridden_headers["USER-AGENT"] = "caller-agent";
+	overridden_headers.InsertIfAbsent("USER-AGENT", "caller-agent");
 	auto override_request = override_snapshot->CreateRequest(std::move(overridden_headers));
 	REQUIRE(override_request.headers.GetHeaderValue("User-Agent") == "extra-agent");
 
