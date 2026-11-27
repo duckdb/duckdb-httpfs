@@ -227,7 +227,7 @@ CREATE SECRET normalized_endpoint (
 		handle->Read(QueryContext(*con.context), &result, 1, 0);
 		REQUIRE(result == server.ObjectData()[0]);
 	}
-	auto glob_result = fs.Glob("s3://refresh-bucket/*.bin", FileGlobOptions::ALLOW_EMPTY, nullptr);
+	auto glob_result = fs.Glob("s3://refresh-bucket/*.bin", FileGlobOptions::ALLOW_EMPTY);
 	REQUIRE(glob_result->GetAllFiles().size() == 2);
 	S3TestHelper::WriteSinglePutPayload(con);
 	auto legacy_endpoint = server.Endpoint() + "//gateway/base/";
@@ -504,7 +504,7 @@ CREATE SECRET gcs_hmac (
 	const string gcs_path = "gcs://refresh-bucket/object.bin";
 	auto &fs = FileSystem::GetFileSystem(*con.context);
 	S3TestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
-	auto glob_result = fs.Glob("gcs://refresh-bucket/*.bin", FileGlobOptions::ALLOW_EMPTY, nullptr);
+	auto glob_result = fs.Glob("gcs://refresh-bucket/*.bin", FileGlobOptions::ALLOW_EMPTY);
 	auto listed_files = glob_result->GetAllFiles();
 	REQUIRE(listed_files.size() == 1);
 	REQUIRE(listed_files[0].extended_info);

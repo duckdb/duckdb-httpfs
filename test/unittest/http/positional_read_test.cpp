@@ -620,11 +620,10 @@ TEST_CASE("explicit S3 versions reject writes deletes and wildcard globs before 
 	REQUIRE_THROWS_WITH(fs.RemoveFile(path), Catch::Contains("s3_version_id is only supported for reading"));
 	REQUIRE_THROWS_WITH(fs.RemoveFiles({server.S3Path(), path}),
 	                    Catch::Contains("s3_version_id is only supported for reading"));
-	REQUIRE_THROWS_WITH(
-	    fs.Glob("s3://refresh-bucket/*.bin?s3_version_id=user-version", FileGlobOptions::ALLOW_EMPTY, nullptr),
-	    Catch::Contains("s3_version_id parameter cannot be used with glob patterns"));
+	REQUIRE_THROWS_WITH(fs.Glob("s3://refresh-bucket/*.bin?s3_version_id=user-version", FileGlobOptions::ALLOW_EMPTY),
+	                    Catch::Contains("s3_version_id parameter cannot be used with glob patterns"));
 	REQUIRE(server.Observations().empty());
-	auto files = fs.Glob(path, FileGlobOptions::ALLOW_EMPTY, nullptr)->GetAllFiles();
+	auto files = fs.Glob(path, FileGlobOptions::ALLOW_EMPTY)->GetAllFiles();
 	REQUIRE(files.size() == 1);
 	REQUIRE(files[0].path == path);
 	REQUIRE(server.Observations().empty());
