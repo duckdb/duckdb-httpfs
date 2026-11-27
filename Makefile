@@ -13,7 +13,7 @@ T ?= $(TEST_FLAGS) "test/*"
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 include extension-ci-tools/makefiles/vcpkg.Makefile
- 
+
 unittest_relassert:
 	build/relassert/test/run $(T)
 

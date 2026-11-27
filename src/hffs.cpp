@@ -91,7 +91,6 @@ string HuggingFaceFileSystem::ListHFRequest(const ParsedHFUrl &url, HTTPRequestS
 
 static bool Match(vector<string>::const_iterator key, vector<string>::const_iterator key_end,
                   vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end) {
-
 	while (key != key_end && pattern != pattern_end) {
 		if (*pattern == "**") {
 			if (std::next(pattern) == pattern_end) {
@@ -283,7 +282,6 @@ vector<OpenFileInfo> HuggingFaceFileSystem::Glob(const string &path, FileOpener 
 	vector<string> pattern_splits = StringUtil::Split(parsed_glob_url.path, "/");
 	vector<OpenFileInfo> result;
 	for (const auto &file : files) {
-
 		vector<string> file_splits = StringUtil::Split(file, "/");
 		bool is_match = Match(file_splits.begin(), file_splits.end(), pattern_splits.begin(), pattern_splits.end());
 
