@@ -10,6 +10,15 @@ class BaseSecret;
 struct SecretEntry;
 class ExtensionLoader;
 
+//! What a credential refresh did
+enum class S3CredentialRefresh : uint8_t {
+	NONE,
+	//! credentials changed: the provider ran, or another refresh already changed them
+	REFRESHED,
+	//! credentials an earlier refresh derived were reused; they may have expired since
+	REUSED
+};
+
 struct CreateS3SecretFunctions {
 public:
 	//! Register all CreateSecretFunctions
@@ -17,7 +26,7 @@ public:
 
 	//! Secret refreshing mechanisms
 	static CreateSecretInput GenerateRefreshSecretInfo(const SecretEntry &secret_entry, Value &refresh_info);
-	static bool TryRefreshS3Secret(ClientContext &context, const SecretEntry &secret_to_refresh);
+	static S3CredentialRefresh TryRefreshS3Secret(ClientContext &context, const SecretEntry &secret_to_refresh);
 
 protected:
 	//! Internal function to create BaseSecret from S3AuthParams

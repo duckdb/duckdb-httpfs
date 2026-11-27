@@ -95,13 +95,27 @@ struct TestS3SecretFunctions : public CreateS3SecretFunctions {
 		function.named_parameters["test_id"] = LogicalType::VARCHAR;
 		function.named_parameters["test_extra_header_name"] = LogicalType::VARCHAR;
 		function.named_parameters["test_extra_header_value"] = LogicalType::VARCHAR;
+		function.named_parameters["test_rotate_key"] = LogicalType::VARCHAR;
 	}
 
 	static unique_ptr<BaseSecret> CreateTestSecret(ClientContext &context, CreateSecretInput &input) {
-		RecordProviderCall(GetOptionString(input, "test_id"), GetOptionString(input, "key_id"));
+		auto test_id = GetOptionString(input, "test_id");
+		auto key_id = GetOptionString(input, "key_id");
+		RecordProviderCall(test_id, key_id);
 
 		auto delegated_input = input;
 		delegated_input.options.erase("test_id");
+		// each refresh returns a new key (FRESH_KEY_1, FRESH_KEY_2, ...) and stays refreshable, as REFRESH auto does
+		if (GetOptionString(delegated_input, "test_rotate_key") == "true") {
+			InsertionOrderPreservingMap<string> refresh_info;
+			for (auto &option : input.options) {
+				refresh_info.insert(option.first, option.second.ToString());
+			}
+			delegated_input.options["refresh_info"] = Value::MAP(refresh_info);
+			delegated_input.options["key_id"] = Value(StringUtil::Format(
+			    "%s_%llu", key_id, static_cast<unsigned long long>(GetProviderStats(test_id).refresh_creations)));
+		}
+		delegated_input.options.erase("test_rotate_key");
 		auto extra_header_name = GetOptionString(delegated_input, "test_extra_header_name");
 		auto extra_header_value = GetOptionString(delegated_input, "test_extra_header_value");
 		delegated_input.options.erase("test_extra_header_name");
@@ -278,6 +292,10 @@ void S3TestHelper::AssertSingleRefresh(const string &test_id) {
 	auto stats = GetProviderStats(test_id);
 	REQUIRE(stats.initial_creations == 1);
 	REQUIRE(stats.refresh_creations == 1);
+}
+
+idx_t S3TestHelper::RefreshCount(const string &test_id) {
+	return GetProviderStats(test_id).refresh_creations;
 }
 
 void S3TestHelper::AssertNoRefresh(const string &test_id) {
