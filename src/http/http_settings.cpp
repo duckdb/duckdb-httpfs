@@ -1,5 +1,6 @@
 #include "http/http_settings.hpp"
 
+#include "http/http_resolve.hpp"
 #include "http/httpfs_client.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -129,6 +130,17 @@ static void SetHTTPConnectionCaching(ClientContext &context, SetScope scope, Val
 #endif
 }
 
+static void ValidateHTTPResolve(ClientContext &context, SetScope scope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("NULL is not a valid option for http_resolve");
+	}
+	auto &entries = ListValue::GetChildren(parameter);
+	for (auto &entry : entries) {
+		HTTPResolveEntry::Validate(entry.ToString());
+	}
+	HTTPResolveEntry::CheckClient(DBConfig::GetConfig(context).GetHTTPUtil().GetName(), entries.size());
+}
+
 void HTTPSettings::Register(DBConfig &config) {
 	config.AddExtensionOption("http_timeout", "HTTP timeout read/write/connection/retry (in seconds)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(HTTPParams::DEFAULT_TIMEOUT_SECONDS));
@@ -146,6 +158,9 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR),
 	                          Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, {}, {}), SetExtraHTTPHeaders,
 	                          SetScope::GLOBAL);
+	config.AddExtensionOption(
+	    "http_resolve", "Fixed addresses for host names, as HOST:PORT:ADDRESS[,ADDRESS]... (curl client only)",
+	    LogicalType::LIST(LogicalType::VARCHAR), Value::LIST(LogicalType::VARCHAR, {}), ValidateHTTPResolve);
 	config.AddExtensionOption("force_download", "Forces upfront download of file", LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("force_download_threshold",
 	                          "Forces upfront download of files smaller than the given size in bytes",

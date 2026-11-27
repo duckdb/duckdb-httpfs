@@ -42,7 +42,7 @@ private:
 	CURLHandle();
 
 public:
-	explicit CURLHandle(bool use_native_ca);
+	explicit CURLHandle(bool use_native_ca, bool share_dns_cache = true);
 	~CURLHandle();
 
 public:
@@ -73,40 +73,44 @@ private:
 	int execute_errno = 0;
 };
 
-class CURLRequestHeaders {
-	friend class HTTPFSCurlClient;
-
+//! Owns a curl string list, which curl does not copy.
+class CURLStringList {
 public:
-	CURLRequestHeaders() = default;
-	CURLRequestHeaders(CURLRequestHeaders &&other) noexcept : headers(other.headers) {
-		other.headers = nullptr;
+	CURLStringList() = default;
+	CURLStringList(CURLStringList &&other) noexcept : list(other.list) {
+		other.list = nullptr;
 	}
-	CURLRequestHeaders &operator=(CURLRequestHeaders &&other) noexcept {
-		std::swap(headers, other.headers);
+	CURLStringList &operator=(CURLStringList &&other) noexcept {
+		std::swap(list, other.list);
 		return *this;
 	}
-	CURLRequestHeaders(const CURLRequestHeaders &) = delete;
-	CURLRequestHeaders &operator=(const CURLRequestHeaders &) = delete;
-	~CURLRequestHeaders() {
-		if (headers) {
-			curl_slist_free_all(headers);
+	CURLStringList(const CURLStringList &) = delete;
+	CURLStringList &operator=(const CURLStringList &) = delete;
+	~CURLStringList() {
+		if (list) {
+			curl_slist_free_all(list);
 		}
-		headers = nullptr;
+		list = nullptr;
+	}
+
+	curl_slist *Get() const {
+		return list;
+	}
+	void Add(const string &entry) {
+		auto new_list = curl_slist_append(list, entry.c_str());
+		if (!new_list) {
+			throw OutOfMemoryException("Failed to allocate a curl string list");
+		}
+		list = new_list;
 	}
 
 private:
-	curl_slist *Get() const {
-		return headers;
-	}
+	curl_slist *list = nullptr;
+};
 
+class CURLRequestHeaders : public CURLStringList {
 public:
-	void Add(const string &header) {
-		auto new_headers = curl_slist_append(headers, header.c_str());
-		if (!new_headers) {
-			throw OutOfMemoryException("Failed to allocate curl request headers");
-		}
-		headers = new_headers;
-	}
+	using CURLStringList::Add;
 	void Add(const string &name, const string &value) {
 		if (HTTPFSHeaderValue::IsEmpty(value)) {
 			Add(name + ";");
@@ -114,9 +118,6 @@ public:
 			Add(name + ": " + value);
 		}
 	}
-
-private:
-	curl_slist *headers = nullptr;
 };
 
 } // namespace duckdb

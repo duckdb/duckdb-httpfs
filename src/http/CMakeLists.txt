@@ -4,6 +4,7 @@ target_sources(
           httpfs_transport.cpp
           httpfs_certificates.cpp
           http_request.cpp
+          http_resolve.cpp
           http_settings.cpp
           http_request_session.cpp
           http_state.cpp)
