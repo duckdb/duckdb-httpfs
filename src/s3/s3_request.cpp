@@ -17,7 +17,9 @@
 #include "duckdb/logging/file_system_logger.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context_file_opener.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/main/settings.hpp"
 
 #include <algorithm>
 
@@ -370,12 +372,32 @@ static HTTPHeaders CreateConfiguredS3Headers(const HTTPConfiguredHeaders &config
 	return result;
 }
 
+static void VerifyCopySourceAccess(optional_ptr<DatabaseInstance> database, const S3AuthParams &auth_params,
+                                   const HTTPHeaders &headers) {
+	if (!database || Settings::Get<EnableExternalAccessSetting>(*database)) {
+		return;
+	}
+	// The request path identifies the destination. Also check access to each copy source.
+	for (const auto header_name : {"x-amz-copy-source", "x-goog-copy-source"}) {
+		if (!headers.HasHeader(header_name)) {
+			continue;
+		}
+		auto source_path = S3Url::GetCopySourcePath(headers.GetHeaderValue(header_name), auth_params);
+		if (!database->config.CanAccessFile(source_path, FileType::FILE_TYPE_REGULAR)) {
+			throw PermissionException(
+			    "Cannot access S3 copy source \"%s\" - file system operations are disabled by configuration",
+			    source_path);
+		}
+	}
+}
+
 HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const ParsedS3Url &parsed_url,
                                          S3RequestOperation operation, const S3RequestQuery &query,
                                          const S3AuthParams &auth_params, string date_now, string datetime_now,
                                          string payload_hash, string content_type, string content_md5,
                                          const HTTPConfiguredHeaders &configured_headers,
-                                         const HTTPReadCondition &read_condition) {
+                                         const HTTPReadCondition &read_condition,
+                                         optional_ptr<DatabaseInstance> database) {
 	const auto &host = parsed_url.GetHost();
 	auto &operation_info = GetOperationInfo(operation);
 	const auto &encoded_path = operation_info.target == S3RequestTarget::BUCKET ? parsed_url.GetEncodedBucketPath()
@@ -384,6 +406,7 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	auto &credentials = auth_params.GetCredentials();
 	auto &request_options = auth_params.GetRequestOptions();
 	auto headers = CreateConfiguredS3Headers(configured_headers, provider.GetType());
+	VerifyCopySourceAccess(database, auth_params, headers);
 	auto auth_type = provider.GetAuthType(auth_params);
 	// GCS rejects x-goog-if-generation-match on AWS4-HMAC-SHA256 (HMAC key) requests with 400 ExcessHeaderValues.
 	// The response generation is still validated after the read.
@@ -567,9 +590,10 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	result.http_url = operation_info.target == S3RequestTarget::BUCKET
 	                      ? parsed_s3_url.GetBucketHTTPUrl(query.WireQuery())
 	                      : parsed_s3_url.GetHTTPUrl(query.WireQuery());
+	auto database = result.http_params->http_util.Cast<HTTPFSUtil>().TryGetDatabase();
 	result.headers = S3RequestUtil::CreateHeaders(
 	    encryption_util, parsed_s3_url, spec.operation, query, result.auth_params, "", "", spec.payload_hash,
-	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition);
+	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition, database);
 	return result;
 }
 

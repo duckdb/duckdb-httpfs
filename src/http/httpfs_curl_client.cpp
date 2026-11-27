@@ -481,7 +481,7 @@ public:
 			state->RecordRequest(RequestType::GET_REQUEST);
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		request_info->url = info.url;
 
 		CURLcode res;
@@ -508,7 +508,7 @@ public:
 			state->RecordBytesSent(info.buffer_in_len);
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		if (!info.headers.HasHeader("Content-Type")) {
 			curl_headers.Add("Content-Type: " + info.content_type);
 		}
@@ -550,7 +550,7 @@ public:
 			state->RecordRequest(RequestType::HEAD_REQUEST);
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		request_info->url = info.url;
 		// transform parameters
 
@@ -585,7 +585,7 @@ public:
 		if (state) {
 			state->RecordRequest(RequestType::DELETE_REQUEST);
 		}
-		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		// transform parameters
 		request_info->url = info.url;
 
@@ -618,7 +618,7 @@ public:
 		if (state) {
 			state->RecordRequest(RequestType::OPTIONS_REQUEST);
 		}
-		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		request_info->url = info.url;
 
 		CURLcode res;
@@ -649,7 +649,7 @@ public:
 			state->RecordBytesSent(info.buffer_in_len);
 		}
 
-		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		auto curl_headers = TransformHeadersCurl(info.headers);
 		if (!info.headers.HasHeader("Content-Type")) {
 			const string content_type = "Content-Type: application/octet-stream";
 			curl_headers.Add(content_type.c_str());
@@ -732,12 +732,9 @@ private:
 		}
 	}
 
-	static CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
+	static CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map) {
 		CURLRequestHeaders curl_headers;
 		for (auto &entry : header_map) {
-			curl_headers.Add(entry.first, entry.second);
-		}
-		for (auto &entry : params.extra_headers) {
 			curl_headers.Add(entry.first, entry.second);
 		}
 		return curl_headers;

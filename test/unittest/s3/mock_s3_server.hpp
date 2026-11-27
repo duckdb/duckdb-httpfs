@@ -111,6 +111,9 @@ struct MockS3FailureConfig {
 	//! Answer this many leading ListObjectsV2 requests whose prefix starts with the given value with HTTP 503 SlowDown
 	idx_t transient_503_prefix_lists = 0;
 	string transient_503_list_prefix;
+	//! Answer this many leading ListObjectsV2 requests whose prefix starts with the given value with HTTP 500
+	idx_t internal_error_prefix_lists = 0;
+	string internal_error_list_prefix;
 	//! Answer ListObjectsV2 requests with HTTP 503 SlowDown while more than this many are in flight (0 = unlimited)
 	idx_t max_concurrent_lists = 0;
 	//! Hold each successful ListObjectsV2 response this long so that concurrent requests overlap
@@ -160,6 +163,9 @@ struct MockS3ListConfig {
 	idx_t tree_files_per_directory = 0;
 	//! Keys (objects plus common prefixes) per generated tree page
 	idx_t tree_page_size = 1000;
+	//! Give the first object of this many leading generated tree pages that carry a continuation token a Size that is
+	//! not a number, which the client cannot convert
+	idx_t tree_unconvertible_later_pages = 0;
 };
 
 struct MockS3BulkDeleteConfig {

@@ -54,6 +54,8 @@ struct S3Url {
 	static void ApplyAuthQueryParameters(const string &url, S3AuthConfig &config);
 	static ParsedS3Url Parse(const string &url, const S3AuthParams &params);
 	static string GetDisplayUrl(const string &url, const S3AuthParams &params);
+	//! Translate an unversioned S3 or GCS copy-source reference to a filesystem path
+	static string GetCopySourcePath(string source, const S3AuthParams &params);
 
 private:
 	static unordered_map<string, string> ParseQueryParameters(const string &url_query_param);
