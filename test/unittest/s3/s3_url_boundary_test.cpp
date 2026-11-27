@@ -34,7 +34,7 @@ TEST_CASE("Ordinary S3 filenames agree across direct reads glob reads and filena
 			INFO((listed->HasError() ? listed->GetError() : ""));
 			REQUIRE_FALSE(listed->HasError());
 			REQUIRE(listed->Collection().GetValue(0, 0).ToString() == server.S3Path());
-			for (const string input : {server.S3Path(), string("s3://refresh-bucket/data/**")}) {
+			for (const string &input : {server.S3Path(), string("s3://refresh-bucket/data/**")}) {
 				auto result = con.Query("SELECT filename, value FROM read_csv(?, filename=true) WHERE filename=?",
 				                        Value(input), Value(server.S3Path()));
 				INFO((result->HasError() ? result->GetError() : ""));
