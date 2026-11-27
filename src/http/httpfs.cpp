@@ -314,6 +314,7 @@ unique_ptr<HTTPFileHandle> HTTPFileSystem::CreateHandle(const OpenFileInfo &file
 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
 
 	FileOpenerInfo info(file);
+	info.file.path = file.path;
 
 	auto request_session = HTTPRequestSession::Create(opener, info);
 
