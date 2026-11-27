@@ -62,6 +62,12 @@ public:
 public:
 	//! Two-phase construction allows subclasses to customize setup
 	virtual void Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener);
+	//! Opening with FILE_FLAGS_EXCLUSIVE_CREATE: instead of Initialize, whether the file exists now (throws if that
+	//! cannot be checked)
+	enum class ExclusiveCreateCheck : uint8_t { MISSING, EXISTS };
+	virtual ExclusiveCreateCheck InitializeExclusiveCreate(const OpenFileInfo &file, optional_ptr<FileOpener> opener);
+	//! The path as error messages show it (without credentials in the URL)
+	virtual string GetDisplayPath() const;
 	const HTTPReadConfig &GetReadConfig() const;
 	const HTTPObjectVersion &GetObjectVersion() const;
 
@@ -179,6 +185,8 @@ public:
 	string PathSeparator(const string &path) override;
 
 	optional_ptr<HTTPMetadataCache> GetGlobalCache();
+	//! The error when the HEAD of an exclusive create answers neither 200 nor 404
+	virtual HTTPException GetExclusiveCreateCheckError(FileHandle &handle, const HTTPResponse &response);
 	virtual HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, RequestType request_type,
 	                                   const string &url);
 

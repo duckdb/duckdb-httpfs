@@ -27,6 +27,7 @@
 #include "duckdb/storage/external_file_cache/external_file_cache_util.hpp"
 #include "http/http_state.hpp"
 
+#include <cerrno>
 #include <map>
 #include <string>
 
@@ -305,6 +306,10 @@ const HTTPObjectVersion &HTTPFileHandle::GetObjectVersion() const {
 	return object_version;
 }
 
+string HTTPFileHandle::GetDisplayPath() const {
+	return path;
+}
+
 HTTPObjectVersion HTTPFileHandle::ReadObjectVersion(const HTTPHeaders &headers) const {
 	return {};
 }
@@ -340,13 +345,25 @@ unique_ptr<FileHandle> HTTPFileSystem::OpenFileExtended(const OpenFileInfo &file
 
 	auto handle = CreateHandle(file, flags, opener);
 
-	if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
-		handle->write_overwrite_mode = true;
-	}
-
-	handle->Initialize(file, opener);
-	if (handle->file_not_found) {
-		return nullptr;
+	if (flags.OpenForWriting() && flags.ExclusiveCreate()) {
+		// FILE_FLAGS_EXCLUSIVE_CREATE, as O_CREAT | O_EXCL: an existing file gives nullptr (FILE_FLAGS_NULL_IF_EXISTS)
+		// or an error, with errno as the local file system reports it, so that callers can match it by value
+		if (handle->InitializeExclusiveCreate(file, opener) == HTTPFileHandle::ExclusiveCreateCheck::EXISTS) {
+			if (flags.ReturnNullIfExists()) {
+				return nullptr;
+			}
+			throw IOException({{"errno", std::to_string(EEXIST)}},
+			                  "Unable to open URL \"%s\" for exclusive create: it already exists",
+			                  handle->GetDisplayPath());
+		}
+	} else {
+		if (flags.OpenForWriting() && !flags.OpenForAppending() && !flags.OpenForReading()) {
+			handle->write_overwrite_mode = true;
+		}
+		handle->Initialize(file, opener);
+		if (handle->file_not_found) {
+			return nullptr;
+		}
 	}
 
 	DUCKDB_LOG_FILE_SYSTEM_OPEN((*handle));
@@ -1235,6 +1252,34 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 			cache->Insert(path, GetCacheEntry());
 		}
 	}
+}
+
+// Whether the file exists now: a HEAD, not the metadata cache or what this query has seen of the file. On S3 and R2
+// this is the early answer only, because the write is conditional too (If-None-Match); on GCS it is the only check.
+HTTPFileHandle::ExclusiveCreateCheck HTTPFileHandle::InitializeExclusiveCreate(const OpenFileInfo &file,
+                                                                               optional_ptr<FileOpener> opener) {
+	D_ASSERT(flags.OpenForWriting() && flags.ExclusiveCreate());
+	auto &hfs = file_system.Cast<HTTPFileSystem>();
+	InitializeRequestState(file, opener);
+	auto response = hfs.HeadRequest(*this, path, {});
+	if (response->status == HTTPStatusCode::OK_200) {
+		return ExclusiveCreateCheck::EXISTS;
+	}
+	if (response->status != HTTPStatusCode::NotFound_404) {
+		throw hfs.GetExclusiveCreateCheckError(*this, *response);
+	}
+	length = 0;
+	initialized = true;
+	FinalizeReadConfig();
+	auto cache = TryGetMetadataCache(opener, hfs);
+	if (cache) {
+		cache->Erase(path);
+	}
+	return ExclusiveCreateCheck::MISSING;
+}
+
+HTTPException HTTPFileSystem::GetExclusiveCreateCheckError(FileHandle &handle, const HTTPResponse &response) {
+	return GetHTTPError(handle, response, RequestType::HEAD_REQUEST, handle.path);
 }
 
 void HTTPFileHandle::Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) {

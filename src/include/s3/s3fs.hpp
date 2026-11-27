@@ -66,6 +66,8 @@ public:
 public:
 	void Close() override;
 	void Initialize(const OpenFileInfo &file, optional_ptr<FileOpener> opener) override;
+	ExclusiveCreateCheck InitializeExclusiveCreate(const OpenFileInfo &file, optional_ptr<FileOpener> opener) override;
+	string GetDisplayPath() const override;
 	void FinalizeUpload();
 	void AbortUpload();
 
@@ -78,12 +80,16 @@ protected:
 
 private:
 	void SetRegion(const string &region);
+	//! The client context and credential refresh for this handle's requests
+	void PrepareRequestSession(optional_ptr<FileOpener> opener);
 	UploadClaim ClaimUpload(bool write);
 	void ReleaseUpload();
 
 private:
 	//! Immutable object selection; response metadata cannot replace an explicit version
 	const HTTPObjectVersion requested_version;
+	//! An exclusive create on GCS: checked at open, written without a condition
+	bool unconditional_exclusive_create = false;
 
 	//! Upload lifetime and concurrent callers
 	annotated_mutex upload_lock;
@@ -123,13 +129,18 @@ public:
 	                                         data_ptr_t buffer_out, idx_t buffer_out_len) override;
 	S3RequestResult PostRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
 	                            string &buffer_out, const_data_ptr_t buffer_in, idx_t buffer_in_len,
-	                            const S3RequestQuery &query = S3RequestQuery());
+	                            const S3RequestQuery &query = S3RequestQuery(),
+	                            const S3CreateCondition &create_condition = S3CreateCondition());
 	S3RequestResult PutRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
 	                           const_data_ptr_t buffer_in, idx_t buffer_in_len,
-	                           const S3RequestQuery &query = S3RequestQuery());
+	                           const S3RequestQuery &query = S3RequestQuery(),
+	                           const S3CreateCondition &create_condition = S3CreateCondition());
+	//! A HEAD of the object outside a file handle (an upload checks what its conditional write found)
+	S3RequestResult HeadRequest(HTTPRequestSession &session, const string &s3_url);
 	S3RequestResult DeleteRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
 	                              const S3RequestQuery &query);
 	unique_ptr<HTTPResponse> DeleteRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) override;
+	HTTPException GetExclusiveCreateCheckError(FileHandle &handle, const HTTPResponse &response) override;
 	HTTPException GetHTTPError(FileHandle &, const HTTPResponse &response, RequestType request_type,
 	                           const string &url) override;
 

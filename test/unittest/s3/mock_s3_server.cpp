@@ -340,6 +340,10 @@ public:
 	    : config(std::move(config_p)), live_generation(config.object.generation),
 	      server_owner(CreateServer(config.use_ssl)), server(*server_owner) {
 		uploaded_object = config.upload.initial_published_object;
+		{
+			annotated_lock_guard<annotated_mutex> lock(conditional_lock);
+			conditional_state = config.conditional.initial;
+		}
 		remaining_put_failures = config.failures.transient_put_failures;
 		remaining_get_failures = config.failures.transient_get_failures;
 		remaining_range_behavior_requests = config.range.behavior_requests;
@@ -1050,7 +1054,233 @@ public:
 		Record(request, response.status);
 	}
 
+	//! Conditional store (config.conditional)
+	struct ConditionalUpload {
+		std::map<string, string> metadata;
+		std::map<idx_t, string> parts;
+	};
+
+	static std::map<string, string> UserMetadata(const httplib::Request &request) {
+		std::map<string, string> result;
+		for (const auto &header : request.headers) {
+			if (StringUtil::CIStartsWith(header.first, "x-amz-meta-")) {
+				result[StringUtil::Lower(header.first)] = header.second;
+			}
+		}
+		return result;
+	}
+
+	static string ErrorDocument(const string &code) {
+		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>" + code + "</Code><Message>" + code +
+		       "</Message></Error>";
+	}
+
+	void SendConditional(const httplib::Request &request, httplib::Response &response, int status,
+	                     const string &code = string()) const {
+		if (status < 0) {
+			response.status = 200;
+			response.set_content_provider(1, "application/xml",
+			                              [](size_t, size_t, httplib::DataSink &) { return false; });
+			Record(request, -1);
+			return;
+		}
+		response.status = status;
+		if (!code.empty()) {
+			response.set_content(ErrorDocument(code), "application/xml");
+		}
+		Record(request, status);
+	}
+
+	//! Whether If-None-Match: * refuses a publish now
+	bool ConditionRefuses(const httplib::Request &request) const DUCKDB_REQUIRES(conditional_lock) {
+		return conditional_state.exists && GetHeader(request, "If-None-Match") == "*";
+	}
+
+	//! A scripted or counted fault for a publish, if one is due; `publish` publishes what the condition allows
+	bool SendPublishFault(const httplib::Request &request, httplib::Response &response,
+	                      const std::function<void()> &publish) DUCKDB_REQUIRES(conditional_lock) {
+		auto &state = conditional_state;
+		if (!state.publish_script.empty()) {
+			auto answer = state.publish_script.front();
+			state.publish_script.erase(state.publish_script.begin());
+			if (answer.publish && !ConditionRefuses(request)) {
+				publish();
+			}
+			SendConditional(request, response, answer.status, answer.code);
+			return true;
+		}
+		if (state.conflict_answers > 0) {
+			state.conflict_answers--;
+			SendConditional(request, response, 409, "ConditionalRequestConflict");
+			return true;
+		}
+		if (state.publish_500_answers > 0) {
+			state.publish_500_answers--;
+			if (!ConditionRefuses(request)) {
+				publish();
+			}
+			SendConditional(request, response, 500, "InternalError");
+			return true;
+		}
+		return false;
+	}
+
+	void ConditionalHead(const httplib::Request &request, httplib::Response &response, bool head)
+	    DUCKDB_EXCLUDES(conditional_lock) {
+		annotated_lock_guard<annotated_mutex> lock(conditional_lock);
+		auto &state = conditional_state;
+		if (head && !state.head_statuses.empty()) {
+			auto status = state.head_statuses.front();
+			state.head_statuses.erase(state.head_statuses.begin());
+			if (status != 0) {
+				SendConditional(request, response, status);
+				return;
+			}
+		}
+		if (!state.exists) {
+			SendConditional(request, response, 404, head ? string() : "NoSuchKey");
+			return;
+		}
+		response.set_header("ETag", "\"conditional-object\"");
+		response.set_header("Last-Modified", "Thu, 19 Nov 2026 12:00:00 GMT");
+		for (const auto &entry : state.metadata) {
+			response.set_header(entry.first, entry.second);
+		}
+		response.status = 200;
+		if (head) {
+			response.set_header("Content-Length", std::to_string(state.body.size()));
+		} else {
+			response.set_content(state.body, "application/octet-stream");
+		}
+		Record(request, 200);
+	}
+
+	void ConditionalPut(const httplib::Request &request, httplib::Response &response)
+	    DUCKDB_EXCLUDES(conditional_lock) {
+		annotated_lock_guard<annotated_mutex> lock(conditional_lock);
+		auto &state = conditional_state;
+		if (request.has_param("partNumber")) {
+			auto upload = conditional_uploads.find(GetParameter(request, "uploadId"));
+			if (upload == conditional_uploads.end()) {
+				SendConditional(request, response, 404, "NoSuchUpload");
+				return;
+			}
+			auto part = std::stoull(GetParameter(request, "partNumber"));
+			upload->second.parts[part] = request.body;
+			response.set_header("ETag", StringUtil::Format("\"part-%llu\"", part));
+			SendConditional(request, response, 200);
+			return;
+		}
+		auto publish = [&]() DUCKDB_REQUIRES(conditional_lock) {
+			state.exists = true;
+			state.body = request.body;
+			state.metadata = UserMetadata(request);
+		};
+		if (SendPublishFault(request, response, publish)) {
+			return;
+		}
+		if (ConditionRefuses(request)) {
+			SendConditional(request, response, 412, "PreconditionFailed");
+			return;
+		}
+		publish();
+		if (state.drop_put_answers > 0) {
+			state.drop_put_answers--;
+			if (state.overwrite_after_drop) {
+				state.body = "theirs";
+				state.metadata = {{"x-amz-meta-duckdb-exclusive-create", "another-token"}};
+			}
+			SendConditional(request, response, -1);
+			return;
+		}
+		response.set_header("ETag", "\"conditional-object\"");
+		SendConditional(request, response, 200);
+	}
+
+	void ConditionalPost(const httplib::Request &request, httplib::Response &response)
+	    DUCKDB_EXCLUDES(conditional_lock) {
+		annotated_lock_guard<annotated_mutex> lock(conditional_lock);
+		auto &state = conditional_state;
+		if (request.has_param("uploads")) {
+			auto id = "conditional-upload-" + std::to_string(++conditional_upload_count);
+			conditional_uploads[id].metadata = UserMetadata(request);
+			response.status = 200;
+			response.set_content("<?xml version=\"1.0\" encoding=\"UTF-8\"?><InitiateMultipartUploadResult><UploadId>" +
+			                         id + "</UploadId></InitiateMultipartUploadResult>",
+			                     "application/xml");
+			Record(request, 200);
+			return;
+		}
+		auto upload = conditional_uploads.find(GetParameter(request, "uploadId"));
+		auto publish = [&]() DUCKDB_REQUIRES(conditional_lock) {
+			if (upload == conditional_uploads.end()) {
+				return;
+			}
+			state.exists = true;
+			state.body.clear();
+			for (const auto &part : upload->second.parts) {
+				state.body += part.second;
+			}
+			state.metadata = upload->second.metadata;
+			conditional_uploads.erase(upload);
+			upload = conditional_uploads.end();
+		};
+		if (SendPublishFault(request, response, publish)) {
+			return;
+		}
+		if (upload == conditional_uploads.end()) {
+			SendConditional(request, response, 404, "NoSuchUpload");
+			return;
+		}
+		if (ConditionRefuses(request)) {
+			SendConditional(request, response, 412, "PreconditionFailed");
+			return;
+		}
+		publish();
+		if (state.fail_completion_answers > 0) {
+			state.fail_completion_answers--;
+			SendConditional(request, response, 500, "InternalError");
+			return;
+		}
+		response.status = 200;
+		response.set_content("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult><ETag>"
+		                     "\"conditional-object\"</ETag></CompleteMultipartUploadResult>",
+		                     "application/xml");
+		Record(request, 200);
+	}
+
+	void ConditionalDelete(const httplib::Request &request, httplib::Response &response)
+	    DUCKDB_EXCLUDES(conditional_lock) {
+		annotated_lock_guard<annotated_mutex> lock(conditional_lock);
+		if (request.has_param("uploadId")) {
+			conditional_uploads.erase(GetParameter(request, "uploadId"));
+		} else {
+			conditional_state = MockS3ConditionalState();
+		}
+		SendConditional(request, response, 204);
+	}
+
+	MockS3ConditionalState ConditionalState() const DUCKDB_EXCLUDES(conditional_lock) {
+		annotated_lock_guard<annotated_mutex> lock(conditional_lock);
+		return conditional_state;
+	}
+
+	void UpdateConditional(const std::function<void(MockS3ConditionalState &)> &update)
+	    DUCKDB_EXCLUDES(conditional_lock) {
+		annotated_lock_guard<annotated_mutex> lock(conditional_lock);
+		update(conditional_state);
+	}
+
+	idx_t OpenConditionalUploads() const DUCKDB_EXCLUDES(conditional_lock) {
+		annotated_lock_guard<annotated_mutex> lock(conditional_lock);
+		return conditional_uploads.size();
+	}
+
 	void HandleObjectPut(const httplib::Request &request, httplib::Response &response) {
+		if (config.conditional.enabled) {
+			ConditionalPut(request, response);
+			return;
+		}
 		auto part_number = GetPartNumber(request);
 		unique_ptr<ActivePartUpload> active_upload;
 		if (part_number.IsValid()) {
@@ -1076,6 +1306,10 @@ public:
 	}
 
 	void HandleObjectPost(const httplib::Request &request, httplib::Response &response) {
+		if (config.conditional.enabled) {
+			ConditionalPost(request, response);
+			return;
+		}
 		if (ShouldRejectStaleCredentials(request)) {
 			SendAuthFailure(request, response);
 			return;
@@ -1106,6 +1340,10 @@ public:
 	}
 
 	void HandleObjectDelete(const httplib::Request &request, httplib::Response &response) {
+		if (config.conditional.enabled) {
+			ConditionalDelete(request, response);
+			return;
+		}
 		if (ShouldRejectStaleCredentials(request)) {
 			SendAuthFailure(request, response);
 			return;
@@ -1341,6 +1579,10 @@ public:
 				Record(request, response.status);
 				return httplib::Server::HandlerResponse::Handled;
 			}
+			if (config.conditional.enabled) {
+				ConditionalHead(request, response, true);
+				return httplib::Server::HandlerResponse::Handled;
+			}
 			if (config.metadata.redirect_head && !request.has_param("redirected")) {
 				response.set_redirect(config.metadata.redirect_location.empty() ? path + "?redirected=true"
 				                                                                : config.metadata.redirect_location);
@@ -1383,6 +1625,10 @@ public:
 		});
 
 		server.Get(route_path, [this](const httplib::Request &request, httplib::Response &response) {
+			if (config.conditional.enabled) {
+				ConditionalHead(request, response, false);
+				return;
+			}
 			auto generation = GetGeneration(request);
 			auto object_data = GetObjectData(generation);
 			if (!object_data) {
@@ -1711,6 +1957,12 @@ public:
 	mutable annotated_mutex observation_lock;
 	mutable vector<MockS3RequestObservation> observations DUCKDB_GUARDED_BY(observation_lock);
 
+	//! Conditional store state (config.conditional)
+	mutable annotated_mutex conditional_lock;
+	MockS3ConditionalState conditional_state DUCKDB_GUARDED_BY(conditional_lock);
+	std::map<string, ConditionalUpload> conditional_uploads DUCKDB_GUARDED_BY(conditional_lock);
+	idx_t conditional_upload_count DUCKDB_GUARDED_BY(conditional_lock) = 0;
+
 	//! Multipart upload state
 	mutable annotated_mutex upload_lock;
 	map<idx_t, UploadedPart> uploaded_parts DUCKDB_GUARDED_BY(upload_lock);
@@ -1818,6 +2070,18 @@ bool MockS3Server::WaitForFullGet() {
 
 void MockS3Server::ReleaseFullGet() {
 	impl->ReleaseFullGet();
+}
+
+MockS3ConditionalState MockS3Server::ConditionalState() const {
+	return impl->ConditionalState();
+}
+
+void MockS3Server::UpdateConditional(const std::function<void(MockS3ConditionalState &)> &update) {
+	impl->UpdateConditional(update);
+}
+
+idx_t MockS3Server::OpenConditionalUploads() const {
+	return impl->OpenConditionalUploads();
 }
 
 string MockS3DigestBody(const string &body) {
