@@ -99,8 +99,10 @@ private:
 		child_list_t<Value> struct_fields;
 		for (const auto &option : input.options) {
 			struct_fields.emplace_back(StringUtil::Lower(option.first), option.second);
-			if (StringUtil::CIEquals(option.first, "sse_c_key")) {
-				secret->redact_keys.insert("refresh_info");
+			for (const auto key : REFRESH_INFO_REDACTING_KEYS) {
+				if (StringUtil::CIEquals(option.first, key)) {
+					secret->redact_keys.insert("refresh_info");
+				}
 			}
 		}
 		secret->secret_map["refresh_info"] = Value::STRUCT(struct_fields);
@@ -111,11 +113,16 @@ private:
 			throw InvalidInputException("Can not set `refresh` and `refresh_info` at the same time");
 		}
 		refresh = true;
-		if (MapContainsKey(value, "sse_c_key")) {
-			secret->redact_keys.insert("refresh_info");
+		for (const auto key : REFRESH_INFO_REDACTING_KEYS) {
+			if (MapContainsKey(value, key)) {
+				secret->redact_keys.insert("refresh_info");
+			}
 		}
 		secret->secret_map["refresh_info"] = MapToStruct(value);
 	}
+
+	//! Options whose values must not be visible through a copy kept in refresh_info
+	static constexpr const char *REFRESH_INFO_REDACTING_KEYS[] = {"sse_c_key", "signer_headers"};
 
 private:
 	CreateSecretInput &input;

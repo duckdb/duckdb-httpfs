@@ -27,7 +27,7 @@ enum class S3CompatibilityProfile : uint8_t { S3, GCS, R2 };
 
 enum class S3UrlSchemeOrigin : uint8_t { BUILTIN, ALIAS };
 
-enum class S3AuthType : uint8_t { ANONYMOUS, SIGV4, BEARER };
+enum class S3AuthType : uint8_t { ANONYMOUS, SIGV4, BEARER, REMOTE_SIGNED };
 
 enum class S3URLStyle : uint8_t { VIRTUAL_HOSTED, PATH };
 
@@ -72,7 +72,7 @@ struct S3SecretConfig {
 	static constexpr const char *AWS_SECRET_TYPE = "aws";
 
 	static const array<const char *, 4> &SecretTypes();
-	static const array<const char *, 14> &CredentialMaterialKeys();
+	static const array<const char *, 17> &CredentialMaterialKeys();
 
 	static vector<string> DefaultSecretScope(const string &secret_type);
 	static void SetSecretNamedParameters(const string &secret_type, CreateSecretFunction &function);

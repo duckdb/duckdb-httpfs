@@ -274,11 +274,17 @@ S3RequestResult S3FileSystem::RunS3BulkDeleteRequest(HTTPRequestSession &session
 	auto content_md5 = GetS3DeleteContentMD5(body);
 	return S3RequestExecutor::RunSession(
 	    GetEncryptionUtil(), session,
-	    S3RequestSpec {secret_lookup_url, S3RequestOperation::DELETE_OBJECTS,
+	    S3RequestSpec {secret_lookup_url,
+	                   S3RequestOperation::DELETE_OBJECTS,
 	                   [&](const ParsedS3Url &) {
 		                   return S3RequestQuery({{"delete", ""}});
 	                   },
-	                   payload_hash, "application/xml", content_md5},
+	                   payload_hash,
+	                   "application/xml",
+	                   content_md5,
+	                   {},
+	                   {},
+	                   body},
 	    [&](S3RequestData &request_data) {
 		    auto maximum_key_count = request_data.auth_params.GetProvider().GetBulkDeleteMaxBatchSize();
 		    if (key_count > maximum_key_count) {
